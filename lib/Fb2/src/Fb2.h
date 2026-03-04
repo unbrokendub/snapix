@@ -23,7 +23,7 @@ class Fb2 {
  public:
   struct TocItem {
     std::string title;
-    int sectionIndex;  // Sequential section number (0-based)
+    int sectionIndex = -1;  // Sequential section number (0-based)
   };
 
  private:
@@ -54,8 +54,11 @@ class Fb2 {
   bool inBody = false;
   int bodyCount_ = 0;
 
-  // TOC extraction state
+  // TOC extraction state (tocItems_ used only during initial parse, then freed)
   std::vector<TocItem> tocItems_;
+  // Lazy TOC: compact LUT of file offsets into meta.bin (4 bytes/entry vs ~68 bytes/entry)
+  std::vector<uint32_t> tocLut_;
+  uint16_t tocItemCount_ = 0;
   int sectionCounter_ = 0;
   bool inSectionTitle_ = false;
   int sectionTitleDepth_ = 0;
@@ -71,6 +74,7 @@ class Fb2 {
   void postProcessMetadata();
   bool loadMetaCache();
   bool saveMetaCache() const;
+  std::string metaCachePath() const;
 
  public:
   explicit Fb2(std::string filepath, const std::string& cacheDir);
@@ -126,7 +130,7 @@ class Fb2 {
   // Check if file is loaded
   bool isLoaded() const { return loaded; }
 
-  // TOC access
-  uint16_t tocCount() const { return static_cast<uint16_t>(tocItems_.size()); }
-  const TocItem& getTocItem(uint16_t index) const { return tocItems_[index]; }
+  // TOC access (lazy: reads from cache file on demand)
+  uint16_t tocCount() const { return tocItemCount_; }
+  TocItem getTocItem(uint16_t index) const;
 };

@@ -21,6 +21,8 @@ constexpr uint8_t kMetaCacheVersion = 2;
 constexpr char kMetaCacheFile[] = "/meta.bin";
 }  // namespace
 
+std::string Fb2::metaCachePath() const { return cachePath + kMetaCacheFile; }
+
 Fb2::Fb2(std::string filepath, const std::string& cacheDir)
     : filepath(std::move(filepath)), fileSize(0), loaded(false) {
   // Create cache key based on filepath (same as Epub/Xtc/Txt)
@@ -81,6 +83,12 @@ bool Fb2::load() {
   }
 
   saveMetaCache();
+
+  // Free TOC strings, rebuild as compact LUT from cache
+  std::vector<TocItem>().swap(tocItems_);
+  if (!loadMetaCache()) {
+    LOG_ERR(TAG, "Failed to reload meta cache for LUT");
+  }
 
   loaded = true;
   LOG_INF(TAG, "Loaded FB2: %s (title: '%s', author: '%s')", filepath.c_str(), title.c_str(), author.c_str());
@@ -464,9 +472,8 @@ bool Fb2::generateThumbBmp() const {
 }
 
 bool Fb2::loadMetaCache() {
-  const std::string metaPath = cachePath + kMetaCacheFile;
   FsFile file;
-  if (!SdMan.openFileForRead("FB2", metaPath, file)) {
+  if (!SdMan.openFileForRead("FB2", metaCachePath(), file)) {
     return false;
   }
 
@@ -504,21 +511,19 @@ bool Fb2::loadMetaCache() {
     return false;
   }
 
-  tocItems_.clear();
-  tocItems_.reserve(tocItemCount);
+  // Build compact LUT: record file offset for each TOC entry, skip the actual data
+  tocItemCount_ = tocItemCount;
+  tocLut_.clear();
+  tocLut_.reserve(tocItemCount);
   for (uint16_t i = 0; i < tocItemCount; i++) {
-    TocItem item;
-    if (!serialization::readString(file, item.title)) {
+    tocLut_.push_back(static_cast<uint32_t>(file.position()));
+    int16_t dummyIdx;
+    if (!serialization::skipString(file) || !serialization::readPodChecked(file, dummyIdx)) {
+      tocLut_.clear();
+      tocItemCount_ = 0;
       file.close();
       return false;
     }
-    int16_t idx;
-    if (!serialization::readPodChecked(file, idx)) {
-      file.close();
-      return false;
-    }
-    item.sectionIndex = idx;
-    tocItems_.push_back(std::move(item));
   }
 
   file.close();
@@ -528,9 +533,8 @@ bool Fb2::loadMetaCache() {
 bool Fb2::saveMetaCache() const {
   setupCacheDir();
 
-  const std::string metaPath = cachePath + kMetaCacheFile;
   FsFile file;
-  if (!SdMan.openFileForWrite("FB2", metaPath, file)) {
+  if (!SdMan.openFileForWrite("FB2", metaCachePath(), file)) {
     LOG_ERR(TAG, "Failed to create meta cache");
     return false;
   }
@@ -558,6 +562,23 @@ bool Fb2::saveMetaCache() const {
   file.close();
   LOG_INF(TAG, "Saved meta cache (%u TOC items)", tocItemCount);
   return true;
+}
+
+Fb2::TocItem Fb2::getTocItem(uint16_t index) const {
+  TocItem item;
+  if (index >= tocItemCount_) return item;
+
+  FsFile file;
+  if (!SdMan.openFileForRead("FB2", metaCachePath(), file)) return item;
+
+  file.seek(tocLut_[index]);
+  serialization::readString(file, item.title);
+  int16_t idx;
+  if (serialization::readPodChecked(file, idx)) {
+    item.sectionIndex = idx;
+  }
+  file.close();
+  return item;
 }
 
 size_t Fb2::readContent(uint8_t* buffer, size_t offset, size_t length) const {

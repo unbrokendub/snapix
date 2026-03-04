@@ -78,6 +78,17 @@ static void writeString(FsFile& file, const std::string& s) {
   return true;
 }
 
+[[nodiscard]] static bool skipString(FsFile& file) {
+  uint32_t len;
+  if (file.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != sizeof(len)) {
+    return false;
+  }
+  if (len > 65536) {
+    return false;
+  }
+  return len == 0 || file.seekCur(len);
+}
+
 template <typename T>
 static void readPodValidated(FsFile& file, T& value, T maxValue) {
   T temp;

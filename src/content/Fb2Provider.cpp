@@ -67,7 +67,7 @@ Result<TocEntry> Fb2Provider::getTocEntry(uint16_t index) const {
     return Err<TocEntry>(Error::InvalidState);
   }
 
-  const Fb2::TocItem& item = fb2->getTocItem(index);
+  const Fb2::TocItem item = fb2->getTocItem(index);
 
   TocEntry entry;
   strncpy(entry.title, item.title.c_str(), sizeof(entry.title) - 1);

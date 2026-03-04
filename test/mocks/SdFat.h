@@ -64,6 +64,13 @@ class FsFile {
     return true;
   }
 
+  bool seekCur(int offset) {
+    const auto newPos = static_cast<int64_t>(pos_) + offset;
+    if (newPos < 0 || static_cast<size_t>(newPos) > buffer_.size()) return false;
+    pos_ = static_cast<size_t>(newPos);
+    return true;
+  }
+
   int read() {
     if (!isOpen_ || pos_ >= buffer_.size()) return -1;
     return static_cast<unsigned char>(buffer_[pos_++]);

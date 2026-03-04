@@ -355,7 +355,80 @@ int main() {
     runner.expectEq(c, rc, "Sequential PODs: uint32_t");
   }
 
-  // Test 25: Multiple strings in sequence
+  // ============================================
+  // skipString() tests
+  // ============================================
+
+  // Test 25: skipString basic roundtrip
+  {
+    FsFile file;
+    file.setBuffer("");
+
+    serialization::writeString(file, std::string("Hello"));
+    serialization::writeString(file, std::string("World"));
+
+    file.seek(0);
+    bool ok = serialization::skipString(file);
+    runner.expectTrue(ok, "skipString: skips first string");
+
+    std::string second;
+    bool readOk = serialization::readString(file, second);
+    runner.expectTrue(readOk, "skipString: can read second string after skip");
+    runner.expectEqual("World", second, "skipString: second string value correct");
+  }
+
+  // Test 26: skipString empty string
+  {
+    FsFile file;
+    file.setBuffer("");
+
+    serialization::writeString(file, std::string(""));
+    serialization::writeString(file, std::string("After"));
+
+    file.seek(0);
+    bool ok = serialization::skipString(file);
+    runner.expectTrue(ok, "skipString empty: skips zero-length string");
+
+    std::string after;
+    serialization::readString(file, after);
+    runner.expectEqual("After", after, "skipString empty: reads next correctly");
+  }
+
+  // Test 27: skipString rejects length > 65536
+  {
+    FsFile file;
+    std::string data;
+    uint32_t badLen = 70000;
+    data.append(reinterpret_cast<const char*>(&badLen), sizeof(badLen));
+    file.setBuffer(data);
+
+    bool ok = serialization::skipString(file);
+    runner.expectFalse(ok, "skipString: rejects length > 65536");
+  }
+
+  // Test 28: skipString truncated (no length field)
+  {
+    FsFile file;
+    file.setBuffer("\x01\x02");  // Only 2 bytes, need 4 for uint32_t length
+
+    bool ok = serialization::skipString(file);
+    runner.expectFalse(ok, "skipString: fails on truncated length");
+  }
+
+  // Test 29: skipString with data shorter than declared length
+  {
+    FsFile file;
+    std::string data;
+    uint32_t len = 100;
+    data.append(reinterpret_cast<const char*>(&len), sizeof(len));
+    data.append("short", 5);  // Only 5 bytes but declared 100
+    file.setBuffer(data);
+
+    bool ok = serialization::skipString(file);
+    runner.expectFalse(ok, "skipString: fails when data shorter than declared");
+  }
+
+  // Test 30: Multiple strings in sequence
   {
     std::stringstream ss;
     serialization::writeString(ss, "First");

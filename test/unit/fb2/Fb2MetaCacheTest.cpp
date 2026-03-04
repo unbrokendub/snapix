@@ -100,6 +100,64 @@ static bool readMetaCache(FsFile& file, MetaCacheData& data) {
   return true;
 }
 
+// Build a compact LUT of file offsets (mirrors Fb2::loadMetaCache LUT logic)
+struct MetaCacheLut {
+  std::string title;
+  std::string author;
+  std::string coverPath;
+  uint32_t fileSize = 0;
+  uint16_t sectionCount = 0;
+  uint16_t tocItemCount = 0;
+  std::vector<uint32_t> tocLut;
+};
+
+static bool buildMetaCacheLut(FsFile& file, MetaCacheLut& lut) {
+  uint8_t version;
+  if (!serialization::readPodChecked(file, version) || version != kMetaCacheVersion) {
+    return false;
+  }
+
+  if (!serialization::readString(file, lut.title) || !serialization::readString(file, lut.author) ||
+      !serialization::readString(file, lut.coverPath)) {
+    return false;
+  }
+
+  if (!serialization::readPodChecked(file, lut.fileSize)) return false;
+  if (!serialization::readPodChecked(file, lut.sectionCount)) return false;
+
+  uint16_t tocItemCount;
+  if (!serialization::readPodChecked(file, tocItemCount)) return false;
+
+  lut.tocItemCount = tocItemCount;
+  lut.tocLut.clear();
+  lut.tocLut.reserve(tocItemCount);
+  for (uint16_t i = 0; i < tocItemCount; i++) {
+    lut.tocLut.push_back(static_cast<uint32_t>(file.position()));
+    int16_t dummyIdx;
+    if (!serialization::skipString(file) || !serialization::readPodChecked(file, dummyIdx)) {
+      lut.tocLut.clear();
+      lut.tocItemCount = 0;
+      return false;
+    }
+  }
+  return true;
+}
+
+// Read a single TOC item by LUT offset (mirrors Fb2::getTocItem)
+static TocItem readTocItemByLut(FsFile& file, const MetaCacheLut& lut, uint16_t index) {
+  TocItem item;
+  item.sectionIndex = -1;
+  if (index >= lut.tocItemCount) return item;
+
+  file.seek(lut.tocLut[index]);
+  serialization::readString(file, item.title);
+  int16_t idx;
+  if (serialization::readPodChecked(file, idx)) {
+    item.sectionIndex = idx;
+  }
+  return item;
+}
+
 int main() {
   TestUtils::TestRunner runner("Fb2 Meta Cache");
 
@@ -285,6 +343,139 @@ int main() {
     bool ok = readMetaCache(file, data);
     runner.expectTrue(ok, "large_filesize: reads successfully");
     runner.expectEq(static_cast<uint32_t>(0xFFFFFFFE), data.fileSize, "large_filesize: max-1 value preserved");
+  }
+
+  // Test 11: LUT-based lazy loading roundtrip
+  {
+    FsFile file;
+    file.setBuffer("");
+
+    std::vector<TocItem> toc = {{"Chapter 1", 0}, {"Chapter 2", 1}, {"Chapter 3", 2}};
+    writeMetaCache(file, "Lazy Book", "Jane Doe", "/cover.png", 54321, 3, toc);
+
+    file.seek(0);
+    MetaCacheLut lut;
+    bool ok = buildMetaCacheLut(file, lut);
+    runner.expectTrue(ok, "lut_roundtrip: builds LUT successfully");
+    runner.expectEqual("Lazy Book", lut.title, "lut_roundtrip: title");
+    runner.expectEqual("Jane Doe", lut.author, "lut_roundtrip: author");
+    runner.expectEq(static_cast<uint16_t>(3), lut.tocItemCount, "lut_roundtrip: tocItemCount");
+    runner.expectEq(static_cast<size_t>(3), lut.tocLut.size(), "lut_roundtrip: LUT size");
+
+    // Read individual items via LUT
+    TocItem item0 = readTocItemByLut(file, lut, 0);
+    runner.expectEqual("Chapter 1", item0.title, "lut_roundtrip: item 0 title");
+    runner.expectEq(0, item0.sectionIndex, "lut_roundtrip: item 0 index");
+
+    TocItem item2 = readTocItemByLut(file, lut, 2);
+    runner.expectEqual("Chapter 3", item2.title, "lut_roundtrip: item 2 title");
+    runner.expectEq(2, item2.sectionIndex, "lut_roundtrip: item 2 index");
+
+    // Read middle item
+    TocItem item1 = readTocItemByLut(file, lut, 1);
+    runner.expectEqual("Chapter 2", item1.title, "lut_roundtrip: item 1 title");
+    runner.expectEq(1, item1.sectionIndex, "lut_roundtrip: item 1 index");
+  }
+
+  // Test 12: LUT with empty TOC
+  {
+    FsFile file;
+    file.setBuffer("");
+
+    writeMetaCache(file, "No TOC", "Author", "", 1000, 0, {});
+
+    file.seek(0);
+    MetaCacheLut lut;
+    bool ok = buildMetaCacheLut(file, lut);
+    runner.expectTrue(ok, "lut_empty: builds LUT successfully");
+    runner.expectEq(static_cast<uint16_t>(0), lut.tocItemCount, "lut_empty: zero items");
+    runner.expectEq(static_cast<size_t>(0), lut.tocLut.size(), "lut_empty: empty LUT");
+
+    // Out-of-range access returns default
+    TocItem item = readTocItemByLut(file, lut, 0);
+    runner.expectEq(-1, item.sectionIndex, "lut_empty: out-of-range returns default");
+  }
+
+  // Test 13: LUT with many items and random access
+  {
+    FsFile file;
+    file.setBuffer("");
+
+    std::vector<TocItem> toc;
+    for (int i = 0; i < 100; i++) {
+      toc.push_back({"Section " + std::to_string(i + 1), i});
+    }
+    writeMetaCache(file, "Big Book", "Author", "", 5000000, 100, toc);
+
+    file.seek(0);
+    MetaCacheLut lut;
+    bool ok = buildMetaCacheLut(file, lut);
+    runner.expectTrue(ok, "lut_many: builds LUT successfully");
+    runner.expectEq(static_cast<uint16_t>(100), lut.tocItemCount, "lut_many: 100 items");
+
+    // Random access pattern (not sequential)
+    TocItem item99 = readTocItemByLut(file, lut, 99);
+    runner.expectEqual("Section 100", item99.title, "lut_many: last item");
+    runner.expectEq(99, item99.sectionIndex, "lut_many: last index");
+
+    TocItem item0 = readTocItemByLut(file, lut, 0);
+    runner.expectEqual("Section 1", item0.title, "lut_many: first item after last");
+    runner.expectEq(0, item0.sectionIndex, "lut_many: first index");
+
+    TocItem item50 = readTocItemByLut(file, lut, 50);
+    runner.expectEqual("Section 51", item50.title, "lut_many: middle item");
+    runner.expectEq(50, item50.sectionIndex, "lut_many: middle index");
+  }
+
+  // Test 14: LUT with UTF-8 titles
+  {
+    FsFile file;
+    file.setBuffer("");
+
+    std::vector<TocItem> toc = {
+        {"\xD0\x93\xD0\xBB\xD0\xB0\xD0\xB2\xD0\xB0 1", 0},
+        {"\xD0\x93\xD0\xBB\xD0\xB0\xD0\xB2\xD0\xB0 2", 1},
+    };
+    writeMetaCache(file, "UTF8", "Author", "", 1000, 2, toc);
+
+    file.seek(0);
+    MetaCacheLut lut;
+    bool ok = buildMetaCacheLut(file, lut);
+    runner.expectTrue(ok, "lut_utf8: builds LUT");
+
+    TocItem item0 = readTocItemByLut(file, lut, 0);
+    runner.expectEqual("\xD0\x93\xD0\xBB\xD0\xB0\xD0\xB2\xD0\xB0 1", item0.title, "lut_utf8: item 0 title");
+
+    TocItem item1 = readTocItemByLut(file, lut, 1);
+    runner.expectEqual("\xD0\x93\xD0\xBB\xD0\xB0\xD0\xB2\xD0\xB0 2", item1.title, "lut_utf8: item 1 title");
+  }
+
+  // Test 15: LUT truncated cache rejects
+  {
+    FsFile file;
+    file.setBuffer("");
+
+    serialization::writePod(file, kMetaCacheVersion);
+    serialization::writeString(file, std::string("Title"));
+    serialization::writeString(file, std::string("Author"));
+    serialization::writeString(file, std::string(""));
+    uint32_t fs = 1000;
+    serialization::writePod(file, fs);
+    uint16_t sc = 5;
+    serialization::writePod(file, sc);
+    uint16_t tocCount = 3;
+    serialization::writePod(file, tocCount);
+    // Only write 1 item
+    serialization::writeString(file, std::string("Chapter 1"));
+    int16_t idx = 0;
+    serialization::writePod(file, idx);
+
+    file.seek(0);
+    MetaCacheLut lut;
+    bool ok = buildMetaCacheLut(file, lut);
+    runner.expectFalse(ok, "lut_truncated: rejected");
+    runner.expectEq(static_cast<uint16_t>(0), lut.tocItemCount, "lut_truncated: count reset to 0");
+    runner.expectEq(static_cast<size_t>(0), lut.tocLut.size(), "lut_truncated: LUT cleared");
   }
 
   return runner.allPassed() ? 0 : 1;

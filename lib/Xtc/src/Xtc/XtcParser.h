@@ -41,8 +41,8 @@ class XtcParser {
   uint16_t getHeight() const { return m_defaultHeight; }
   uint8_t getBitDepth() const { return m_bitDepth; }  // 1 = XTC/XTG, 2 = XTCH/XTH
 
-  // Page information
-  bool getPageInfo(uint32_t pageIndex, PageInfo& info) const;
+  // Page information (reads from file on each call)
+  bool getPageInfo(uint32_t pageIndex, PageInfo& info);
 
   /**
    * Load page bitmap (raw 1-bit data, skipping XTG header)
@@ -84,7 +84,6 @@ class XtcParser {
   FsFile m_file;
   bool m_isOpen;
   XtcHeader m_header;
-  std::vector<PageInfo> m_pageTable;
   std::vector<ChapterInfo> m_chapters;
   std::string m_title;
   std::string m_author;
@@ -100,6 +99,7 @@ class XtcParser {
   XtcError readTitle();
   XtcError readAuthor();
   XtcError readChapters();
+  bool readPageEntry(uint32_t pageIndex, PageInfo& info);
 };
 
 }  // namespace xtc

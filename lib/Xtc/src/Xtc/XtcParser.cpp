@@ -79,7 +79,6 @@ void XtcParser::close() {
     m_file.close();
     m_isOpen = false;
   }
-  m_pageTable.clear();
   m_chapters.clear();
   m_title.clear();
   m_author.clear();
@@ -115,6 +114,11 @@ XtcError XtcParser::readHeader() {
 
   // Basic validation
   if (m_header.pageCount == 0) {
+    return XtcError::CORRUPTED_HEADER;
+  }
+
+  if (m_header.pageCount > MAX_XTC_PAGE_COUNT) {
+    LOG_ERR(TAG, "Page count %u exceeds max %u", m_header.pageCount, MAX_XTC_PAGE_COUNT);
     return XtcError::CORRUPTED_HEADER;
   }
 
@@ -181,38 +185,49 @@ XtcError XtcParser::readPageTable() {
     return XtcError::CORRUPTED_HEADER;
   }
 
-  // Seek to page table
-  if (!m_file.seek(m_header.pageTableOffset)) {
-    LOG_ERR(TAG, "Failed to seek to page table at %llu", m_header.pageTableOffset);
+  // Validate that the page table fits within the file
+  const uint64_t pageTableEnd =
+      m_header.pageTableOffset + static_cast<uint64_t>(m_header.pageCount) * sizeof(PageTableEntry);
+  if (pageTableEnd > m_file.size()) {
+    LOG_ERR(TAG, "Page table extends beyond file");
+    return XtcError::CORRUPTED_HEADER;
+  }
+
+  // Read first page entry to get default dimensions
+  PageInfo firstPage;
+  if (!readPageEntry(0, firstPage)) {
+    LOG_ERR(TAG, "Failed to read first page table entry");
     return XtcError::READ_ERROR;
   }
+  m_defaultWidth = firstPage.width;
+  m_defaultHeight = firstPage.height;
 
-  m_pageTable.resize(m_header.pageCount);
+  LOG_INF(TAG, "Validated page table: %u pages (lazy loading)", m_header.pageCount);
+  return XtcError::OK;
+}
 
-  // Read page table entries
-  for (uint16_t i = 0; i < m_header.pageCount; i++) {
-    PageTableEntry entry;
-    size_t bytesRead = m_file.read(reinterpret_cast<uint8_t*>(&entry), sizeof(PageTableEntry));
-    if (bytesRead != sizeof(PageTableEntry)) {
-      LOG_ERR(TAG, "Failed to read page table entry %u", i);
-      return XtcError::READ_ERROR;
-    }
-
-    m_pageTable[i].offset = static_cast<uint32_t>(entry.dataOffset);
-    m_pageTable[i].size = entry.dataSize;
-    m_pageTable[i].width = entry.width;
-    m_pageTable[i].height = entry.height;
-    m_pageTable[i].bitDepth = m_bitDepth;
-
-    // Update default dimensions from first page
-    if (i == 0) {
-      m_defaultWidth = entry.width;
-      m_defaultHeight = entry.height;
-    }
+bool XtcParser::readPageEntry(uint32_t pageIndex, PageInfo& info) {
+  if (pageIndex >= m_header.pageCount) {
+    return false;
   }
 
-  LOG_INF(TAG, "Read %u page table entries", m_header.pageCount);
-  return XtcError::OK;
+  const uint64_t offset = m_header.pageTableOffset + static_cast<uint64_t>(pageIndex) * sizeof(PageTableEntry);
+  if (!m_file.seek(offset)) {
+    return false;
+  }
+
+  PageTableEntry entry;
+  if (m_file.read(reinterpret_cast<uint8_t*>(&entry), sizeof(PageTableEntry)) != sizeof(PageTableEntry)) {
+    return false;
+  }
+
+  info.offset = static_cast<uint32_t>(entry.dataOffset);
+  info.size = entry.dataSize;
+  info.width = entry.width;
+  info.height = entry.height;
+  info.bitDepth = m_bitDepth;
+  info.padding = 0;
+  return true;
 }
 
 XtcError XtcParser::readChapters() {
@@ -321,13 +336,7 @@ XtcError XtcParser::readChapters() {
   return XtcError::OK;
 }
 
-bool XtcParser::getPageInfo(uint32_t pageIndex, PageInfo& info) const {
-  if (pageIndex >= m_pageTable.size()) {
-    return false;
-  }
-  info = m_pageTable[pageIndex];
-  return true;
-}
+bool XtcParser::getPageInfo(uint32_t pageIndex, PageInfo& info) { return readPageEntry(pageIndex, info); }
 
 size_t XtcParser::loadPage(uint32_t pageIndex, uint8_t* buffer, size_t bufferSize) {
   if (!m_isOpen) {
@@ -340,7 +349,11 @@ size_t XtcParser::loadPage(uint32_t pageIndex, uint8_t* buffer, size_t bufferSiz
     return 0;
   }
 
-  const PageInfo& page = m_pageTable[pageIndex];
+  PageInfo page;
+  if (!readPageEntry(pageIndex, page)) {
+    m_lastError = XtcError::READ_ERROR;
+    return 0;
+  }
 
   // Seek to page data
   if (!m_file.seek(page.offset)) {
@@ -408,7 +421,10 @@ XtcError XtcParser::loadPageStreaming(uint32_t pageIndex,
     return XtcError::PAGE_OUT_OF_RANGE;
   }
 
-  const PageInfo& page = m_pageTable[pageIndex];
+  PageInfo page;
+  if (!readPageEntry(pageIndex, page)) {
+    return XtcError::READ_ERROR;
+  }
 
   // Seek to page data
   if (!m_file.seek(page.offset)) {

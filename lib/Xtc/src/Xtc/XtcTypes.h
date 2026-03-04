@@ -33,6 +33,9 @@ constexpr uint32_t XTH_MAGIC = 0x00485458;  // "XTH\0" for 2-bit page data
 constexpr uint16_t DISPLAY_WIDTH = 480;
 constexpr uint16_t DISPLAY_HEIGHT = 800;
 
+// Safety limit for page count (prevents unbounded allocations)
+constexpr uint16_t MAX_XTC_PAGE_COUNT = 10000;
+
 // XTC file header (56 bytes)
 #pragma pack(push, 1)
 struct XtcHeader {
