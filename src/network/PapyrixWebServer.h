@@ -46,15 +46,13 @@ class PapyrixWebServer {
   void handleRoot();
   void handleNotFound();
   void handleStatus();
-  void handleFileList();
   void handleFileListData();
   void handleUpload();
   void handleUploadPost();
   void handleCreateFolder();
   void handleDelete();
-  void handleSleepScreens();
-  void handleSleepScreensData();
-  void handleSleepScreenDelete();
+  void handleDownload();
+  void handleRename();
 };
 
 }  // namespace papyrix

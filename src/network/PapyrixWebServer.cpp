@@ -9,9 +9,7 @@
 #include <esp_heap_caps.h>
 
 #include "../config.h"
-#include "html/FilesPageHtml.generated.h"
-#include "html/HomePageHtml.generated.h"
-#include "html/SleepPageHtml.generated.h"
+#include "html/AppPageHtml.generated.h"
 
 #define TAG "WEBSERVER"
 
@@ -66,15 +64,13 @@ void PapyrixWebServer::begin() {
 
   // Setup routes
   server_->on("/", HTTP_GET, [this] { handleRoot(); });
-  server_->on("/files", HTTP_GET, [this] { handleFileList(); });
   server_->on("/api/status", HTTP_GET, [this] { handleStatus(); });
   server_->on("/api/files", HTTP_GET, [this] { handleFileListData(); });
+  server_->on("/download", HTTP_GET, [this] { handleDownload(); });
   server_->on("/upload", HTTP_POST, [this] { handleUploadPost(); }, [this] { handleUpload(); });
   server_->on("/mkdir", HTTP_POST, [this] { handleCreateFolder(); });
   server_->on("/delete", HTTP_POST, [this] { handleDelete(); });
-  server_->on("/sleep", HTTP_GET, [this] { handleSleepScreens(); });
-  server_->on("/api/sleep-screens", HTTP_GET, [this] { handleSleepScreensData(); });
-  server_->on("/sleep/delete", HTTP_POST, [this] { handleSleepScreenDelete(); });
+  server_->on("/rename", HTTP_POST, [this] { handleRename(); });
   server_->onNotFound([this] { handleNotFound(); });
 
   server_->begin();
@@ -121,7 +117,7 @@ void PapyrixWebServer::handleClient() {
   server_->handleClient();
 }
 
-void PapyrixWebServer::handleRoot() { sendGzipHtml(server_.get(), HomePageHtml, HomePageHtmlCompressedSize); }
+void PapyrixWebServer::handleRoot() { sendGzipHtml(server_.get(), AppPageHtml, AppPageHtmlCompressedSize); }
 
 void PapyrixWebServer::handleNotFound() { server_->send(404, "text/plain", "404 Not Found"); }
 
@@ -136,8 +132,6 @@ void PapyrixWebServer::handleStatus() {
 
   server_->send(200, "application/json", json);
 }
-
-void PapyrixWebServer::handleFileList() { sendGzipHtml(server_.get(), FilesPageHtml, FilesPageHtmlCompressedSize); }
 
 void PapyrixWebServer::handleFileListData() {
   String currentPath = "/";
@@ -240,7 +234,10 @@ void PapyrixWebServer::handleUpload() {
     filePath += upload_.fileName;
 
     if (!FsHelpers::isSupportedBookFile(upload_.fileName.c_str()) &&
-        !FsHelpers::isImageFile(upload_.fileName.c_str())) {
+        !FsHelpers::isImageFile(upload_.fileName.c_str()) &&
+        !FsHelpers::hasExtension(upload_.fileName.c_str(), ".epdfont") &&
+        !FsHelpers::hasExtension(upload_.fileName.c_str(), ".bin") &&
+        !FsHelpers::hasExtension(upload_.fileName.c_str(), ".theme")) {
       upload_.error = "Unsupported file type";
       LOG_ERR(TAG, "Rejected upload: %s (unsupported type)", upload_.fileName.c_str());
       return;
@@ -416,95 +413,98 @@ void PapyrixWebServer::handleDelete() {
   }
 }
 
-void PapyrixWebServer::handleSleepScreens() { sendGzipHtml(server_.get(), SleepPageHtml, SleepPageHtmlCompressedSize); }
-
-void PapyrixWebServer::handleSleepScreensData() {
-  FsFile root = SdMan.open("/sleep");
-  if (!root || !root.isDirectory()) {
-    server_->send(200, "application/json", "[]");
-    if (root) root.close();
+void PapyrixWebServer::handleDownload() {
+  if (!server_->hasArg("path")) {
+    server_->send(400, "text/plain", "Missing path");
     return;
   }
 
-  server_->setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server_->send(200, "application/json", "");
-  server_->sendContent("[");
-
-  char name[256];
-  bool seenFirst = false;
-  FsFile file = root.openNextFile();
-
-  while (file) {
-    file.getName(name, sizeof(name));
-
-    if (name[0] != '.' && !file.isDirectory()) {
-      // Only include .bmp files
-      const char* dot = strrchr(name, '.');
-      if (dot && (strcasecmp(dot, ".bmp") == 0)) {
-        JsonDocument doc;
-        doc["name"] = name;
-        doc["size"] = file.size();
-
-        char output[512];
-        size_t written = serializeJson(doc, output, sizeof(output));
-        if (written < sizeof(output)) {
-          if (seenFirst) {
-            server_->sendContent(",");
-          } else {
-            seenFirst = true;
-          }
-          server_->sendContent(output);
-        }
-      }
-    }
-
-    file.close();
-    file = root.openNextFile();
-  }
-
-  root.close();
-  server_->sendContent("]");
-  server_->sendContent("");
-}
-
-void PapyrixWebServer::handleSleepScreenDelete() {
-  if (!server_->hasArg("name")) {
-    server_->send(400, "text/plain", "Missing file name");
+  String filePath = server_->arg("path");
+  if (filePath.isEmpty() || !filePath.startsWith("/") || filePath.indexOf("..") >= 0) {
+    server_->send(400, "text/plain", "Invalid path");
     return;
   }
 
-  String name = server_->arg("name");
-  if (name.isEmpty()) {
-    server_->send(400, "text/plain", "File name cannot be empty");
+  // Security: block hidden/system files and dot-prefix paths
+  String fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+  if (fileName.startsWith(".") || FsHelpers::isHiddenFsItem(fileName.c_str())) {
+    server_->send(403, "text/plain", "Access denied");
     return;
   }
 
-  // Security: reject path traversal
-  if (name.indexOf('/') >= 0 || name.indexOf("..") >= 0) {
-    server_->send(400, "text/plain", "Invalid file name");
-    return;
-  }
-
-  // Only allow .bmp files
-  String lower = name;
-  lower.toLowerCase();
-  if (!lower.endsWith(".bmp")) {
-    server_->send(400, "text/plain", "Only BMP files can be deleted");
-    return;
-  }
-
-  String filePath = "/sleep/" + name;
-
-  if (!SdMan.exists(filePath.c_str())) {
+  FsFile file = SdMan.open(filePath.c_str());
+  if (!file || file.isDirectory()) {
+    if (file) file.close();
     server_->send(404, "text/plain", "File not found");
     return;
   }
 
-  if (SdMan.remove(filePath.c_str())) {
-    LOG_INF(TAG, "Deleted sleep screen: %s", filePath.c_str());
-    server_->send(200, "text/plain", "Deleted");
+  size_t fileSize = file.size();
+
+  server_->sendHeader("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
+  server_->setContentLength(fileSize);
+  server_->send(200, "application/octet-stream", "");
+
+  uint8_t buf[512];
+  while (file.available()) {
+    size_t bytesRead = file.read(buf, sizeof(buf));
+    if (bytesRead == 0) break;
+    server_->client().write(buf, bytesRead);
+  }
+
+  file.close();
+}
+
+void PapyrixWebServer::handleRename() {
+  if (!server_->hasArg("path") || !server_->hasArg("newName")) {
+    server_->send(400, "text/plain", "Missing path or newName");
+    return;
+  }
+
+  String itemPath = server_->arg("path");
+  String newName = server_->arg("newName");
+
+  if (itemPath.isEmpty() || itemPath == "/" || newName.isEmpty() || itemPath.indexOf("..") >= 0) {
+    server_->send(400, "text/plain", "Invalid parameters");
+    return;
+  }
+
+  if (!itemPath.startsWith("/")) {
+    itemPath = "/" + itemPath;
+  }
+
+  // Security: reject path traversal and hidden names
+  if (newName.indexOf('/') >= 0 || newName.indexOf("..") >= 0 || newName.startsWith(".")) {
+    server_->send(400, "text/plain", "Invalid new name");
+    return;
+  }
+
+  // Security: block hidden/system files
+  String oldName = itemPath.substring(itemPath.lastIndexOf('/') + 1);
+  if (oldName.startsWith(".") || FsHelpers::isHiddenFsItem(oldName.c_str())) {
+    server_->send(403, "text/plain", "Cannot rename system files");
+    return;
+  }
+
+  if (!SdMan.exists(itemPath.c_str())) {
+    server_->send(404, "text/plain", "Item not found");
+    return;
+  }
+
+  // Build new path: same parent directory + new name
+  int lastSlash = itemPath.lastIndexOf('/');
+  String newPath = (lastSlash <= 0) ? "/" + newName : itemPath.substring(0, lastSlash) + "/" + newName;
+
+  if (SdMan.exists(newPath.c_str())) {
+    server_->send(400, "text/plain", "An item with that name already exists");
+    return;
+  }
+
+  if (SdMan.rename(itemPath.c_str(), newPath.c_str())) {
+    LOG_INF(TAG, "Renamed: %s -> %s", itemPath.c_str(), newPath.c_str());
+    server_->send(200, "text/plain", "Renamed");
   } else {
-    server_->send(500, "text/plain", "Failed to delete");
+    server_->send(500, "text/plain", "Failed to rename");
   }
 }
 

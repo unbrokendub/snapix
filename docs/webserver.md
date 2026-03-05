@@ -11,6 +11,7 @@ Papyrix Reader includes a built-in web server that allows you to:
 - Create folders to organize your ebooks
 - Delete files and folders
 - Upload and manage custom sleep screen images
+- Upload custom fonts and font themes
 
 ## Prerequisites
 
@@ -107,41 +108,27 @@ Once connected, the screen will display:
 
 ## Step 5: Using the Web Interface
 
-### Home Page
+The web interface uses a tab-based layout with four tabs: **Books**, **Sleep**, **Fonts**, and **Themes**. The firmware version is shown in the top-right corner.
 
-The home page displays:
+![Books tab](images/web-books.png)
 
-- Device status and version information
-- WiFi connection status
-- Current IP address
-- Available memory
+### Books Tab
 
-Navigation links:
+The Books tab is the default view. It shows files and folders on the SD card root.
 
-- **Home** - Returns to the status page
-- **File Manager** - Access file management features
-- **Sleep Screens** - Manage custom sleep screen images
-
-### File Manager
-
-Click **File Manager** to access file management features.
-
-#### Browsing Files
-
-- The file manager displays all files and folders on your SD card
-- **Folders** are highlighted in yellow with a 📁 icon
-- **EPUB files** are highlighted in green with a 📗 icon
-- Click on a folder name to navigate into it
-- Use the breadcrumb navigation at the top to go back to parent folders
+- **Folders** are shown with an orange **DIR** badge and a trash icon
+- **Files** show their size (e.g., "1.2 MB") and a trash icon
+- Click a folder name to navigate into it
+- The path breadcrumb (e.g., "SD" or "/books") shows the current location
 
 #### Uploading Books
 
-1. Click the **+ Add** button in the top-right corner
-2. Select **Upload eBook** from the dropdown menu
-3. Click **Choose File** and select a book file from your device
-4. Click **Upload**
-5. A progress bar will show the upload status
-6. The page will automatically refresh when the upload is complete
+1. Click the **Upload** button
+2. In the dialog, click **Choose File** and select a file
+3. Click **Upload**
+4. The page refreshes when the upload completes
+
+![Upload dialog (Books)](images/web-upload-books.png)
 
 **Supported book formats:** `.epub`, `.fb2`, `.xtc`, `.xtch`, `.xtg`, `.xth`, `.txt`, `.text`, `.md`, `.markdown`
 
@@ -151,50 +138,66 @@ Click **File Manager** to access file management features.
 
 #### Creating Folders
 
-1. Click the **+ Add** button in the top-right corner
-2. Select **New Folder** from the dropdown menu
-3. Enter a folder name (letters, numbers, underscores, and hyphens only)
-4. Click **Create Folder**
+1. Click the **New Folder** button
+2. Enter a folder name (letters, numbers, underscores, and hyphens only)
+3. Click **Create**
+
+![New Folder dialog](images/web-new-folder.png)
 
 This is useful for organizing your ebooks by genre, author, or series.
 
 #### Deleting Files and Folders
 
-1. Click the **🗑️** (trash) icon next to any file or folder
+1. Click the trash icon next to any file or folder
 2. Confirm the deletion in the popup dialog
-3. Click **Delete** to permanently remove the item
 
 **Warning:** Deletion is permanent and cannot be undone!
 
 **Note:** Folders must be empty before they can be deleted.
 
-### Sleep Screens
+### Sleep Tab
 
-Click **Sleep Screens** to manage custom sleep screen images.
+The Sleep tab manages custom sleep screen images stored in the `/sleep` directory.
 
-#### Viewing Sleep Screens
+![Sleep tab](images/web-sleep.png)
 
-- The page displays all BMP images in the `/sleep` directory on the SD card
-- Each image shows its filename and file size
-- A summary at the top shows the total number of images and combined size
+- Each file shows its name and size
+- A description at the top reminds you to set sleep mode to "Custom" in device settings
 
 #### Uploading Sleep Screens
 
-1. Click the **Upload** button in the top-right corner
+1. Click the **Upload** button
 2. Select a `.bmp` file from your device
 3. Click **Upload**
-4. A progress bar will show the upload status
-5. The page will automatically refresh when the upload is complete
+
+![Upload dialog (Sleep)](images/web-upload.png)
 
 **Note:** Only `.bmp` files are accepted. Use the [sleep screen converter](../README.md) (`make sleep-screen`) to convert images to the correct format.
 
-#### Deleting Sleep Screens
-
-1. Click the **🗑️** (trash) icon next to any image
-2. Confirm the deletion in the popup dialog
-3. Click **Delete** to permanently remove the image
-
 **Note:** Set the **Sleep Screen** setting to **Custom** on the device to use uploaded images. A random image will be shown each time the device sleeps. See the [User Guide](user_guide.md#37-sleep-screen) for more details.
+
+### Fonts Tab
+
+The Fonts tab manages custom font directories in `/fonts` on the SD card.
+
+![Fonts tab](images/web-fonts.png)
+
+- Font directories are shown with **DIR** badges (e.g., `literata-14`, `noto-sans-16`)
+- Use **Upload** to add `.epdfont` font files
+- Use **New Folder** to create new font directories
+
+See the [Fonts Guide](fonts.md) and [Customization Guide](customization.md) for details on creating and using custom fonts.
+
+### Themes Tab
+
+The Themes tab manages `.theme` files for custom CJK font themes.
+
+![Themes tab](images/web-themes.png)
+
+- Each `.theme` file shows its name and size
+- Use **Upload** to add new theme files
+
+See the [Customization Guide](customization.md) for details on creating and using custom themes.
 
 ---
 
@@ -265,7 +268,7 @@ Click **Sleep Screens** to manage custom sleep screen images.
 - **Supported WiFi:** 2.4GHz networks (802.11 b/g/n)
 - **Web Server Port:** 80 (HTTP)
 - **Maximum Upload Size:** Limited by available SD card space
-- **Supported File Formats:** `.epub`, `.fb2`, `.xtc`, `.xtch`, `.xtg`, `.xth`, `.txt`, `.text`, `.md`, `.markdown` (books); `.jpg`, `.jpeg`, `.png`, `.bmp` (images)
+- **Supported File Formats:** `.epub`, `.fb2`, `.xtc`, `.xtch`, `.xtg`, `.xth`, `.txt`, `.text`, `.md`, `.markdown` (books); `.jpg`, `.jpeg`, `.png`, `.bmp` (images); `.epdfont` (fonts); `.theme` (themes)
 - **Browser Compatibility:** All modern browsers (Chrome, Firefox, Safari, Edge)
 
 ---

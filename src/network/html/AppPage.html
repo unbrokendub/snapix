@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Papyrix Reader</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;min-height:100vh;display:flex;flex-direction:column}
+    a{color:#a78bfa;text-decoration:none}
+    a:hover{text-decoration:underline}
+    header{background:#1f2937;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #374151}
+    header h1{font-size:1.2em;color:#f9fafb;font-weight:600}
+    header .ver{font-size:.8em;color:#6b7280;margin-left:8px}
+    nav{display:flex;background:#1f2937;border-bottom:1px solid #374151;padding:0 12px}
+    nav button{background:none;border:none;color:#9ca3af;padding:12px 18px;cursor:pointer;font-size:.95em;font-weight:500;border-bottom:2px solid transparent;transition:all .15s}
+    nav button:hover{color:#e5e7eb}
+    nav button.active{color:#a78bfa;border-bottom-color:#8b5cf6}
+    .container{max-width:860px;width:100%;margin:0 auto;padding:16px}
+    .panel{display:none}
+    .panel.active{display:block}
+    .toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px}
+    .toolbar-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+    .toolbar-right{display:flex;gap:8px}
+    .breadcrumb{display:flex;align-items:center;gap:4px;font-size:.9em;color:#9ca3af;flex-wrap:wrap}
+    .breadcrumb a{color:#a78bfa}
+    .breadcrumb .sep{color:#4b5563}
+    .breadcrumb .cur{color:#e5e7eb;font-weight:500}
+    .info-text{color:#9ca3af;font-size:.9em;line-height:1.5}
+    .btn{padding:8px 14px;border:none;border-radius:6px;cursor:pointer;font-size:.85em;font-weight:600;display:flex;align-items:center;gap:5px;transition:background .15s}
+    .btn-accent{background:#7c3aed;color:#fff}
+    .btn-accent:hover:not(:disabled){background:#6d28d9}
+    .btn:disabled{opacity:.4;cursor:not-allowed}
+    .btn-warn{background:#b45309;color:#fff}
+    .btn-warn:hover{background:#92400e}
+    .card{background:#1f2937;border-radius:8px;border:1px solid #374151;overflow:hidden}
+    table{width:100%;border-collapse:collapse}
+    th{background:#111827;color:#9ca3af;font-size:.8em;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:10px 14px;text-align:left;border-bottom:1px solid #374151}
+    td{padding:10px 14px;border-bottom:1px solid #1f2937;color:#d1d5db;font-size:.9em}
+    tr:hover td{background:#374151}
+    .fname{font-weight:500;color:#f3f4f6}
+    .fname a{color:#f3f4f6}
+    .fname a:hover{color:#a78bfa}
+    .fdir .fname a{color:#fbbf24}
+    .fdir .fname a:hover{color:#f59e0b}
+    .fsize{color:#9ca3af;white-space:nowrap}
+    .actions-cell{white-space:nowrap;text-align:right}
+    .actions-cell button{background:none;border:none;cursor:pointer;padding:4px 6px;border-radius:4px;font-size:.85em;color:#6b7280;transition:all .15s}
+    .actions-cell button:hover{background:#374151;color:#e5e7eb}
+    .actions-cell .del-btn:hover{background:#7f1d1d;color:#fca5a5}
+    .empty{text-align:center;color:#6b7280;padding:40px;font-style:italic}
+    .loader-wrap{display:flex;justify-content:center;padding:30px}
+    .loader{width:36px;height:36px;border:4px solid #374151;border-top-color:#8b5cf6;border-radius:50%;animation:spin .8s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:.7em;font-weight:600;margin-left:6px;vertical-align:middle}
+    .badge-epub{background:#065f46;color:#6ee7b7}
+    .badge-dir{background:#78350f;color:#fcd34d}
+    /* Modals */
+    .overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;justify-content:center;align-items:center}
+    .overlay.open{display:flex}
+    .modal{background:#1f2937;border:1px solid #374151;border-radius:10px;padding:24px;max-width:440px;width:92%;position:relative}
+    .modal h3{color:#f9fafb;margin-bottom:14px;font-size:1.1em}
+    .modal-x{position:absolute;top:12px;right:14px;background:none;border:none;color:#6b7280;font-size:1.4em;cursor:pointer;line-height:1}
+    .modal-x:hover{color:#e5e7eb}
+    .modal label{display:block;color:#9ca3af;font-size:.85em;margin-bottom:6px;word-break:break-word}
+    .modal input[type=text],.modal input[type=file]{width:100%;padding:9px 12px;background:#111827;border:1px solid #374151;border-radius:6px;color:#e5e7eb;font-size:.9em;margin-bottom:12px}
+    .modal input[type=text]:focus{outline:none;border-color:#8b5cf6}
+    .modal .btn{width:100%;justify-content:center;padding:10px;font-size:.95em}
+    .modal .btn+.btn{margin-top:8px}
+    .btn-danger{background:#991b1b;color:#fca5a5}
+    .btn-danger:hover{background:#7f1d1d}
+    .btn-cancel{background:#374151;color:#d1d5db}
+    .btn-cancel:hover{background:#4b5563}
+    .progress-wrap{display:none;margin-top:10px}
+    .progress-bar{height:18px;background:#374151;border-radius:9px;overflow:hidden}
+    .progress-fill{height:100%;background:#7c3aed;width:0%;transition:width .3s}
+    .progress-text{text-align:center;font-size:.8em;color:#9ca3af;margin-top:4px}
+    .warn-text{color:#f87171;font-weight:600;margin:8px 0}
+    .item-name{color:#f3f4f6;font-weight:600;word-break:break-all;margin:8px 0 14px}
+    footer{text-align:center;padding:16px;color:#4b5563;font-size:.8em;margin-top:auto}
+    footer a{color:#6b7280}
+    @media(max-width:600px){
+      .container{padding:10px}
+      nav button{padding:10px 12px;font-size:.85em}
+      th,td{padding:8px 8px;font-size:.85em}
+      .toolbar{gap:6px}
+      .btn{padding:7px 10px;font-size:.8em}
+      .modal{padding:16px}
+      header{padding:10px 14px}
+      header h1{font-size:1.05em}
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div><h1>Papyrix</h1></div>
+  <span class="ver" id="hdr-version"></span>
+</header>
+
+<nav id="tabs">
+  <button data-tab="books" class="active">Books</button>
+  <button data-tab="sleep">Sleep</button>
+  <button data-tab="fonts">Fonts</button>
+  <button data-tab="themes">Themes</button>
+</nav>
+
+<div class="container">
+  <!-- Books Panel -->
+  <div class="panel active" id="panel-books">
+    <div class="toolbar">
+      <div class="toolbar-left"><div class="breadcrumb" id="books-crumbs"></div></div>
+      <div class="toolbar-right">
+        <button class="btn btn-accent" onclick="openUpload('books')">Upload</button>
+        <button class="btn btn-warn" onclick="openFolder('books')">New Folder</button>
+      </div>
+    </div>
+    <div class="card"><div id="books-table"><div class="loader-wrap"><div class="loader"></div></div></div></div>
+  </div>
+
+  <!-- Sleep Panel -->
+  <div class="panel" id="panel-sleep">
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="info-text">BMP images shown when device sleeps. Set sleep mode to "Custom" in settings.</span></div>
+      <div class="toolbar-right">
+        <button class="btn btn-accent" onclick="openUpload('sleep')">Upload</button>
+      </div>
+    </div>
+    <div class="card"><div id="sleep-table"><div class="loader-wrap"><div class="loader"></div></div></div></div>
+  </div>
+
+  <!-- Fonts Panel -->
+  <div class="panel" id="panel-fonts">
+    <div class="toolbar">
+      <div class="toolbar-left"><div class="breadcrumb" id="fonts-crumbs"></div></div>
+      <div class="toolbar-right">
+        <button class="btn btn-accent" onclick="openUpload('fonts')">Upload</button>
+        <button class="btn btn-warn" onclick="openFolder('fonts')">New Folder</button>
+      </div>
+    </div>
+    <div class="card"><div id="fonts-table"><div class="loader-wrap"><div class="loader"></div></div></div></div>
+  </div>
+
+  <!-- Themes Panel -->
+  <div class="panel" id="panel-themes">
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="info-text">Theme files (.theme) for custom CJK font themes.</span></div>
+      <div class="toolbar-right">
+        <button class="btn btn-accent" onclick="openUpload('themes')">Upload</button>
+      </div>
+    </div>
+    <div class="card"><div id="themes-table"><div class="loader-wrap"><div class="loader"></div></div></div></div>
+  </div>
+</div>
+
+<!-- Upload Modal -->
+<div class="overlay" id="uploadModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('uploadModal')">&times;</button>
+    <h3 id="uploadTitle">Upload File</h3>
+    <label id="uploadHint">Select a file</label>
+    <input type="file" id="uploadFileInput" onchange="onFileSelected()">
+    <button class="btn btn-accent" id="uploadBtn" onclick="doUpload()" disabled>Upload</button>
+    <div class="progress-wrap" id="uploadProgress">
+      <div class="progress-bar"><div class="progress-fill" id="uploadFill"></div></div>
+      <div class="progress-text" id="uploadText"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Folder Modal -->
+<div class="overlay" id="folderModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('folderModal')">&times;</button>
+    <h3>New Folder</h3>
+    <label id="folderHint">Folder name</label>
+    <input type="text" id="folderNameInput" placeholder="my-folder">
+    <button class="btn btn-warn" onclick="doCreateFolder()">Create</button>
+  </div>
+</div>
+
+<!-- Rename Modal -->
+<div class="overlay" id="renameModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('renameModal')">&times;</button>
+    <h3>Rename</h3>
+    <label>New name</label>
+    <input type="text" id="renameInput">
+    <input type="hidden" id="renamePath">
+    <button class="btn btn-accent" onclick="doRename()">Rename</button>
+  </div>
+</div>
+
+<!-- Delete Modal -->
+<div class="overlay" id="deleteModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('deleteModal')">&times;</button>
+    <h3>Delete</h3>
+    <p class="warn-text">This action cannot be undone.</p>
+    <p class="item-name" id="deleteItemName"></p>
+    <input type="hidden" id="deletePath">
+    <input type="hidden" id="deleteType">
+    <button class="btn btn-danger" onclick="doDelete()">Delete</button>
+    <button class="btn btn-cancel" onclick="closeModal('deleteModal')">Cancel</button>
+  </div>
+</div>
+
+<footer><a href="https://github.com/bigbag/papyrix-reader">Papyrix Reader</a></footer>
+
+<script>
+var activeTab = 'books';
+var booksPath = '/';
+var fontsPath = '/config/fonts';
+
+var TAB_CFG = {
+  books:  {base:'/',             accept:'.epub,.fb2,.xtc,.xtch,.xtg,.xth,.txt,.text,.md,.markdown,.jpg,.jpeg,.png,.bmp', browsable:true},
+  sleep:  {base:'/sleep',        accept:'.bmp', browsable:false},
+  fonts:  {base:'/config/fonts', accept:'.epdfont,.bin', browsable:true},
+  themes: {base:'/config/themes',accept:'.theme', browsable:false}
+};
+
+// --- Utilities ---
+function fmtSize(b){if(!b)return'0 B';var k=1024,u=['B','KB','MB','GB'];var i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(1))+' '+u[i]}
+function post(url,params){return new Promise(function(ok,fail){var fd=new FormData();for(var k in params)fd.append(k,params[k]);var x=new XMLHttpRequest();x.open('POST',url,true);x.onload=function(){x.status<300?ok(x.responseText):fail(x.responseText)};x.onerror=function(){fail('Network error')};x.send(fd)})}
+function getPath(tab){return tab==='books'?booksPath:tab==='fonts'?fontsPath:TAB_CFG[tab].base}
+
+// --- Tabs ---
+document.getElementById('tabs').addEventListener('click',function(e){
+  if(e.target.tagName==='BUTTON'&&e.target.dataset.tab){switchTab(e.target.dataset.tab)}
+});
+
+function switchTab(tab){
+  activeTab=tab;
+  booksPath='/';
+  fontsPath='/config/fonts';
+  document.querySelectorAll('#tabs button').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab)});
+  document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('active',p.id==='panel-'+tab)});
+  loadTabData(tab);
+}
+
+// --- Data Loading ---
+function loadTabData(tab){
+  var path=getPath(tab);
+  var el=document.getElementById(tab+'-table');
+  el.textContent='';
+  var lw=document.createElement('div');lw.className='loader-wrap';
+  var ld=document.createElement('div');ld.className='loader';
+  lw.appendChild(ld);el.appendChild(lw);
+  if(tab==='books'||tab==='fonts')updateBreadcrumbs(tab);
+  fetch('/api/files?path='+encodeURIComponent(path)).then(function(r){
+    if(!r.ok)throw new Error(r.status);return r.json()
+  }).then(function(files){renderTable(tab,files)}).catch(function(){
+    el.textContent='';
+    var em=document.createElement('div');em.className='empty';em.textContent='Failed to load files';
+    el.appendChild(em);
+  });
+}
+
+// --- Breadcrumbs ---
+function updateBreadcrumbs(tab){
+  var el=document.getElementById(tab+'-crumbs');
+  var path=getPath(tab);
+  var base=TAB_CFG[tab].base;
+  el.textContent='';
+
+  function mkLink(text,onclick){
+    var a=document.createElement('a');a.href='#';a.textContent=text;
+    a.addEventListener('click',function(e){e.preventDefault();onclick()});return a;
+  }
+  function mkSep(){var s=document.createElement('span');s.className='sep';s.textContent='/';return s}
+  function mkCur(text){var s=document.createElement('span');s.className='cur';s.textContent=text;return s}
+
+  var rootLabel=tab==='books'?'SD':'/fonts';
+  el.appendChild(mkLink(rootLabel,function(){navigateFolder(tab,base)}));
+
+  var relPath=path;
+  if(tab==='fonts'){relPath=path.length>base.length?path.substring(base.length):''}
+  var segs=(tab==='books'?relPath:relPath).split('/').filter(Boolean);
+  if(tab==='books'&&relPath==='/')segs=[];
+
+  var built=base==='/'?'':base;
+  segs.forEach(function(seg,i){
+    built+='/'+seg;
+    el.appendChild(mkSep());
+    if(i===segs.length-1){el.appendChild(mkCur(seg))}
+    else{var p=built;el.appendChild(mkLink(seg,function(){navigateFolder(tab,p)}))}
+  });
+}
+
+function navigateFolder(tab,path){
+  if(tab==='books')booksPath=path;
+  else if(tab==='fonts')fontsPath=path;
+  loadTabData(tab);
+}
+
+// --- Table Rendering ---
+function renderTable(tab,files){
+  var el=document.getElementById(tab+'-table');
+  var cfg=TAB_CFG[tab];
+
+  if(!cfg.browsable){
+    var exts=cfg.accept.split(',');
+    files=files.filter(function(f){
+      if(f.isDirectory)return false;
+      var n=f.name.toLowerCase();
+      return exts.some(function(e){return n.endsWith(e)});
+    });
+  }
+
+  files.sort(function(a,b){
+    if(a.isDirectory&&!b.isDirectory)return -1;
+    if(!a.isDirectory&&b.isDirectory)return 1;
+    if(a.isEpub&&!b.isEpub)return -1;
+    if(!a.isEpub&&b.isEpub)return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  el.textContent='';
+  if(!files.length){
+    var em=document.createElement('div');em.className='empty';em.textContent='No files';
+    el.appendChild(em);return;
+  }
+
+  var path=getPath(tab);
+  var tbl=document.createElement('table');
+  var hdr=document.createElement('tr');
+  ['Name','Size',''].forEach(function(t){var th=document.createElement('th');th.textContent=t;hdr.appendChild(th)});
+  tbl.appendChild(hdr);
+
+  files.forEach(function(f){
+    var fp=path+(path.endsWith('/')?'':'/')+f.name;
+    var tr=document.createElement('tr');
+
+    var tdName=document.createElement('td');
+    tdName.className='fname';
+    var tdSize=document.createElement('td');
+    tdSize.className='fsize';
+    var tdAct=document.createElement('td');
+    tdAct.className='actions-cell';
+
+    if(f.isDirectory){
+      tr.className='fdir';
+      var a=document.createElement('a');a.href='#';a.textContent=f.name;
+      (function(p,t){a.addEventListener('click',function(e){e.preventDefault();navigateFolder(t,p)})})(fp,tab);
+      tdName.appendChild(a);
+      var badge=document.createElement('span');badge.className='badge badge-dir';badge.textContent='DIR';
+      tdName.appendChild(badge);
+      tdSize.textContent='-';
+      var delBtn=document.createElement('button');delBtn.className='del-btn';delBtn.textContent='\u{1F5D1}';delBtn.title='Delete';
+      (function(n,p){delBtn.addEventListener('click',function(){openDelete(n,p,true)})})(f.name,fp);
+      tdAct.appendChild(delBtn);
+    } else {
+      var a=document.createElement('a');
+      a.href='/download?path='+encodeURIComponent(fp);a.textContent=f.name;a.title='Download';
+      tdName.appendChild(a);
+      if(f.isEpub){var badge=document.createElement('span');badge.className='badge badge-epub';badge.textContent='EPUB';tdName.appendChild(badge)}
+      tdSize.textContent=fmtSize(f.size);
+      if(tab==='books'){
+        var renBtn=document.createElement('button');renBtn.textContent='\u270E';renBtn.title='Rename';
+        (function(n,p){renBtn.addEventListener('click',function(){openRename(n,p)})})(f.name,fp);
+        tdAct.appendChild(renBtn);
+      }
+      var delBtn=document.createElement('button');delBtn.className='del-btn';delBtn.textContent='\u{1F5D1}';delBtn.title='Delete';
+      (function(n,p){delBtn.addEventListener('click',function(){openDelete(n,p,false)})})(f.name,fp);
+      tdAct.appendChild(delBtn);
+    }
+
+    tr.appendChild(tdName);tr.appendChild(tdSize);tr.appendChild(tdAct);
+    tbl.appendChild(tr);
+  });
+
+  el.appendChild(tbl);
+}
+
+// --- Modals ---
+function closeModal(id){document.getElementById(id).classList.remove('open')}
+document.querySelectorAll('.overlay').forEach(function(o){
+  o.addEventListener('click',function(e){if(e.target===o)o.classList.remove('open')});
+});
+
+// Upload
+var uploadForTab='books';
+function openUpload(tab){
+  uploadForTab=tab;
+  var cfg=TAB_CFG[tab];
+  document.getElementById('uploadTitle').textContent='Upload to '+tab.charAt(0).toUpperCase()+tab.slice(1);
+  document.getElementById('uploadHint').textContent='Accepted: '+cfg.accept;
+  var inp=document.getElementById('uploadFileInput');
+  inp.value='';inp.setAttribute('accept',cfg.accept);
+  document.getElementById('uploadBtn').disabled=true;
+  document.getElementById('uploadProgress').style.display='none';
+  document.getElementById('uploadFill').style.width='0%';
+  document.getElementById('uploadFill').style.background='#7c3aed';
+  document.getElementById('uploadText').textContent='';
+  document.getElementById('uploadModal').classList.add('open');
+}
+
+function onFileSelected(){
+  var f=document.getElementById('uploadFileInput').files[0];
+  document.getElementById('uploadBtn').disabled=!f;
+}
+
+function ensureDirectory(path){
+  if(path==='/')return Promise.resolve();
+  var parts=path.split('/').filter(Boolean);
+  var chain=Promise.resolve();
+  var built='';
+  parts.forEach(function(p){
+    built+='/'+p;
+    var dir=built;
+    chain=chain.then(function(){return post('/mkdir',{name:p,path:dir.substring(0,dir.lastIndexOf('/'))||'/'}).catch(function(){})});
+  });
+  return chain;
+}
+
+function doUpload(){
+  var inp=document.getElementById('uploadFileInput');
+  var file=inp.files[0];
+  if(!file)return;
+
+  var dot=file.name.lastIndexOf('.');
+  if(dot!==-1){
+    var base=file.name.substring(0,dot);
+    var ext=file.name.substring(dot).toLowerCase();
+    if(file.name.substring(dot)!==ext){
+      file=new File([file],base+ext,{type:file.type});
+    }
+  }
+
+  var btn=document.getElementById('uploadBtn');
+  var pw=document.getElementById('uploadProgress');
+  var pf=document.getElementById('uploadFill');
+  var pt=document.getElementById('uploadText');
+  btn.disabled=true;
+  pw.style.display='block';
+  pt.textContent='Preparing...';
+
+  var uploadPath=getPath(uploadForTab);
+  var cfg=TAB_CFG[uploadForTab];
+
+  var prep=(!cfg.browsable&&uploadPath!=='/')?ensureDirectory(uploadPath):Promise.resolve();
+  prep.then(function(){
+    var fd=new FormData();
+    fd.append('file',file);
+    var xhr=new XMLHttpRequest();
+    xhr.open('POST','/upload?path='+encodeURIComponent(uploadPath),true);
+    xhr.upload.onprogress=function(e){
+      if(e.lengthComputable){var pct=Math.round(e.loaded/e.total*100);pf.style.width=pct+'%';pt.textContent='Uploading: '+pct+'%'}
+    };
+    xhr.onload=function(){
+      if(xhr.status===200){pt.textContent='Done!';setTimeout(function(){closeModal('uploadModal');loadTabData(activeTab)},800)}
+      else{pt.textContent='Error: '+xhr.responseText;pf.style.background='#991b1b';btn.disabled=false}
+    };
+    xhr.onerror=function(){pt.textContent='Network error';pf.style.background='#991b1b';btn.disabled=false};
+    xhr.send(fd);
+  });
+}
+
+// Folder
+var folderForTab='books';
+function openFolder(tab){
+  folderForTab=tab;
+  document.getElementById('folderHint').textContent='Create folder in '+getPath(tab);
+  document.getElementById('folderNameInput').value='';
+  document.getElementById('folderModal').classList.add('open');
+  document.getElementById('folderNameInput').focus();
+}
+
+function doCreateFolder(){
+  var name=document.getElementById('folderNameInput').value.trim();
+  if(!name){alert('Enter a folder name');return}
+  if(!/^[a-zA-Z0-9_\-. ]+$/.test(name)){alert('Invalid characters in name');return}
+  var path=getPath(folderForTab);
+
+  var prep=(folderForTab==='fonts')?ensureDirectory(path):Promise.resolve();
+  prep.then(function(){
+    return post('/mkdir',{name:name,path:path});
+  }).then(function(){
+    closeModal('folderModal');loadTabData(activeTab);
+  }).catch(function(err){alert('Error: '+err)});
+}
+
+// Rename
+function openRename(name,path){
+  document.getElementById('renamePath').value=path;
+  var inp=document.getElementById('renameInput');
+  inp.value=name;
+  document.getElementById('renameModal').classList.add('open');
+  var dot=name.lastIndexOf('.');
+  setTimeout(function(){inp.focus();inp.setSelectionRange(0,dot>0?dot:name.length)},50);
+}
+
+function doRename(){
+  var path=document.getElementById('renamePath').value;
+  var newName=document.getElementById('renameInput').value.trim();
+  if(!newName){alert('Enter a name');return}
+  if(newName.indexOf('/')!==-1||newName.indexOf('..')!==-1){alert('Invalid name');return}
+  post('/rename',{path:path,newName:newName}).then(function(){
+    closeModal('renameModal');loadTabData(activeTab);
+  }).catch(function(err){alert('Error: '+err)});
+}
+
+// Delete
+function openDelete(name,path,isDir){
+  document.getElementById('deleteItemName').textContent=(isDir?'Folder: ':'File: ')+name;
+  document.getElementById('deletePath').value=path;
+  document.getElementById('deleteType').value=isDir?'folder':'file';
+  document.getElementById('deleteModal').classList.add('open');
+}
+
+function doDelete(){
+  var path=document.getElementById('deletePath').value;
+  var type=document.getElementById('deleteType').value;
+  post('/delete',{path:path,type:type}).then(function(){
+    closeModal('deleteModal');loadTabData(activeTab);
+  }).catch(function(err){alert('Error: '+err)});
+}
+
+// --- Init ---
+fetch('/api/status').then(function(r){return r.json()}).then(function(d){
+  document.getElementById('hdr-version').textContent='v'+(d.version||'?');
+}).catch(function(){});
+
+loadTabData('books');
+</script>
+</body>
+</html>
