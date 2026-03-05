@@ -93,7 +93,12 @@ class ReaderState : public State {
   // Navigation helpers (delegates to ReaderNavigation)
   void navigateNext(Core& core);
   void navigatePrev(Core& core);
+  void navigateNextChapter(Core& core);
+  void navigatePrevChapter(Core& core);
   void applyNavResult(const ReaderNavigation::NavResult& result, Core& core);
+
+  // Track whether a chapter jump already fired during a button hold
+  bool holdNavigated_ = false;
 
   // Rendering
   void renderCurrentPage(Core& core);

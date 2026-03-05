@@ -246,6 +246,7 @@ void ReaderState::enter(Core& core) {
   contentLoaded_ = false;
   loadFailed_ = false;
   needsRender_ = true;
+  holdNavigated_ = false;
   stopBackgroundCaching();  // Ensure any previous task is stopped
   parser_.reset();          // Safe - task is stopped
   parserSpineIndex_ = -1;
@@ -465,6 +466,29 @@ StateTransition ReaderState::update(Core& core) {
         }
         break;
 
+      case EventType::ButtonRepeat:
+        if (!holdNavigated_) {
+          switch (e.button) {
+            case Button::Right:
+            case Button::Down:
+              navigateNextChapter(core);
+              holdNavigated_ = true;
+              break;
+            case Button::Left:
+            case Button::Up:
+              navigatePrevChapter(core);
+              holdNavigated_ = true;
+              break;
+            default:
+              break;
+          }
+        }
+        break;
+
+      case EventType::ButtonRelease:
+        holdNavigated_ = false;
+        break;
+
       default:
         break;
     }
@@ -602,6 +626,58 @@ void ReaderState::applyNavResult(const ReaderNavigation::NavResult& result, Core
     pageCache_.reset();
   }
   startBackgroundCaching(core);  // Resume caching
+}
+
+void ReaderState::navigateNextChapter(Core& core) {
+  ContentType type = core.content.metadata().type;
+  if (type != ContentType::Epub) return;
+
+  auto* provider = core.content.asEpub();
+  if (!provider || !provider->getEpub()) return;
+
+  size_t spineCount = provider->getEpub()->getSpineItemsCount();
+  if (currentSpineIndex_ + 1 >= static_cast<int>(spineCount)) return;
+
+  stopBackgroundCaching();
+  currentSpineIndex_++;
+  currentSectionPage_ = 0;
+  parser_.reset();
+  parserSpineIndex_ = -1;
+  pageCache_.reset();
+  needsRender_ = true;
+  startBackgroundCaching(core);
+}
+
+void ReaderState::navigatePrevChapter(Core& core) {
+  ContentType type = core.content.metadata().type;
+  if (type != ContentType::Epub) return;
+
+  stopBackgroundCaching();
+
+  if (currentSectionPage_ > 0) {
+    // Go to beginning of current chapter
+    currentSectionPage_ = 0;
+  } else {
+    // Go to previous chapter
+    auto* provider = core.content.asEpub();
+    size_t spineCount = 1;
+    if (provider && provider->getEpub()) {
+      spineCount = provider->getEpub()->getSpineItemsCount();
+    }
+    int firstContentSpine = calcFirstContentSpine(hasCover_, textStartIndex_, spineCount);
+    if (currentSpineIndex_ <= firstContentSpine) {
+      startBackgroundCaching(core);
+      return;
+    }
+    currentSpineIndex_--;
+    currentSectionPage_ = 0;
+    parser_.reset();
+    parserSpineIndex_ = -1;
+    pageCache_.reset();
+  }
+
+  needsRender_ = true;
+  startBackgroundCaching(core);
 }
 
 void ReaderState::renderCurrentPage(Core& core) {
