@@ -441,16 +441,6 @@ StateTransition ReaderState::update(Core& core) {
     switch (e.type) {
       case EventType::ButtonPress:
         switch (e.button) {
-          case Button::Right:
-          case Button::Down:
-            navigateNext(core);
-            break;
-
-          case Button::Left:
-          case Button::Up:
-            navigatePrev(core);
-            break;
-
           case Button::Center:
             enterMenuMode(core);
             break;
@@ -462,6 +452,8 @@ StateTransition ReaderState::update(Core& core) {
             if (core.settings.shortPwrBtn == Settings::PowerPageTurn) {
               navigateNext(core);
             }
+            break;
+          default:
             break;
         }
         break;
@@ -486,6 +478,20 @@ StateTransition ReaderState::update(Core& core) {
         break;
 
       case EventType::ButtonRelease:
+        if (!holdNavigated_) {
+          switch (e.button) {
+            case Button::Right:
+            case Button::Down:
+              navigateNext(core);
+              break;
+            case Button::Left:
+            case Button::Up:
+              navigatePrev(core);
+              break;
+            default:
+              break;
+          }
+        }
         holdNavigated_ = false;
         break;
 
