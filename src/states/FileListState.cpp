@@ -257,8 +257,12 @@ StateTransition FileListState::update(Core& core) {
               currentScreen_ = Screen::Browse;
               needsRender_ = true;
               break;
-            case Button::Back:
             case Button::Left:
+            case Button::Right:
+              confirmView_.toggleSelection();
+              needsRender_ = true;
+              break;
+            case Button::Back:
               currentScreen_ = Screen::Browse;
               needsRender_ = true;
               break;
