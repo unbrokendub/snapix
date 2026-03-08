@@ -4,6 +4,7 @@
 #include "ContentTypes.h"
 #include "EpubProvider.h"
 #include "Fb2Provider.h"
+#include "HtmlProvider.h"
 #include "MarkdownProvider.h"
 #include "TxtProvider.h"
 #include "XtcProvider.h"
@@ -22,6 +23,7 @@ struct ContentHandle {
     TxtProvider txt;
     MarkdownProvider markdown;
     Fb2Provider fb2;
+    HtmlProvider html;
   };
 
   ContentHandle();
@@ -65,12 +67,14 @@ struct ContentHandle {
   TxtProvider* asTxt();
   MarkdownProvider* asMarkdown();
   Fb2Provider* asFb2();
+  HtmlProvider* asHtml();
 
   const EpubProvider* asEpub() const;
   const XtcProvider* asXtc() const;
   const TxtProvider* asTxt() const;
   const MarkdownProvider* asMarkdown() const;
   const Fb2Provider* asFb2() const;
+  const HtmlProvider* asHtml() const;
 
  private:
   void destroyActive();

@@ -15,6 +15,8 @@
 #include <EpubChapterParser.h>
 #include <Fb2.h>
 #include <Fb2Parser.h>
+#include <Html.h>
+#include <HtmlParser.h>
 #include <Page.h>
 #include <GfxRenderer.h>
 #include <Markdown.h>
@@ -38,13 +40,14 @@ MockLittleFS LittleFS;
 // GfxRenderer static frame buffer
 uint8_t GfxRenderer::frameBuffer_[EInkDisplay::BUFFER_SIZE];
 
-enum ContentType { EPUB, MARKDOWN, TXT_FILE, FB2_FILE, UNKNOWN };
+enum ContentType { EPUB, MARKDOWN, TXT_FILE, FB2_FILE, HTML_FILE, UNKNOWN };
 
 static ContentType detectType(const std::string& path) {
   if (FsHelpers::hasExtension(path, ".epub")) return EPUB;
   if (FsHelpers::hasExtension(path, ".md") || FsHelpers::hasExtension(path, ".markdown")) return MARKDOWN;
   if (FsHelpers::hasExtension(path, ".txt")) return TXT_FILE;
   if (FsHelpers::hasExtension(path, ".fb2")) return FB2_FILE;
+  if (FsHelpers::hasExtension(path, ".html") || FsHelpers::hasExtension(path, ".htm")) return HTML_FILE;
   return UNKNOWN;
 }
 
@@ -144,7 +147,7 @@ static void dumpCacheDir(const std::string& dir, const GfxRenderer& gfx, int fon
 }
 
 static void usage() {
-  fprintf(stderr, "Usage: reader-test [--dump] [--batch N] [--no-statusbar] [--cjk-font PATH] <file.epub|.md|.txt|.fb2> [output_dir]\n");
+  fprintf(stderr, "Usage: reader-test [--dump] [--batch N] [--no-statusbar] [--cjk-font PATH] <file.epub|.md|.txt|.fb2|.html|.htm> [output_dir]\n");
   fprintf(stderr, "       reader-test --cache-dump <cache_dir>\n");
   fprintf(stderr, "  --dump           Print parsed text content of each page\n");
   fprintf(stderr, "  --batch N        Cache N pages per batch (default: 5, matching device)\n");
@@ -309,6 +312,25 @@ int main(int argc, char* argv[]) {
       cache.extend(parser, batchSize);
     }
     printf("FB2: %d pages -> %s\n", cache.pageCount(), cachePath.c_str());
+    if (dump) dumpPages(cache, gfx, FONT_ID);
+
+  } else if (type == HTML_FILE) {
+    Html htmlFile(filepath, outputDir);
+    if (!htmlFile.load()) {
+      fprintf(stderr, "Failed to load HTML: %s\n", filepath.c_str());
+      return 1;
+    }
+    htmlFile.setupCacheDir();
+    printf("HTML: \"%s\"\n", htmlFile.getTitle().c_str());
+
+    HtmlParser parser(filepath, outputDir, gfx, config);
+    std::string cachePath = outputDir + "/pages_0.bin";
+    PageCache cache(cachePath);
+    cache.create(parser, config, batchSize);
+    while (batchSize > 0 && cache.isPartial()) {
+      cache.extend(parser, batchSize);
+    }
+    printf("HTML: %d pages -> %s\n", cache.pageCount(), cachePath.c_str());
     if (dump) dumpPages(cache, gfx, FONT_ID);
 
   } else {

@@ -5,8 +5,10 @@
 #include <CoverHelpers.h>
 #include <EInkDisplay.h>
 #include <Epub.h>
+#include <Fb2.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <Html.h>
 #include <InputManager.h>
 #include <LittleFS.h>
 #include <Logging.h>
@@ -212,6 +214,16 @@ void SleepState::renderCoverSleepScreen(Core& core) const {
     Epub epub(bookPath, PAPYRIX_CACHE_DIR);
     if (epub.load() && epub.generateCoverBmp(true)) {
       coverBmpPath = epub.getCoverBmpPath();
+    }
+  } else if (FsHelpers::isFb2File(bookPath)) {
+    Fb2 fb2(bookPath, PAPYRIX_CACHE_DIR);
+    if (fb2.load() && fb2.generateCoverBmp(true)) {
+      coverBmpPath = fb2.getCoverBmpPath();
+    }
+  } else if (FsHelpers::isHtmlFile(bookPath)) {
+    Html html(bookPath, PAPYRIX_CACHE_DIR);
+    if (html.load() && html.generateCoverBmp(true)) {
+      coverBmpPath = html.getCoverBmpPath();
     }
   }
 

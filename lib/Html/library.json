@@ -1,0 +1,9 @@
+{
+  "name": "Html",
+  "version": "1.0.0",
+  "description": "Standalone HTML format support",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

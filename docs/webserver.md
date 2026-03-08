@@ -130,7 +130,7 @@ The Books tab is the default view. It shows files and folders on the SD card roo
 
 ![Upload dialog (Books)](images/web-upload-books.png)
 
-**Supported book formats:** `.epub`, `.fb2`, `.xtc`, `.xtch`, `.xtg`, `.xth`, `.txt`, `.text`, `.md`, `.markdown`
+**Supported book formats:** `.epub`, `.fb2`, `.html`, `.htm`, `.xtc`, `.xtch`, `.xtg`, `.xth`, `.txt`, `.text`, `.md`, `.markdown`
 
 **Supported image formats:** `.jpg`, `.jpeg`, `.png`, `.bmp`
 
@@ -235,7 +235,7 @@ See the [Customization Guide](customization.md) for details on creating and usin
 
 **Solutions:**
 
-1. Ensure the file is a supported format (`.epub`, `.fb2`, `.txt`, `.md`, etc.)
+1. Ensure the file is a supported format (`.epub`, `.fb2`, `.html`, `.txt`, `.md`, etc.)
 2. Check that the SD card has enough free space
 3. Try uploading a smaller file first to test
 4. Refresh the browser page and try again
@@ -268,7 +268,7 @@ See the [Customization Guide](customization.md) for details on creating and usin
 - **Supported WiFi:** 2.4GHz networks (802.11 b/g/n)
 - **Web Server Port:** 80 (HTTP)
 - **Maximum Upload Size:** Limited by available SD card space
-- **Supported File Formats:** `.epub`, `.fb2`, `.xtc`, `.xtch`, `.xtg`, `.xth`, `.txt`, `.text`, `.md`, `.markdown` (books); `.jpg`, `.jpeg`, `.png`, `.bmp` (images); `.epdfont` (fonts); `.theme` (themes)
+- **Supported File Formats:** `.epub`, `.fb2`, `.html`, `.htm`, `.xtc`, `.xtch`, `.xtg`, `.xth`, `.txt`, `.text`, `.md`, `.markdown` (books); `.jpg`, `.jpeg`, `.png`, `.bmp` (images); `.epdfont` (fonts); `.theme` (themes)
 - **Browser Compatibility:** All modern browsers (Chrome, Firefox, Safari, Edge)
 
 ---

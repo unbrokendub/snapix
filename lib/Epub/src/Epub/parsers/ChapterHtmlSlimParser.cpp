@@ -757,6 +757,22 @@ bool ChapterHtmlSlimParser::resumeParsing() {
     return true;
   }
 
+  // If the file was already fully read before suspension (small file consumed in one
+  // parseLoop iteration), the parser has now finished processing all buffered data.
+  // Skip parseLoop() — calling XML_GetBuffer on a finalized parser returns NULL.
+  if (file_.available() == 0) {
+    if (currentTextBlock && !stopRequested_) {
+      makePages();
+      if (!stopRequested_ && currentPage) {
+        completePageFn(std::move(currentPage));
+      }
+      currentPage.reset();
+      currentTextBlock.reset();
+    }
+    cleanupParser();
+    return true;
+  }
+
   // Continue the file-reading loop
   return parseLoop();
 }

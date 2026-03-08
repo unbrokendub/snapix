@@ -7,6 +7,7 @@
 #include <Fb2.h>
 #include <Fb2Parser.h>
 #include <GfxRenderer.h>
+#include <HtmlParser.h>
 #include <Logging.h>
 #include <MarkdownParser.h>
 #include <Page.h>
@@ -344,6 +345,13 @@ void ReaderState::enter(Core& core) {
       auto* provider = core.content.asFb2();
       if (provider && provider->getFb2()) {
         provider->getFb2()->setupCacheDir();
+      }
+      break;
+    }
+    case ContentType::Html: {
+      auto* provider = core.content.asHtml();
+      if (provider && provider->getHtml()) {
+        provider->getHtml()->setupCacheDir();
       }
       break;
     }
@@ -783,6 +791,7 @@ void ReaderState::renderCurrentPage(Core& core) {
     case ContentType::Txt:
     case ContentType::Markdown:
     case ContentType::Fb2:
+    case ContentType::Html:
       renderCachedPage(core);
       break;
     case ContentType::Xtc:
@@ -1008,7 +1017,8 @@ void ReaderState::loadCacheFromDisk(Core& core) {
       return;
     }
     cachePath = epubSectionCachePath(provider->getEpub()->getCachePath(), currentSpineIndex_);
-  } else if (type == ContentType::Markdown || type == ContentType::Txt || type == ContentType::Fb2) {
+  } else if (type == ContentType::Markdown || type == ContentType::Txt || type == ContentType::Fb2 ||
+             type == ContentType::Html) {
     cachePath = contentCachePath(core.content.cacheDir(), config.fontId);
   } else {
     LOG_ERR(TAG, "loadCacheFromDisk: unsupported content type %d", static_cast<int>(type));
@@ -1054,6 +1064,12 @@ void ReaderState::createOrExtendCache(Core& core) {
     cachePath = contentCachePath(core.content.cacheDir(), config.fontId);
     if (!parser_) {
       parser_.reset(new Fb2Parser(contentPath_, renderer_, config));
+      parserSpineIndex_ = 0;
+    }
+  } else if (type == ContentType::Html) {
+    cachePath = contentCachePath(core.content.cacheDir(), config.fontId);
+    if (!parser_) {
+      parser_.reset(new HtmlParser(contentPath_, core.content.cacheDir(), renderer_, config));
       parserSpineIndex_ = 0;
     }
   } else {
@@ -1293,6 +1309,12 @@ void ReaderState::startBackgroundCaching(Core& core) {
               parser_.reset(new Fb2Parser(contentPath_, renderer_, config));
               parserSpineIndex_ = 0;
             }
+          } else if (type == ContentType::Html && !cacheTask_.shouldStop()) {
+            cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
+            if (!parser_) {
+              parser_.reset(new HtmlParser(contentPath_, coreRef.content.cacheDir(), renderer_, config));
+              parserSpineIndex_ = 0;
+            }
           } else if (type == ContentType::Txt && !cacheTask_.shouldStop()) {
             cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
             if (!parser_) {
@@ -1515,7 +1537,7 @@ int ReaderState::findCurrentTocEntry(Core& core) {
       }
     }
     return lastMatch;
-  } else if (type == ContentType::Markdown || type == ContentType::Txt) {
+  } else if (type == ContentType::Markdown || type == ContentType::Txt || type == ContentType::Html) {
     // For flat-page formats, find chapter whose pageIndex <= current section page
     const uint16_t count = core.content.tocCount();
     int lastMatch = -1;
@@ -1615,7 +1637,7 @@ void ReaderState::jumpToTocEntry(Core& core, int tocIndex) {
     }
 
     currentSectionPage_ = (page >= 0) ? page : 0;
-  } else if (type == ContentType::Markdown || type == ContentType::Txt) {
+  } else if (type == ContentType::Markdown || type == ContentType::Txt || type == ContentType::Html) {
     // For flat-page formats, pageNum is the section page index
     currentSectionPage_ = chapter.pageNum;
   }

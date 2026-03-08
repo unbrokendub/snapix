@@ -27,6 +27,9 @@ ContentType detectContentType(const char* path) {
   if (strcasecmp(ext, ".fb2") == 0) {
     return ContentType::Fb2;
   }
+  if (strcasecmp(ext, ".html") == 0 || strcasecmp(ext, ".htm") == 0) {
+    return ContentType::Html;
+  }
 
   return ContentType::None;
 }

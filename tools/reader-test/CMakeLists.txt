@@ -17,6 +17,8 @@ add_executable(reader-test
   ${PROJECT_ROOT}/lib/Markdown/src/Markdown.cpp
   ${PROJECT_ROOT}/lib/Fb2/src/Fb2.cpp
   ${PROJECT_ROOT}/lib/Fb2/src/Fb2Parser.cpp
+  ${PROJECT_ROOT}/lib/Html/src/Html.cpp
+  ${PROJECT_ROOT}/lib/PageCache/src/HtmlParser.cpp
 
   # Text layout
   ${PROJECT_ROOT}/lib/RenderTypes/src/ParsedText.cpp
@@ -86,6 +88,7 @@ target_include_directories(reader-test PRIVATE
   ${PROJECT_ROOT}/lib/Markdown/src
   ${PROJECT_ROOT}/lib/Txt/src
   ${PROJECT_ROOT}/lib/Fb2/src
+  ${PROJECT_ROOT}/lib/Html/src
   ${PROJECT_ROOT}/lib/GfxRenderer/src
   ${PROJECT_ROOT}/lib/EpdFont/src
   ${PROJECT_ROOT}/lib/EpdFont/src/builtinFonts

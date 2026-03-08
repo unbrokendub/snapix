@@ -132,6 +132,8 @@ A sans-serif font with complete Arabic script support including contextual shapi
 
 For CJK texts, Papyrix uses external `.bin` format fonts that are streamed from the SD card due to their large size. The `.bin` format uses direct codepoint indexing (1-bit bitmap, MSB first) for the full BMP range (U+0000-U+FFEF).
 
+> **Note:** CJK fonts are supported for book text (reading view) only. UI elements (home screen, status bar, book title overlay) use built-in bitmap fonts that do not include CJK glyphs.
+
 #### Quick Start with gen_cjk_theme.sh
 
 The easiest way to create CJK fonts is with `gen_cjk_theme.sh`, which generates a `.bin` font and matching `.theme` file. The script automatically downloads the `fontconvert-bin` binary if it's not already built locally (no Go installation required):

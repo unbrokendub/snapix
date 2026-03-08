@@ -36,6 +36,7 @@ This project is **not affiliated with Xteink**; it's built as a community projec
 - [x] EPUB 2 and EPUB 3 parsing (nav.xhtml with NCX fallback)
 - [x] CSS stylesheet parsing (text-align, font-style, font-weight, text-indent, margins, direction)
 - [x] FB2 (FictionBook 2.0) support with metadata, TOC navigation, and metadata caching (no inline images)
+- [x] HTML (.html, .htm) file support (standalone HTML documents)
 - [x] XTC/XTCH native format support
 - [x] Markdown (.md, .markdown) file support with formatting
 - [x] Plain text (.txt, .text) file support
@@ -52,7 +53,7 @@ This project is **not affiliated with Xteink**; it's built as a community projec
 - [x] Soft hyphen support for text layout
 - [x] Liang-pattern hyphenation with language detection from EPUB metadata (de, en, es, fr, it, ru, uk)
 - [x] Native Vietnamese, Thai, Greek, and Arabic support in builtin fonts
-- [x] CJK (Chinese/Japanese/Korean) text layout
+- [x] CJK (Chinese/Japanese/Korean) text layout (book text only, not UI)
 - [x] Thai text rendering with proper mark positioning
 - [x] Arabic text shaping - contextual forms, Lam-Alef ligatures with RTL layout
 - [x] Knuth-Plass line breaking algorithm (TeX-quality justified text)
@@ -274,7 +275,7 @@ Usage:
 
 #### Reader test (desktop)
 
-A desktop tool for testing the content parsing pipeline (EPUB, TXT, Markdown) without flashing to hardware. Useful for catching parsing bugs, layout issues, or crashes.
+A desktop tool for testing the content parsing pipeline (EPUB, FB2, HTML, TXT, Markdown) without flashing to hardware. Useful for catching parsing bugs, layout issues, or crashes.
 
 ```bash
 # Build only
@@ -353,6 +354,11 @@ The first time chapters of a book are loaded, they are cached to the SD card. Su
 │   ├── progress.bin     # Stores current page number (2-byte uint16)
 │   ├── section.bin      # Parsed pages (same format as EPUB sections)
 │   └── cover.bmp        # Cover image (converted from README.jpg/png/bmp or cover.jpg/png/bmp)
+│
+├── html_12345678/       # Each HTML file is cached to a subdirectory named `html_<hash>`
+│   ├── progress.bin     # Stores current page number (4-byte, same as TXT/Markdown)
+│   ├── pages_<fontId>.bin  # Parsed pages (same format as Markdown/FB2 sections)
+│   └── cover.bmp        # Cover image (converted from adjacent image file)
 │
 └── epub_189013891/
 ```

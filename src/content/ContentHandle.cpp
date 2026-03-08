@@ -2,6 +2,7 @@
 
 #include <Epub.h>
 #include <Fb2.h>
+#include <Html.h>
 #include <Markdown.h>
 #include <Txt.h>
 #include <Xtc.h>
@@ -26,7 +27,8 @@ constexpr size_t maxSize() {
 
 ContentHandle::ContentHandle() : type(ContentType::None) {
   // Zero-initialize entire union for safety
-  constexpr size_t unionSize = maxSize<EpubProvider, XtcProvider, TxtProvider, MarkdownProvider, Fb2Provider>();
+  constexpr size_t unionSize =
+      maxSize<EpubProvider, XtcProvider, TxtProvider, MarkdownProvider, Fb2Provider, HtmlProvider>();
   memset(&epub, 0, unionSize);
 }
 
@@ -48,6 +50,9 @@ void ContentHandle::destroyActive() {
       break;
     case ContentType::Fb2:
       fb2.~Fb2Provider();
+      break;
+    case ContentType::Html:
+      html.~HtmlProvider();
       break;
     case ContentType::None:
       break;
@@ -71,6 +76,9 @@ void ContentHandle::constructProvider(ContentType newType) {
       break;
     case ContentType::Fb2:
       new (&fb2) Fb2Provider();
+      break;
+    case ContentType::Html:
+      new (&html) HtmlProvider();
       break;
     case ContentType::None:
       break;
@@ -109,6 +117,9 @@ Result<void> ContentHandle::open(const char* path, const char* cacheDir) {
     case ContentType::Fb2:
       result = fb2.open(path, cacheDir);
       break;
+    case ContentType::Html:
+      result = html.open(path, cacheDir);
+      break;
     default:
       result = ErrVoid(Error::InvalidFormat);
       break;
@@ -136,6 +147,8 @@ const ContentMetadata& ContentHandle::metadata() const {
       return markdown.meta;
     case ContentType::Fb2:
       return fb2.meta;
+    case ContentType::Html:
+      return html.meta;
     default:
       return emptyMetadata_;
   }
@@ -153,6 +166,8 @@ uint32_t ContentHandle::pageCount() const {
       return markdown.pageCount();
     case ContentType::Fb2:
       return fb2.pageCount();
+    case ContentType::Html:
+      return html.pageCount();
     default:
       return 0;
   }
@@ -175,6 +190,8 @@ uint16_t ContentHandle::tocCount() const {
       return markdown.tocCount();
     case ContentType::Fb2:
       return fb2.tocCount();
+    case ContentType::Html:
+      return html.tocCount();
     default:
       return 0;
   }
@@ -192,6 +209,8 @@ Result<TocEntry> ContentHandle::getTocEntry(uint16_t index) const {
       return markdown.getTocEntry(index);
     case ContentType::Fb2:
       return fb2.getTocEntry(index);
+    case ContentType::Html:
+      return html.getTocEntry(index);
     default:
       return Err<TocEntry>(Error::InvalidState);
   }
@@ -219,6 +238,11 @@ std::string ContentHandle::getThumbnailPath() const {
     case ContentType::Fb2:
       if (fb2.getFb2()) {
         return fb2.getFb2()->getThumbBmpPath();
+      }
+      break;
+    case ContentType::Html:
+      if (html.getHtml()) {
+        return html.getHtml()->getThumbBmpPath();
       }
       break;
     default:
@@ -249,6 +273,11 @@ std::string ContentHandle::getCoverPath() const {
     case ContentType::Fb2:
       if (fb2.getFb2()) {
         return fb2.getFb2()->getCoverBmpPath();
+      }
+      break;
+    case ContentType::Html:
+      if (html.getHtml()) {
+        return html.getHtml()->getCoverBmpPath();
       }
       break;
     default:
@@ -284,6 +313,11 @@ std::string ContentHandle::generateThumbnail() {
         return fb2.getFb2()->getThumbBmpPath();
       }
       break;
+    case ContentType::Html:
+      if (html.getHtml() && html.getHtml()->generateThumbBmp()) {
+        return html.getHtml()->getThumbBmpPath();
+      }
+      break;
     default:
       break;
   }
@@ -317,6 +351,11 @@ std::string ContentHandle::generateCover(bool use1BitDithering) {
         return fb2.getFb2()->getCoverBmpPath();
       }
       break;
+    case ContentType::Html:
+      if (html.getHtml() && html.getHtml()->generateCoverBmp(use1BitDithering)) {
+        return html.getHtml()->getCoverBmpPath();
+      }
+      break;
     default:
       break;
   }
@@ -345,5 +384,9 @@ const MarkdownProvider* ContentHandle::asMarkdown() const {
 }
 
 const Fb2Provider* ContentHandle::asFb2() const { return type == ContentType::Fb2 ? &fb2 : nullptr; }
+
+HtmlProvider* ContentHandle::asHtml() { return type == ContentType::Html ? &html : nullptr; }
+
+const HtmlProvider* ContentHandle::asHtml() const { return type == ContentType::Html ? &html : nullptr; }
 
 }  // namespace papyrix

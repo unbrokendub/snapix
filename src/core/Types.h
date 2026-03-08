@@ -24,6 +24,7 @@ enum class ContentType : uint8_t {
   Txt,
   Markdown,
   Fb2,
+  Html,
 };
 
 // State identifiers

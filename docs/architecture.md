@@ -12,7 +12,8 @@ Papyrix is organized around a **state machine** architecture with **singleton ma
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  StateMachine (10 States)  │  Managers (Font, Theme, Input)                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ContentHandle (EPUB, XTC, TXT, Markdown, FB2)  │  PageCache                │
+│  ContentHandle                                                              │
+│  (EPUB, XTC, TXT, Markdown, FB2, HTML)               │  PageCache           │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  GfxRenderer  │  EpdFont  │  ThaiShaper  │  ArabicShaper  │  ScriptDetector │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -427,7 +428,7 @@ class HomeState : public State {
 
 ## Desktop Testing (reader-test)
 
-`tools/reader-test/` is a desktop tool that runs the full content parsing pipeline (EPUB/TXT/Markdown/FB2) without hardware. It uses the same built-in fonts and viewport dimensions as the device to produce identical page boundaries.
+`tools/reader-test/` is a desktop tool that runs the full content parsing pipeline (EPUB/FB2/HTML/TXT/Markdown) without hardware. It uses the same built-in fonts and viewport dimensions as the device to produce identical page boundaries.
 
 ### Device Emulation
 

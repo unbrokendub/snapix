@@ -1,6 +1,6 @@
 # File Formats
 
-This document describes the binary cache formats used by Papyrix for EPUB, TXT, Markdown, and FB2 files.
+This document describes the binary cache formats used by Papyrix for EPUB, TXT, Markdown, FB2, and HTML files.
 
 ## TXT Cache Files
 
@@ -153,6 +153,42 @@ The image is converted to 1-bit dithered BMP format for display.
 - **Namespace handling** — Strips XML namespace prefixes for compatibility
 - **Binary skip** — `<binary>` tags (embedded images) skipped to save memory
 - **Images** — Not supported (inline images are skipped)
+
+---
+
+## HTML Cache Files
+
+HTML files (`.html`, `.htm`) use a cache format stored in `.papyrix/html_<hash>/`. HTML is parsed using the same pipeline as EPUB chapters (HTML5 normalization → Expat XML → page layout).
+
+### `progress.bin`
+
+Stores the current reading position (same format as TXT/Markdown — 4-byte little-endian, section page in lower 2 bytes).
+
+### `pages_<fontId>.bin`
+
+Stores the parsed and laid-out pages (same section format as Markdown and FB2). The filename includes the font ID hash so the cache is invalidated when the font changes.
+
+### `cover.bmp`
+
+Optional cover image, discovered by searching for (case-insensitive):
+1. `<filename>.jpg`, `<filename>.jpeg`, `<filename>.png`, or `<filename>.bmp` (matching the HTML filename)
+2. `cover.jpg`, `cover.jpeg`, `cover.png`, or `cover.bmp` in the same directory
+
+The image is converted to 1-bit dithered BMP format for display.
+
+### Supported HTML Features
+
+- **Title** — Extracted from `<title>` tag (falls back to filename)
+- **Headings** (`<h1>`–`<h6>`) — Rendered bold and centered
+- **Paragraphs** (`<p>`) — Standard paragraph layout with configurable alignment
+- **Bold** (`<b>`, `<strong>`) — Bold font style
+- **Italic** (`<i>`, `<em>`) — Italic font style
+- **List items** (`<li>`) — Rendered as block elements (list containers `<ul>`/`<ol>` are treated as inline)
+- **Blockquotes** (`<blockquote>`) — Indented block style
+- **Divs** (`<div>`) — Block-level grouping
+- **Line breaks** (`<br>`) — Inline line breaks
+- **HTML entities** — Standard entities (`&amp;`, `&lt;`, `&gt;`, numeric character references)
+- **Images** — Not supported (standalone HTML, no image extraction)
 
 ---
 
@@ -404,7 +440,7 @@ if (parsedSize != fileSize) {
 
 ### `bookmarks.bin`
 
-Stores saved bookmarks. Present in all cache directories (EPUB, FB2, TXT, Markdown, XTC).
+Stores saved bookmarks. Present in all cache directories (EPUB, FB2, HTML, TXT, Markdown, XTC).
 
 ```
 Offset  Size             Description
