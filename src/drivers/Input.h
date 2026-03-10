@@ -33,6 +33,9 @@ class Input {
   // Time since last input activity (ms)
   uint32_t idleTimeMs() const;
 
+  // Reset idle timer (e.g., when WiFi activity should prevent auto-sleep)
+  void resetIdleTimer();
+
   // Direct state queries (for hold detection)
   bool isPressed(Button btn) const;
 

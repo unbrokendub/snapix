@@ -126,6 +126,8 @@ void Input::checkButton(Button btn, uint8_t mask) {
 
 uint32_t Input::idleTimeMs() const { return millis() - lastActivityMs_; }
 
+void Input::resetIdleTimer() { lastActivityMs_ = millis(); }
+
 bool Input::isPressed(Button btn) const {
   MappedInputManager::Button mappedBtn;
   switch (btn) {

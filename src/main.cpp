@@ -525,6 +525,10 @@ void loop() {
 
   // Auto-sleep after inactivity
   const auto autoSleepTimeout = papyrix::core.settings.getAutoSleepTimeoutMs();
+  const bool wifiActive = papyrix::core.network.isConnected() || papyrix::core.network.isAPMode();
+  if (wifiActive) {
+    papyrix::core.input.resetIdleTimer();
+  }
   if (autoSleepTimeout > 0 && papyrix::core.input.idleTimeMs() >= autoSleepTimeout) {
     LOG_INF(TAG, "Auto-sleep after %lu ms idle", autoSleepTimeout);
     stateMachine.init(papyrix::core, papyrix::StateId::Sleep);
