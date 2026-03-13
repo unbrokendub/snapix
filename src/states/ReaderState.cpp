@@ -1408,9 +1408,19 @@ void ReaderState::exitTocMode() {
 }
 
 void ReaderState::handleTocInput(Core& core, const Event& e) {
-  if (e.type != EventType::ButtonPress && e.type != EventType::ButtonRepeat && e.type != EventType::ButtonRelease) {
+  if (e.button == Button::Power && e.type == EventType::ButtonRelease) {
+    if (core.settings.shortPwrBtn == Settings::PowerPageTurn && powerPressStartedMs_ != 0) {
+      const uint32_t heldMs = millis() - powerPressStartedMs_;
+      if (heldMs < core.settings.getPowerButtonDuration()) {
+        tocView_.moveDown();
+        needsRender_ = true;
+      }
+    }
+    powerPressStartedMs_ = 0;
     return;
   }
+
+  if (e.type != EventType::ButtonPress && e.type != EventType::ButtonRepeat) return;
 
   switch (e.button) {
     case Button::Up:
@@ -1445,17 +1455,8 @@ void ReaderState::handleTocInput(Core& core, const Event& e) {
       break;
 
     case Button::Power:
-      if (core.settings.shortPwrBtn == Settings::PowerPageTurn) {
-        if (e.type == EventType::ButtonPress) {
-          powerPressStartedMs_ = millis();
-        } else if (e.type == EventType::ButtonRelease && powerPressStartedMs_ != 0) {
-          const uint32_t heldMs = millis() - powerPressStartedMs_;
-          if (heldMs < core.settings.getPowerButtonDuration()) {
-            tocView_.moveDown();
-            needsRender_ = true;
-          }
-          powerPressStartedMs_ = 0;
-        }
+      if (e.type == EventType::ButtonPress && core.settings.shortPwrBtn == Settings::PowerPageTurn) {
+        powerPressStartedMs_ = millis();
       }
       break;
   }

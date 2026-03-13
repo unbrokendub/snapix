@@ -58,21 +58,18 @@ struct TocDispatcher {
   void processEvent(const Event& e) {
     lastAction = TocAction::None;
 
-    if (e.type != EventType::ButtonPress && e.type != EventType::ButtonRepeat &&
-        e.type != EventType::ButtonRelease) {
-      return;
-    }
-
-    if (e.type == EventType::ButtonRelease) {
-      if (e.button == Button::Power && shortPwrBtn == PowerPageTurn && powerPressStartedMs_ != 0) {
+    if (e.button == Button::Power && e.type == EventType::ButtonRelease) {
+      if (shortPwrBtn == PowerPageTurn && powerPressStartedMs_ != 0) {
         const uint32_t heldMs = millis() - powerPressStartedMs_;
         if (heldMs < powerButtonDuration) {
           lastAction = TocAction::MoveDown;
         }
-        powerPressStartedMs_ = 0;
       }
+      powerPressStartedMs_ = 0;
       return;
     }
+
+    if (e.type != EventType::ButtonPress && e.type != EventType::ButtonRepeat) return;
 
     switch (e.button) {
       case Button::Up:
@@ -94,7 +91,7 @@ struct TocDispatcher {
         lastAction = TocAction::Exit;
         break;
       case Button::Power:
-        if (shortPwrBtn == PowerPageTurn) {
+        if (e.type == EventType::ButtonPress && shortPwrBtn == PowerPageTurn) {
           powerPressStartedMs_ = millis();
         }
         break;
@@ -221,6 +218,48 @@ int main() {
     d.processEvent(Event::press(Button::Right));
     runner.expectEq(static_cast<int>(TocAction::PageDown), static_cast<int>(d.lastAction),
                     "Right Press -> PageDown");
+  }
+
+  // ============================================
+  // Power release always resets timestamp (even when not PageTurn mode)
+  // ============================================
+
+  {
+    TocDispatcher d;
+    d.shortPwrBtn = TocDispatcher::PowerIgnore;
+    d.currentTimeMs_ = 100;
+    d.powerPressStartedMs_ = 50;  // stale timestamp from previous state
+    d.processEvent(Event::release(Button::Power));
+    runner.expectEq(uint32_t(0), d.powerPressStartedMs_,
+                    "Power Release (Ignore mode) still resets timestamp");
+  }
+
+  {
+    TocDispatcher d;
+    d.shortPwrBtn = TocDispatcher::PowerSleep;
+    d.powerPressStartedMs_ = 50;
+    d.processEvent(Event::release(Button::Power));
+    runner.expectEq(uint32_t(0), d.powerPressStartedMs_,
+                    "Power Release (Sleep mode) still resets timestamp");
+  }
+
+  // ============================================
+  // Power ButtonRepeat does NOT re-set timestamp
+  // ============================================
+
+  {
+    TocDispatcher d;
+    d.shortPwrBtn = TocDispatcher::PowerPageTurn;
+    d.currentTimeMs_ = 100;
+    d.processEvent(Event::press(Button::Power));
+    runner.expectEq(uint32_t(100), d.powerPressStartedMs_,
+                    "Power Press sets timestamp");
+    d.currentTimeMs_ = 200;
+    d.processEvent(Event::repeat(Button::Power));
+    runner.expectEq(uint32_t(100), d.powerPressStartedMs_,
+                    "Power Repeat does not re-set timestamp");
+    runner.expectEq(static_cast<int>(TocAction::None), static_cast<int>(d.lastAction),
+                    "Power Repeat -> None");
   }
 
   // ============================================
