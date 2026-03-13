@@ -52,6 +52,12 @@ struct ReaderButtonDispatcher {
 
   enum PowerAction : uint8_t { PowerIgnore = 0, PowerSleep = 1, PowerPageTurn = 2 };
   uint8_t shortPwrBtn = PowerIgnore;
+  uint32_t powerPressStartedMs_ = 0;
+  uint16_t powerButtonDuration = 400;
+
+  // Mock time for testing timing guard
+  uint32_t currentTimeMs_ = 0;
+  uint32_t millis() const { return currentTimeMs_; }
 
   Action lastAction = Action::None;
 
@@ -74,7 +80,7 @@ struct ReaderButtonDispatcher {
             break;
           case Button::Power:
             if (shortPwrBtn == PowerPageTurn) {
-              lastAction = Action::Next;
+              powerPressStartedMs_ = millis();
             }
             break;
           default:
@@ -112,9 +118,20 @@ struct ReaderButtonDispatcher {
             case Button::Up:
               lastAction = Action::Prev;
               break;
+            case Button::Power:
+              if (shortPwrBtn == PowerPageTurn && powerPressStartedMs_ != 0) {
+                const uint32_t heldMs = millis() - powerPressStartedMs_;
+                if (heldMs < powerButtonDuration) {
+                  lastAction = Action::Next;
+                }
+              }
+              break;
             default:
               break;
           }
+        }
+        if (e.button == Button::Power) {
+          powerPressStartedMs_ = 0;
         }
         holdNavigated_ = false;
         break;
@@ -334,9 +351,12 @@ int main() {
   {
     ReaderButtonDispatcher d;
     d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
+    d.currentTimeMs_ = 100;
     d.processEvent(Event::press(Button::Power));
-    runner.expectEq(static_cast<int>(Action::Next), static_cast<int>(d.lastAction),
-                    "Power Press (PageTurn) -> Next");
+    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
+                    "Power Press (PageTurn) -> None (deferred to release)");
+    runner.expectEq(uint32_t(100), d.powerPressStartedMs_,
+                    "Power Press records timestamp");
   }
 
   {
@@ -345,6 +365,8 @@ int main() {
     d.processEvent(Event::press(Button::Power));
     runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
                     "Power Press (Ignore) -> None");
+    runner.expectEq(uint32_t(0), d.powerPressStartedMs_,
+                    "Power Press (Ignore) does not record timestamp");
   }
 
   {
@@ -355,12 +377,80 @@ int main() {
                     "Power Press (Sleep) -> None");
   }
 
+  // Release without prior press -> None (powerPressStartedMs_ is 0)
   {
     ReaderButtonDispatcher d;
     d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
     d.processEvent(Event::release(Button::Power));
     runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power Release -> None (regardless of setting)");
+                    "Power Release without press -> None (no timestamp)");
+  }
+
+  {
+    ReaderButtonDispatcher d;
+    d.shortPwrBtn = ReaderButtonDispatcher::PowerIgnore;
+    d.processEvent(Event::release(Button::Power));
+    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
+                    "Power Release (Ignore) -> None");
+  }
+
+  {
+    ReaderButtonDispatcher d;
+    d.shortPwrBtn = ReaderButtonDispatcher::PowerSleep;
+    d.processEvent(Event::release(Button::Power));
+    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
+                    "Power Release (Sleep) -> None");
+  }
+
+  // Short press+release (under duration threshold) -> Next
+  {
+    ReaderButtonDispatcher d;
+    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
+    d.currentTimeMs_ = 1000;
+    d.processEvent(Event::press(Button::Power));
+    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
+                    "Power press+release: press -> None");
+    d.currentTimeMs_ = 1100;  // 100ms held, under 400ms threshold
+    d.processEvent(Event::release(Button::Power));
+    runner.expectEq(static_cast<int>(Action::Next), static_cast<int>(d.lastAction),
+                    "Power press+release (short) -> Next");
+    runner.expectEq(uint32_t(0), d.powerPressStartedMs_,
+                    "Power release resets timestamp");
+  }
+
+  // Long hold (over duration threshold) -> None (sleep, not page turn)
+  {
+    ReaderButtonDispatcher d;
+    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
+    d.currentTimeMs_ = 1000;
+    d.processEvent(Event::press(Button::Power));
+    d.currentTimeMs_ = 1500;  // 500ms held, over 400ms threshold
+    d.processEvent(Event::release(Button::Power));
+    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
+                    "Power long hold -> None (held past duration)");
+  }
+
+  // Hold exactly at boundary -> None (not strictly less than)
+  {
+    ReaderButtonDispatcher d;
+    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
+    d.currentTimeMs_ = 1000;
+    d.processEvent(Event::press(Button::Power));
+    d.currentTimeMs_ = 1400;  // exactly 400ms = threshold
+    d.processEvent(Event::release(Button::Power));
+    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
+                    "Power hold at exact threshold -> None");
+  }
+
+  {
+    ReaderButtonDispatcher d;
+    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
+    d.holdNavigated_ = true;
+    d.powerPressStartedMs_ = 100;
+    d.currentTimeMs_ = 150;
+    d.processEvent(Event::release(Button::Power));
+    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
+                    "Power Release suppressed by holdNavigated_");
   }
 
   // ============================================
