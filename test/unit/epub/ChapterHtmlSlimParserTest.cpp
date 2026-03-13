@@ -119,6 +119,13 @@ class TestParser {
   BlockStyle currentBlockStyle = BlockStyle::LEFT;
   std::vector<AlignEntry> alignStack;
 
+  struct ListEntry {
+    int depth;
+    bool isOrdered;
+    int counter;
+  };
+  std::vector<ListEntry> listStack;
+
   void flushText() {
     if (!currentText.empty()) {
       ParsedElement elem;
@@ -272,6 +279,19 @@ class TestParser {
         self->alignStack.push_back({self->depth, blockStyle});
       }
       self->currentBlockStyle = blockStyle;
+
+      if (strcmp(name, "li") == 0 && !self->listStack.empty()) {
+        auto& listEntry = self->listStack.back();
+        listEntry.counter++;
+        char marker[12];
+        if (listEntry.isOrdered) {
+          snprintf(marker, sizeof(marker), "%d.", listEntry.counter);
+        } else {
+          strcpy(marker, "\xe2\x80\xa2");  // U+2022 BULLET
+        }
+        if (!self->currentText.empty()) self->currentText += " ";
+        self->currentText += marker;
+      }
     }
 
     // Bold tags
@@ -282,6 +302,8 @@ class TestParser {
     // Italic tags
     if (matches(name, ITALIC_TAGS, NUM_ITALIC_TAGS)) {
       self->italicUntilDepth = std::min(self->italicUntilDepth, self->depth);
+    } else if (strcmp(name, "ul") == 0 || strcmp(name, "ol") == 0) {
+      self->listStack.push_back({self->depth, strcmp(name, "ol") == 0, 0});
     }
 
     // Record anchor-to-page mapping (after block handling, mirrors ChapterHtmlSlimParser)
@@ -359,6 +381,9 @@ class TestParser {
     }
     while (!self->alignStack.empty() && self->alignStack.back().depth >= self->depth) {
       self->alignStack.pop_back();
+    }
+    while (!self->listStack.empty() && self->listStack.back().depth >= self->depth) {
+      self->listStack.pop_back();
     }
   }
 
@@ -1615,6 +1640,133 @@ int main() {
                       "align_nonempty_header_center: h1 with text is still centered");
     runner.expectTrue(parser.getBlockStyleForText("Body text") == BlockStyle::LEFT,
                       "align_nonempty_header_center: p after h1 is left-aligned");
+  }
+
+  // ============================================
+  // HTML list rendering tests
+  // ============================================
+
+  // Test 94: Unordered list bullets
+  {
+    TestParser parser;
+    bool ok = parser.parse("<html><body><ul><li>A</li><li>B</li></ul></body></html>");
+    runner.expectTrue(ok, "ul_bullets: parses successfully");
+    std::string text = parser.getAllText();
+    // U+2022 BULLET = 0xE2 0x80 0xA2
+    runner.expectTrue(text.find("\xe2\x80\xa2") != std::string::npos, "ul_bullets: bullet character present");
+    runner.expectTrue(text.find("A") != std::string::npos, "ul_bullets: item A present");
+    runner.expectTrue(text.find("B") != std::string::npos, "ul_bullets: item B present");
+  }
+
+  // Test 95: Ordered list numbers
+  {
+    TestParser parser;
+    bool ok = parser.parse("<html><body><ol><li>A</li><li>B</li><li>C</li></ol></body></html>");
+    runner.expectTrue(ok, "ol_numbers: parses successfully");
+    std::string text = parser.getAllText();
+    runner.expectTrue(text.find("1.") != std::string::npos, "ol_numbers: 1. present");
+    runner.expectTrue(text.find("2.") != std::string::npos, "ol_numbers: 2. present");
+    runner.expectTrue(text.find("3.") != std::string::npos, "ol_numbers: 3. present");
+  }
+
+  // Test 96: Nested ul inside ul
+  {
+    TestParser parser;
+    bool ok = parser.parse("<html><body><ul><li>Outer<ul><li>Inner</li></ul></li></ul></body></html>");
+    runner.expectTrue(ok, "nested_ul: parses successfully");
+    std::string text = parser.getAllText();
+    // Two bullets expected (outer + inner)
+    size_t first = text.find("\xe2\x80\xa2");
+    runner.expectTrue(first != std::string::npos, "nested_ul: first bullet present");
+    size_t second = text.find("\xe2\x80\xa2", first + 3);
+    runner.expectTrue(second != std::string::npos, "nested_ul: second bullet present");
+  }
+
+  // Test 97: ol inside ul
+  {
+    TestParser parser;
+    bool ok = parser.parse(
+        "<html><body><ul><li>Bullet<ol><li>Numbered</li></ol></li></ul></body></html>");
+    runner.expectTrue(ok, "ol_inside_ul: parses successfully");
+    std::string text = parser.getAllText();
+    runner.expectTrue(text.find("\xe2\x80\xa2") != std::string::npos, "ol_inside_ul: bullet present");
+    runner.expectTrue(text.find("1.") != std::string::npos, "ol_inside_ul: 1. present");
+  }
+
+  // Test 98: Counter increments sequentially
+  {
+    TestParser parser;
+    bool ok = parser.parse("<html><body><ol><li>A</li><li>B</li><li>C</li></ol></body></html>");
+    runner.expectTrue(ok, "ol_counter: parses successfully");
+    std::string text = parser.getAllText();
+    size_t pos1 = text.find("1.");
+    size_t pos2 = text.find("2.");
+    size_t pos3 = text.find("3.");
+    runner.expectTrue(pos1 != std::string::npos && pos2 != std::string::npos && pos3 != std::string::npos,
+                      "ol_counter: all markers present");
+    runner.expectTrue(pos1 < pos2 && pos2 < pos3, "ol_counter: sequential order");
+  }
+
+  // Test 99: Orphan li (no parent list) — no marker emitted
+  {
+    TestParser parser;
+    bool ok = parser.parse("<html><body><li>Orphan</li></body></html>");
+    runner.expectTrue(ok, "orphan_li: parses successfully");
+    std::string text = parser.getAllText();
+    runner.expectTrue(text.find("\xe2\x80\xa2") == std::string::npos, "orphan_li: no bullet");
+    runner.expectTrue(text.find("1.") == std::string::npos, "orphan_li: no number");
+    runner.expectTrue(text.find("Orphan") != std::string::npos, "orphan_li: text present");
+  }
+
+  // Test 100: Counter resets for new list
+  {
+    TestParser parser;
+    bool ok = parser.parse(
+        "<html><body><ol><li>A</li></ol><ol><li>B</li></ol></body></html>");
+    runner.expectTrue(ok, "ol_counter_reset: parses successfully");
+    std::string text = parser.getAllText();
+    // Both lists should start at "1."
+    size_t first1 = text.find("1.");
+    runner.expectTrue(first1 != std::string::npos, "ol_counter_reset: first 1. present");
+    size_t second1 = text.find("1.", first1 + 2);
+    runner.expectTrue(second1 != std::string::npos, "ol_counter_reset: second 1. present");
+    runner.expectTrue(text.find("2.") == std::string::npos, "ol_counter_reset: no 2. (single item lists)");
+  }
+
+  // Test 101: Empty list items don't crash
+  {
+    TestParser parser;
+    bool ok = parser.parse("<html><body><ul><li></li><li>Content</li></ul></body></html>");
+    runner.expectTrue(ok, "empty_li: parses without crash");
+    std::string text = parser.getAllText();
+    runner.expectTrue(text.find("Content") != std::string::npos, "empty_li: content present");
+  }
+
+  // Test 102: List with bold/italic content
+  {
+    TestParser parser;
+    bool ok = parser.parse("<html><body><ul><li><b>Bold</b></li></ul></body></html>");
+    runner.expectTrue(ok, "li_bold: parses successfully");
+    std::string text = parser.getAllText();
+    runner.expectTrue(text.find("\xe2\x80\xa2") != std::string::npos, "li_bold: bullet present");
+    runner.expectTrue(text.find("Bold") != std::string::npos, "li_bold: bold content present");
+  }
+
+  // Test 103: 3-level nesting (ul > ul > ol)
+  {
+    TestParser parser;
+    bool ok = parser.parse(
+        "<html><body>"
+        "<ul><li>L1<ul><li>L2<ol><li>L3</li></ol></li></ul></li></ul>"
+        "</body></html>");
+    runner.expectTrue(ok, "3level_nest: parses successfully");
+    std::string text = parser.getAllText();
+    // Two bullets (L1, L2) + one number (L3)
+    size_t b1 = text.find("\xe2\x80\xa2");
+    runner.expectTrue(b1 != std::string::npos, "3level_nest: first bullet");
+    size_t b2 = text.find("\xe2\x80\xa2", b1 + 3);
+    runner.expectTrue(b2 != std::string::npos, "3level_nest: second bullet");
+    runner.expectTrue(text.find("1.") != std::string::npos, "3level_nest: numbered item");
   }
 
   return runner.allPassed() ? 0 : 1;

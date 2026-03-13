@@ -67,6 +67,15 @@ class ChapterHtmlSlimParser {
     TextBlock::BLOCK_STYLE style;
   };
   std::vector<AlignEntry> alignStack_;
+
+  struct ListEntry {
+    int depth;
+    bool isOrdered;
+    int counter;
+  };
+  std::vector<ListEntry> listStack_;
+  char pendingListMarker_[12] = {};
+
   bool aborted_ = false;
 
   // External abort callback for cooperative cancellation
