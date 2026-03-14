@@ -122,12 +122,12 @@ StateTransition HomeState::update(Core& core) {
             break;
 
           case Button::Center:
-            // btn2: Files
+            // btn2: File
             return StateTransition::to(StateId::FileList);
 
           case Button::Left:
-            // btn3: Sync
-            return StateTransition::to(StateId::Sync);
+            // btn3: Apps
+            return StateTransition::to(StateId::AppLauncher);
 
           case Button::Right:
             // btn4: Settings

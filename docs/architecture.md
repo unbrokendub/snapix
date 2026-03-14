@@ -36,9 +36,9 @@ Papyrix uses a finite state machine (FSM) with pre-allocated state instances. Th
 - **FileList** — File browser for book selection
 - **Reader** — Unified reader for all formats
 - **Settings** — User preferences and device settings
-- **Sync** — WiFi file transfer
 - **Network** — WiFi network selection and connection
 - **CalibreSync** — Calibre wireless device sync
+- **AppLauncher** — Mini-apps, WiFi transfer, and Calibre sync
 - **Error** — Error display and recovery
 - **Sleep** — Deep sleep with custom screens
 
@@ -375,7 +375,7 @@ src/ui/
     ├── ReaderViews.h/cpp   # Reader UI (TOC, status bar)
     ├── SettingsViews.h/cpp # Settings screens
     ├── NetworkViews.h/cpp  # WiFi configuration
-    ├── SyncViews.h/cpp     # File transfer status
+    ├── AppLauncherViews.h/cpp # App launcher menu
     ├── CalibreViews.h/cpp  # Calibre sync UI
     ├── UtilityViews.h/cpp  # Common elements
     └── BootSleepViews.h/cpp# Boot splash, sleep screen

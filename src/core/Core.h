@@ -37,6 +37,7 @@ struct Core {
 
   // === Pending operations ===
   SyncMode pendingSync = SyncMode::None;
+  int8_t pendingAppId = -1;
 
   // === Lifecycle ===
   Result<void> init();

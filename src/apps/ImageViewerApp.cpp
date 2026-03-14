@@ -1,0 +1,259 @@
+#include "ImageViewerApp.h"
+
+#include <Arduino.h>
+#include <Bitmap.h>
+#include <CoverHelpers.h>
+#include <EInkDisplay.h>
+#include <FsHelpers.h>
+#include <GfxRenderer.h>
+#include <Logging.h>
+#include <SDCardManager.h>
+#include <SdFat.h>
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+#include "../core/Core.h"
+#include "../ui/Elements.h"
+#include "ThemeManager.h"
+
+#define TAG "IMG_VIEWER"
+
+extern GfxRenderer renderer;
+
+namespace papyrix {
+namespace imageviewer_app {
+
+static constexpr const char* IMAGES_DIR = "/images";
+static constexpr const char* SETTINGS_PATH = "/.papyrix/apps/image-viewer.txt";
+
+static constexpr uint32_t SLIDESHOW_INTERVALS[] = {0, 30000, 60000, 300000};
+static constexpr const char* SLIDESHOW_LABELS[] = {"Off", "30s", "60s", "5min"};
+static constexpr int SLIDESHOW_COUNT = 4;
+
+static struct {
+  std::vector<std::string> files;
+  int currentIndex = 0;
+  int slideshowSetting = 0;
+  unsigned long lastAdvanceMs = 0;
+  int8_t menuSelected = 0;
+} state;
+
+static void loadSettings(Core& core) {
+  char buf[64];
+  auto result = core.storage.readToBuffer(SETTINGS_PATH, buf, sizeof(buf));
+  if (!result.ok()) return;
+
+  size_t len = result.value;
+  buf[len < sizeof(buf) ? len : sizeof(buf) - 1] = '\0';
+
+  char* line = buf;
+  while (line && *line) {
+    char* nl = strchr(line, '\n');
+    if (nl) *nl = '\0';
+
+    if (strncmp(line, "slideshowInterval=", 18) == 0) {
+      int val = atoi(line + 18);
+      if (val >= 0 && val < SLIDESHOW_COUNT) {
+        state.slideshowSetting = val;
+      }
+    }
+
+    line = nl ? nl + 1 : nullptr;
+  }
+}
+
+static void saveSettings(Core& core) {
+  core.storage.mkdir("/.papyrix/apps");
+
+  FsFile file;
+  auto result = core.storage.openWrite(SETTINGS_PATH, file);
+  if (!result.ok()) return;
+
+  char buf[64];
+  snprintf(buf, sizeof(buf), "slideshowInterval=%d\n", state.slideshowSetting);
+  file.write(reinterpret_cast<const uint8_t*>(buf), strlen(buf));
+  file.close();
+}
+
+static void scanImages() {
+  state.files.clear();
+
+  FsFile dir = SdMan.open(IMAGES_DIR);
+  if (!dir || !dir.isDirectory()) {
+    LOG_INF(TAG, "No %s directory found", IMAGES_DIR);
+    if (dir) dir.close();
+    return;
+  }
+
+  char name[256];
+  FsFile entry;
+  while ((entry = dir.openNextFile())) {
+    if (entry.isDirectory()) {
+      entry.close();
+      continue;
+    }
+
+    entry.getName(name, sizeof(name));
+
+    if (name[0] == '.') {
+      entry.close();
+      continue;
+    }
+
+    if (FsHelpers::isBmpFile(name)) {
+      std::string path = std::string(IMAGES_DIR) + "/" + name;
+      state.files.push_back(path);
+    }
+
+    entry.close();
+  }
+  dir.close();
+
+  std::sort(state.files.begin(), state.files.end());
+
+  LOG_INF(TAG, "Found %zu BMP images", state.files.size());
+}
+
+static void renderImage() {
+  const Theme& theme = THEME;
+  const int screenW = renderer.getScreenWidth();
+  const int screenH = renderer.getScreenHeight();
+
+  renderer.clearScreen(theme.backgroundColor);
+
+  if (state.files.empty()) {
+    ui::centeredMessage(renderer, theme, theme.uiFontId, "No images in /images/");
+    ui::ButtonBar buttons("Back", "Menu", "", "");
+    ui::buttonBar(renderer, theme, buttons);
+    return;
+  }
+
+  const std::string& path = state.files[state.currentIndex];
+
+  FsFile file;
+  if (!SdMan.openFileForRead(TAG, path, file)) {
+    LOG_ERR(TAG, "Failed to open: %s", path.c_str());
+    ui::centeredMessage(renderer, theme, theme.uiFontId, "Failed to open image");
+    ui::ButtonBar buttons("Back", "Menu", "<", ">");
+    ui::buttonBar(renderer, theme, buttons);
+    return;
+  }
+
+  Bitmap bitmap(file);
+  if (bitmap.parseHeaders() != BmpReaderError::Ok) {
+    LOG_ERR(TAG, "Invalid BMP: %s", path.c_str());
+    file.close();
+    ui::centeredMessage(renderer, theme, theme.uiFontId, "Invalid BMP file");
+    ui::ButtonBar buttons("Back", "Menu", "<", ">");
+    ui::buttonBar(renderer, theme, buttons);
+    return;
+  }
+
+  // Reserve bottom 23px for button bar and counter
+  static constexpr int BOTTOM_BAR_HEIGHT = 23;
+  const int viewportH = screenH - BOTTOM_BAR_HEIGHT;
+
+  auto rect = CoverHelpers::calculateCenteredRect(bitmap.getWidth(), bitmap.getHeight(), 0, 0, screenW, viewportH);
+  renderer.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
+
+  file.close();
+
+  // Image counter
+  char counter[16];
+  snprintf(counter, sizeof(counter), "%d/%zu", state.currentIndex + 1, state.files.size());
+  renderer.drawCenteredText(theme.smallFontId, screenH - BOTTOM_BAR_HEIGHT + 4, counter, theme.primaryTextBlack);
+
+  ui::ButtonBar buttons("Back", "Menu", "<", ">");
+  ui::buttonBar(renderer, theme, buttons);
+}
+
+void enter(Core& core) {
+  LOG_INF(TAG, "Image Viewer enter");
+  state.currentIndex = 0;
+  state.lastAdvanceMs = millis();
+  state.menuSelected = 0;
+
+  loadSettings(core);
+  scanImages();
+}
+
+bool update(Core& core) {
+  (void)core;
+
+  uint32_t interval = SLIDESHOW_INTERVALS[state.slideshowSetting];
+  if (interval == 0 || state.files.empty()) return false;
+
+  unsigned long now = millis();
+  if (now - state.lastAdvanceMs >= interval) {
+    state.currentIndex = (state.currentIndex + 1) % static_cast<int>(state.files.size());
+    state.lastAdvanceMs = now;
+    return true;
+  }
+  return false;
+}
+
+void onButton(Core& core, Button btn) {
+  (void)core;
+
+  if (state.files.empty()) return;
+
+  const int count = static_cast<int>(state.files.size());
+
+  switch (btn) {
+    case Button::Left:
+      state.currentIndex = (state.currentIndex - 1 + count) % count;
+      state.lastAdvanceMs = millis();
+
+      break;
+    case Button::Right:
+      state.currentIndex = (state.currentIndex + 1) % count;
+      state.lastAdvanceMs = millis();
+
+      break;
+    default:
+      break;
+  }
+}
+
+void render(Core& core) {
+  (void)core;
+  renderImage();
+}
+
+void exit(Core& core) {
+  (void)core;
+  LOG_INF(TAG, "Image Viewer exit");
+  state.files.clear();
+  state.files.shrink_to_fit();
+}
+
+void renderMenu(Core& core) {
+  (void)core;
+
+  char label[32];
+  snprintf(label, sizeof(label), "Slideshow: %s", SLIDESHOW_LABELS[state.slideshowSetting]);
+
+  const char* items[] = {label};
+  ui::popupMenu(renderer, THEME, "Image Viewer", items, 1, state.menuSelected);
+}
+
+void onMenuButton(Core& core, Button btn) {
+  switch (btn) {
+    case Button::Left:
+    case Button::Right: {
+      int delta = (btn == Button::Right) ? 1 : -1;
+      state.slideshowSetting = (state.slideshowSetting + delta + SLIDESHOW_COUNT) % SLIDESHOW_COUNT;
+      state.lastAdvanceMs = millis();
+      saveSettings(core);
+
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+}  // namespace imageviewer_app
+}  // namespace papyrix

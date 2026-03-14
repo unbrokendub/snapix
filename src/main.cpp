@@ -43,6 +43,7 @@
 #include "core/Core.h"
 #include "core/StateMachine.h"
 #include "images/PapyrixLogo.h"
+#include "states/AppLauncherState.h"
 #include "states/CalibreSyncState.h"
 #include "states/ErrorState.h"
 #include "states/FileListState.h"
@@ -52,7 +53,6 @@
 #include "states/SettingsState.h"
 #include "states/SleepState.h"
 #include "states/StartupState.h"
-#include "states/SyncState.h"
 #include "ui/views/BootSleepViews.h"
 
 #define SPI_FQ 40000000
@@ -91,9 +91,9 @@ static papyrix::HomeState homeState(renderer);
 static papyrix::FileListState fileListState(renderer);
 static papyrix::ReaderState readerState(renderer);
 static papyrix::SettingsState settingsState(renderer);
-static papyrix::SyncState syncState(renderer);
 static papyrix::NetworkState networkState(renderer);
 static papyrix::CalibreSyncState calibreSyncState(renderer);
+static papyrix::AppLauncherState appLauncherState(renderer);
 static papyrix::SleepState sleepState(renderer);
 static papyrix::ErrorState errorState(renderer);
 static papyrix::StateMachine stateMachine;
@@ -387,9 +387,9 @@ void initUIMode() {
   stateMachine.registerState(&fileListState);
   stateMachine.registerState(&readerState);
   stateMachine.registerState(&settingsState);
-  stateMachine.registerState(&syncState);
   stateMachine.registerState(&networkState);
   stateMachine.registerState(&calibreSyncState);
+  stateMachine.registerState(&appLauncherState);
   stateMachine.registerState(&sleepState);
   stateMachine.registerState(&errorState);
 

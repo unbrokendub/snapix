@@ -28,7 +28,8 @@ NetworkState::NetworkState(GfxRenderer& renderer)
       goBack_(false),
       server_(nullptr),
       passwordJustEntered_(false),
-      goCalibreSync_(false) {
+      goCalibreSync_(false),
+      goApp_(false) {
   selectedSSID_[0] = '\0';
 }
 
@@ -49,12 +50,19 @@ void NetworkState::enter(Core& core) {
   goBack_ = false;
   passwordJustEntered_ = false;
   goCalibreSync_ = false;
+  goApp_ = false;
   scanRetryCount_ = 0;
   scanRetryAt_ = 0;
   selectedSSID_[0] = '\0';
 
   // Load saved credentials
   WIFI_STORE.loadFromFile();
+
+  // NtpSync: skip mode select, go straight to WiFi scan (hotspot is useless for NTP)
+  if (core.pendingSync == SyncMode::NtpSync) {
+    startWifiScan(core);
+    currentScreen_ = NetworkScreen::WifiList;
+  }
 }
 
 void NetworkState::exit(Core& core) {
@@ -63,8 +71,8 @@ void NetworkState::exit(Core& core) {
   // Stop web server if running
   stopWebServer(core);
 
-  // Don't shutdown WiFi if transitioning to CalibreSync - it needs the connection
-  if (!goCalibreSync_) {
+  // Don't shutdown WiFi if transitioning to CalibreSync or app that needs connection
+  if (!goCalibreSync_ && !goApp_) {
     core.network.shutdown();
   }
 }
@@ -152,12 +160,17 @@ StateTransition NetworkState::update(Core& core) {
 
   if (goBack_) {
     goBack_ = false;
-    return StateTransition::to(StateId::Sync);
+    return StateTransition::to(StateId::AppLauncher);
   }
 
   if (goCalibreSync_) {
     // goCalibreSync_ stays true so exit() knows not to shutdown WiFi
     return StateTransition::to(StateId::CalibreSync);
+  }
+
+  if (goApp_) {
+    // goApp_ stays true so exit() knows not to shutdown WiFi
+    return StateTransition::to(StateId::AppLauncher);
   }
 
   return StateTransition::stay(StateId::Network);
@@ -300,9 +313,13 @@ void NetworkState::handleWifiList(Core& core, Button button) {
 
     case Button::Back:
       if (wifiListView_.buttons.isActive(0)) {
-        currentScreen_ = NetworkScreen::ModeSelect;
-        modeView_.needsRender = true;
-        needsRender_ = true;
+        if (core.pendingSync == SyncMode::NtpSync) {
+          goBack_ = true;
+        } else {
+          currentScreen_ = NetworkScreen::ModeSelect;
+          modeView_.needsRender = true;
+          needsRender_ = true;
+        }
       }
       break;
 
@@ -368,6 +385,14 @@ void NetworkState::handleConnecting(Core& core, Button button) {
   } else if (button == Button::Center) {
     if (connectingView_.buttons.isActive(1)) {
       if (connectingView_.status == ui::WifiConnectingView::Status::Connected) {
+        if (core.pendingSync == SyncMode::WifiSetup) {
+          if (!WIFI_STORE.hasSavedCredential(selectedSSID_) && passwordJustEntered_) {
+            WIFI_STORE.addCredential(selectedSSID_, keyboardView_.input);
+          }
+          goBack_ = true;
+          return;
+        }
+
         if (core.pendingSync == SyncMode::CalibreWireless) {
           if (!WIFI_STORE.hasSavedCredential(selectedSSID_) && passwordJustEntered_) {
             WIFI_STORE.addCredential(selectedSSID_, keyboardView_.input);
@@ -375,6 +400,16 @@ void NetworkState::handleConnecting(Core& core, Button button) {
           memset(keyboardView_.input, 0, sizeof(keyboardView_.input));
           keyboardView_.inputLen = 0;
           goCalibreSync_ = true;
+          return;
+        }
+
+        if (core.pendingSync == SyncMode::NtpSync) {
+          if (!WIFI_STORE.hasSavedCredential(selectedSSID_) && passwordJustEntered_) {
+            WIFI_STORE.addCredential(selectedSSID_, keyboardView_.input);
+          }
+          memset(keyboardView_.input, 0, sizeof(keyboardView_.input));
+          keyboardView_.inputLen = 0;
+          goApp_ = true;
           return;
         }
 
@@ -419,13 +454,25 @@ void NetworkState::handleSavePrompt(Core& core, Button button) {
         if (confirmView_.isYesSelected()) {
           WIFI_STORE.addCredential(selectedSSID_, keyboardView_.input);
         }
-        startWebServer(core);
+        if (core.pendingSync == SyncMode::WifiSetup) {
+          goBack_ = true;
+        } else if (core.pendingSync == SyncMode::NtpSync) {
+          goApp_ = true;
+        } else {
+          startWebServer(core);
+        }
       }
       break;
 
     case Button::Back:
       if (confirmView_.buttons.isActive(0)) {
-        startWebServer(core);
+        if (core.pendingSync == SyncMode::WifiSetup) {
+          goBack_ = true;
+        } else if (core.pendingSync == SyncMode::NtpSync) {
+          goApp_ = true;
+        } else {
+          startWebServer(core);
+        }
       }
       break;
 

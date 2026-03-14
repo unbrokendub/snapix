@@ -34,9 +34,9 @@ enum class StateId : uint8_t {
   FileList,
   Reader,
   Settings,
-  Sync,
   Network,
   CalibreSync,
+  AppLauncher,
   Error,
   Sleep,
 };
@@ -46,6 +46,8 @@ enum class SyncMode : uint8_t {
   None,
   FileTransfer,
   CalibreWireless,
+  WifiSetup,
+  NtpSync,
 };
 
 // Common buffer sizes

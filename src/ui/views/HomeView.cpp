@@ -88,7 +88,7 @@ void render(const GfxRenderer& r, const Theme& t, const HomeView& v) {
     const int noBookX = cardX + (cardWidth - noBookWidth) / 2;
     r.drawText(t.uiFontId, noBookX, centerY - lineHeight, noBookText, t.primaryTextBlack);
 
-    const char* hintText = "Press \"Files\" to browse";
+    const char* hintText = "Press \"File\" to explore";
     const int hintWidth = r.getTextWidth(t.uiFontId, hintText);
     const int hintX = cardX + (cardWidth - hintWidth) / 2;
     r.drawText(t.uiFontId, hintX, centerY + lineHeight / 2, hintText, t.secondaryTextBlack);

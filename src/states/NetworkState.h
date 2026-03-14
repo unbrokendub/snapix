@@ -54,6 +54,7 @@ class NetworkState : public State {
   char selectedSSID_[33];
   bool passwordJustEntered_;
   bool goCalibreSync_;
+  bool goApp_;
   uint8_t scanRetryCount_ = 0;
   uint32_t scanRetryAt_ = 0;
   static constexpr uint8_t MAX_SCAN_RETRIES = 2;
