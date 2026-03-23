@@ -6,6 +6,7 @@
 #include <EInkDisplay.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <ImageConverter.h>
 #include <Logging.h>
 #include <SDCardManager.h>
 #include <SdFat.h>
@@ -27,10 +28,12 @@ namespace imageviewer_app {
 
 static constexpr const char* IMAGES_DIR = "/images";
 static constexpr const char* SETTINGS_PATH = "/.papyrix/apps/image-viewer.txt";
-
 static constexpr uint32_t SLIDESHOW_INTERVALS[] = {0, 30000, 60000, 300000};
 static constexpr const char* SLIDESHOW_LABELS[] = {"Off", "30s", "60s", "5min"};
 static constexpr int SLIDESHOW_COUNT = 4;
+
+static constexpr int BOTTOM_BAR_HEIGHT = 23;
+static constexpr uint32_t MAX_IMAGE_FILE_SIZE = 10 * 1024 * 1024;  // 10 MB
 
 static struct {
   std::vector<std::string> files;
@@ -102,7 +105,7 @@ static void scanImages() {
       continue;
     }
 
-    if (FsHelpers::isBmpFile(name)) {
+    if (FsHelpers::isImageFile(name) && entry.fileSize() <= MAX_IMAGE_FILE_SIZE) {
       std::string path = std::string(IMAGES_DIR) + "/" + name;
       state.files.push_back(path);
     }
@@ -113,10 +116,39 @@ static void scanImages() {
 
   std::sort(state.files.begin(), state.files.end());
 
-  LOG_INF(TAG, "Found %zu BMP images", state.files.size());
+  LOG_INF(TAG, "Found %zu images", state.files.size());
 }
 
-static void renderImage() {
+// Convert JPEG/PNG to BMP in-place (same directory, replace original).
+// Returns the new BMP path, or empty string on failure.
+static std::string convertToBmpInPlace(const std::string& path) {
+  std::string bmpPath = path.substr(0, path.rfind('.')) + ".bmp";
+
+  // If target BMP already exists, just remove the original
+  if (SdMan.exists(bmpPath.c_str())) {
+    SdMan.remove(path.c_str());
+    return bmpPath;
+  }
+
+  const int maxW = renderer.getScreenWidth();
+  const int maxH = renderer.getScreenHeight() - BOTTOM_BAR_HEIGHT;
+
+  ImageConvertConfig config;
+  config.maxWidth = maxW;
+  config.maxHeight = maxH;
+  config.oneBit = false;
+  config.logTag = TAG;
+
+  if (!ImageConverterFactory::convertToBmp(path, bmpPath, config)) {
+    return "";
+  }
+
+  SdMan.remove(path.c_str());
+  LOG_INF(TAG, "Converted: %s -> %s", path.c_str(), bmpPath.c_str());
+  return bmpPath;
+}
+
+static bool renderImage() {
   const Theme& theme = THEME;
   const int screenW = renderer.getScreenWidth();
   const int screenH = renderer.getScreenHeight();
@@ -127,46 +159,60 @@ static void renderImage() {
     ui::centeredMessage(renderer, theme, theme.uiFontId, "No images in /images/");
     ui::ButtonBar buttons("Back", "Menu", "", "");
     ui::buttonBar(renderer, theme, buttons);
-    return;
+    return false;
   }
 
   const std::string& path = state.files[state.currentIndex];
 
+  // Convert non-BMP images to BMP in-place (replaces original file)
+  if (!FsHelpers::isBmpFile(path)) {
+    ui::centeredMessage(renderer, theme, theme.uiFontId, "Converting...");
+    renderer.displayBuffer();
+
+    std::string bmpPath = convertToBmpInPlace(path);
+    if (bmpPath.empty()) {
+      renderer.clearScreen(theme.backgroundColor);
+      ui::centeredMessage(renderer, theme, theme.uiFontId, "Conversion failed");
+      ui::ButtonBar buttons("Back", "Menu", "<", ">");
+      ui::buttonBar(renderer, theme, buttons);
+      return false;
+    }
+
+    state.files[state.currentIndex] = bmpPath;
+    renderer.clearScreen(theme.backgroundColor);
+  }
+
+  const std::string& bmpPath = state.files[state.currentIndex];
+
   FsFile file;
-  if (!SdMan.openFileForRead(TAG, path, file)) {
-    LOG_ERR(TAG, "Failed to open: %s", path.c_str());
+  if (!SdMan.openFileForRead(TAG, bmpPath, file)) {
+    LOG_ERR(TAG, "Failed to open: %s", bmpPath.c_str());
     ui::centeredMessage(renderer, theme, theme.uiFontId, "Failed to open image");
     ui::ButtonBar buttons("Back", "Menu", "<", ">");
     ui::buttonBar(renderer, theme, buttons);
-    return;
+    return false;
   }
 
   Bitmap bitmap(file);
   if (bitmap.parseHeaders() != BmpReaderError::Ok) {
-    LOG_ERR(TAG, "Invalid BMP: %s", path.c_str());
+    LOG_ERR(TAG, "Invalid BMP: %s", bmpPath.c_str());
     file.close();
-    ui::centeredMessage(renderer, theme, theme.uiFontId, "Invalid BMP file");
+    ui::centeredMessage(renderer, theme, theme.uiFontId, "Invalid image file");
     ui::ButtonBar buttons("Back", "Menu", "<", ">");
     ui::buttonBar(renderer, theme, buttons);
-    return;
+    return false;
   }
 
-  // Reserve bottom 23px for button bar and counter
-  static constexpr int BOTTOM_BAR_HEIGHT = 23;
   const int viewportH = screenH - BOTTOM_BAR_HEIGHT;
-
   auto rect = CoverHelpers::calculateCenteredRect(bitmap.getWidth(), bitmap.getHeight(), 0, 0, screenW, viewportH);
   renderer.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
 
   file.close();
 
-  // Image counter
-  char counter[16];
-  snprintf(counter, sizeof(counter), "%d/%zu", state.currentIndex + 1, state.files.size());
-  renderer.drawCenteredText(theme.smallFontId, screenH - BOTTOM_BAR_HEIGHT + 4, counter, theme.primaryTextBlack);
-
   ui::ButtonBar buttons("Back", "Menu", "<", ">");
   ui::buttonBar(renderer, theme, buttons);
+
+  return false;
 }
 
 void enter(Core& core) {
@@ -217,9 +263,9 @@ void onButton(Core& core, Button btn) {
   }
 }
 
-void render(Core& core) {
+bool render(Core& core) {
   (void)core;
-  renderImage();
+  return renderImage();
 }
 
 void exit(Core& core) {

@@ -13,7 +13,7 @@ struct MiniApp {
   void (*enter)(Core& core);
   bool (*update)(Core& core);
   void (*onButton)(Core& core, Button btn);
-  void (*render)(Core& core);
+  bool (*render)(Core& core);  // Returns true if app handled display itself
   void (*exit)(Core& core);
   void (*renderMenu)(Core& core);
   void (*onMenuButton)(Core& core, Button btn);

@@ -174,16 +174,15 @@ void AppLauncherState::render(Core& core) {
 
     case Mode::App:
       if (activeApp_ >= 0 && APPS[activeApp_].render) {
-        APPS[activeApp_].render(core);
-        renderer_.displayBuffer();
+        if (!APPS[activeApp_].render(core)) {
+          renderer_.displayBuffer();
+        }
       }
       break;
 
     case Mode::Overlay:
       if (activeApp_ >= 0) {
-        if (APPS[activeApp_].render) {
-          APPS[activeApp_].render(core);
-        }
+        renderer_.clearScreen(THEME.backgroundColor);
         if (APPS[activeApp_].renderMenu) {
           APPS[activeApp_].renderMenu(core);
         }

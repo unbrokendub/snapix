@@ -280,7 +280,7 @@ static void drawDayOfWeek(const Theme& theme, int x, int y, int wday) {
   renderer.drawText(theme.uiFontId, x, y, DAYS[wday], theme.secondaryTextBlack);
 }
 
-void render(Core& core) {
+bool render(Core& core) {
   (void)core;
 
   const Theme& theme = THEME;
@@ -369,6 +369,8 @@ void render(Core& core) {
 
   ui::ButtonBar buttons("Back", "Menu", "", "");
   ui::buttonBar(renderer, theme, buttons);
+
+  return false;
 }
 
 void exit(Core& core) {
