@@ -80,15 +80,15 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
     if (!currentBlock || currentBlock->isEmpty()) return true;
 
     bool continueProcessing = true;
-    currentBlock->layoutAndExtractLines(renderer_, config_.fontId, config_.viewportWidth,
-                                        [&](const std::shared_ptr<TextBlock>& line) {
-                                          if (!continueProcessing) return;
-                                          if (!addLineToPage(line)) {
-                                            continueProcessing = false;
-                                          }
-                                        },
-                                        true,
-                                        [&]() -> bool { return !continueProcessing; });
+    currentBlock->layoutAndExtractLines(
+        renderer_, config_.fontId, config_.viewportWidth,
+        [&](const std::shared_ptr<TextBlock>& line) {
+          if (!continueProcessing) return;
+          if (!addLineToPage(line)) {
+            continueProcessing = false;
+          }
+        },
+        true, [&]() -> bool { return !continueProcessing; });
 
     if (continueProcessing) {
       currentBlock.reset();

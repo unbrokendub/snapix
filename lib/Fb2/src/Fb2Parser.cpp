@@ -369,16 +369,16 @@ void Fb2Parser::makePages() {
   const int lineHeight = static_cast<int>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression);
   bool continueProcessing = true;
 
-  currentTextBlock_->layoutAndExtractLines(renderer_, config_.fontId, config_.viewportWidth,
-                                           [this, &continueProcessing](const std::shared_ptr<TextBlock>& line) {
-                                             if (!continueProcessing) return;
-                                             addLineToPage(line);
-                                             if (hitMaxPages_) {
-                                               continueProcessing = false;
-                                             }
-                                           },
-                                           true,
-                                           [&continueProcessing]() -> bool { return !continueProcessing; });
+  currentTextBlock_->layoutAndExtractLines(
+      renderer_, config_.fontId, config_.viewportWidth,
+      [this, &continueProcessing](const std::shared_ptr<TextBlock>& line) {
+        if (!continueProcessing) return;
+        addLineToPage(line);
+        if (hitMaxPages_) {
+          continueProcessing = false;
+        }
+      },
+      true, [&continueProcessing]() -> bool { return !continueProcessing; });
 
   // Paragraph spacing (same pattern as PlainTextParser/ChapterHtmlSlimParser)
   if (!hitMaxPages_) {

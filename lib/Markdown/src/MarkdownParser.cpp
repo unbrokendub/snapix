@@ -88,28 +88,28 @@ void MarkdownParser::flushTextBlock(ParseContext& ctx) {
 
   const int lineHeight = static_cast<int>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression);
 
-  ctx.textBlock->layoutAndExtractLines(renderer_, config_.fontId, config_.viewportWidth,
-                                       [this, &ctx](const std::shared_ptr<TextBlock>& textBlock) {
-                                         if (!ctx.hitMaxPages) {
-                                           addLineToPage(ctx, textBlock);
-                                         }
-                                       },
-                                       true,
-                                       [&ctx]() -> bool { return ctx.hitMaxPages; });
+  ctx.textBlock->layoutAndExtractLines(
+      renderer_, config_.fontId, config_.viewportWidth,
+      [this, &ctx](const std::shared_ptr<TextBlock>& textBlock) {
+        if (!ctx.hitMaxPages) {
+          addLineToPage(ctx, textBlock);
+        }
+      },
+      true, [&ctx]() -> bool { return ctx.hitMaxPages; });
 
   if (!ctx.hitMaxPages) {
     ctx.textBlock.reset();
+
+    switch (config_.spacingLevel) {
+      case 1:
+        ctx.pageNextY += lineHeight / 4;
+        break;
+      case 3:
+        ctx.pageNextY += lineHeight;
+        break;
+    }
   }
   // else: textBlock still has unconsumed words — preserve for next batch
-
-  switch (config_.spacingLevel) {
-    case 1:
-      ctx.pageNextY += lineHeight / 4;
-      break;
-    case 3:
-      ctx.pageNextY += lineHeight;
-      break;
-  }
 }
 
 bool MarkdownParser::addLineToPage(ParseContext& ctx, std::shared_ptr<TextBlock> line) {
@@ -452,8 +452,7 @@ bool MarkdownParser::parsePages(const std::function<void(std::unique_ptr<Page>)>
                 addLineToPage(ctx, textBlock);
               }
             },
-            false,
-            [&ctx]() -> bool { return ctx.hitMaxPages; });
+            false, [&ctx]() -> bool { return ctx.hitMaxPages; });
       }
     }
   }
