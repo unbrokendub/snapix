@@ -147,6 +147,12 @@ class ExternalFont {
   bool readGlyphFromSD(uint32_t codepoint, uint8_t* buffer);
 
   /**
+   * Read glyph data from SD card at an already computed offset.
+   * Reuses sequential file position when possible to avoid redundant seeks.
+   */
+  bool readGlyphAtOffset(uint32_t offset, uint8_t* buffer);
+
+  /**
    * Parse filename to get font parameters
    * Format: FontName_size_WxH.bin
    */
@@ -162,4 +168,24 @@ class ExternalFont {
    * Get LRU cache slot (least recently used)
    */
   int getLruSlot();
+
+  /**
+   * Remove a cache slot from the hash table if it is currently indexed there.
+   */
+  void removeHashEntryForSlot(int slot);
+
+  /**
+   * Insert a cache slot into the hash table.
+   */
+  void insertHashEntry(uint32_t codepoint, int slot);
+
+  /**
+   * Populate cache entry metrics and notFound flag after bitmap load.
+   */
+  void finalizeCacheEntry(uint32_t codepoint, int slot, bool readSuccess);
+
+  /**
+   * Load a glyph into a specific cache slot.
+   */
+  const uint8_t* loadGlyphIntoSlot(uint32_t codepoint, int slot);
 };

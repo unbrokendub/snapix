@@ -50,7 +50,8 @@ inline CenteredRect calculateCenteredRect(int imageWidth, int imageHeight, int v
 // turnOffScreen: power down display after refresh (sunlight fading fix)
 bool renderCoverFromBmp(GfxRenderer& renderer, const std::string& bmpPath, int marginTop, int marginRight,
                         int marginBottom, int marginLeft, int& pagesUntilFullRefresh, int pagesPerRefreshValue,
-                        bool turnOffScreen = false);
+                        bool turnOffScreen = false, bool forceHalfRefresh = false,
+                        bool allowFastRefreshWhileOff = false);
 
 // Render cover with automatic fallback to preview if full cover not available
 // previewPath: fast-generated preview (simple threshold, no dithering)

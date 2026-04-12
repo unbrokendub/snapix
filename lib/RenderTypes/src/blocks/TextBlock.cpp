@@ -13,6 +13,12 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
   }
 }
 
+void TextBlock::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
+  for (const auto& wd : wordData) {
+    renderer.warmTextGlyphs(fontId, wd.word.c_str(), wd.style);
+  }
+}
+
 bool TextBlock::serialize(FsFile& file) const {
   // Word count
   serialization::writePod(file, static_cast<uint16_t>(wordData.size()));
@@ -43,23 +49,22 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(FsFile& file) {
     return nullptr;
   }
 
-  // Read into temporary arrays (backward-compatible format: words, then xpos, then styles)
-  std::vector<std::string> words(wc);
-  std::vector<uint16_t> xpos(wc);
-  std::vector<EpdFontFamily::Style> styles(wc);
+  // Read directly into the final vector while preserving the on-disk format
+  // (all words first, then x positions, then styles).
+  std::vector<WordData> data(wc);
 
-  for (auto& w : words) {
-    if (!serialization::readString(file, w)) {
+  for (auto& wd : data) {
+    if (!serialization::readString(file, wd.word)) {
       return nullptr;
     }
   }
-  for (auto& x : xpos) {
-    if (!serialization::readPodChecked(file, x)) {
+  for (auto& wd : data) {
+    if (!serialization::readPodChecked(file, wd.xPos)) {
       return nullptr;
     }
   }
-  for (auto& s : styles) {
-    if (!serialization::readPodChecked(file, s)) {
+  for (auto& wd : data) {
+    if (!serialization::readPodChecked(file, wd.style)) {
       return nullptr;
     }
   }
@@ -67,13 +72,6 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(FsFile& file) {
   // Block style
   if (!serialization::readPodChecked(file, style)) {
     return nullptr;
-  }
-
-  // Combine into WordData vector
-  std::vector<WordData> data;
-  data.reserve(wc);
-  for (uint16_t i = 0; i < wc; ++i) {
-    data.push_back({std::move(words[i]), xpos[i], styles[i]});
   }
 
   return std::unique_ptr<TextBlock>(new TextBlock(std::move(data), style));

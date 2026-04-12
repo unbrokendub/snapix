@@ -196,11 +196,8 @@ bool StreamingEpdFont::loadGlyphBitmap(uint32_t glyphIndex, CachedBitmap& entry)
     entry.bitmap = new (std::nothrow) uint8_t[dataLen];
     if (!entry.bitmap) {
       entry.bitmapSize = 0;
-      _totalCacheAllocation -= oldSize;
       return false;
     }
-    // Update allocation tracking (subtract old, add new)
-    _totalCacheAllocation = _totalCacheAllocation - oldSize + dataLen;
     entry.bitmapSize = dataLen;
   }
 
@@ -251,9 +248,6 @@ const uint8_t* StreamingEpdFont::getGlyphBitmap(const EpdGlyph* glyph) {
         break;
       }
     }
-    // Update allocation tracking when evicting
-    _totalCacheAllocation -= _cache[slot].bitmapSize;
-
     // Rehash if too many tombstones have accumulated
     if (_tombstoneCount >= TOMBSTONE_REHASH_THRESHOLD) {
       rehashTable();
@@ -267,6 +261,13 @@ const uint8_t* StreamingEpdFont::getGlyphBitmap(const EpdGlyph* glyph) {
 
   _cache[slot].glyphIndex = glyphIndex;
   _cache[slot].lastUsed = ++_accessCounter;
+
+  // Recompute actual live allocation for this slot after potential reuse/realloc.
+  size_t totalAllocation = 0;
+  for (int i = 0; i < CACHE_SIZE; i++) {
+    totalAllocation += _cache[i].bitmapSize;
+  }
+  _totalCacheAllocation = totalAllocation;
 
   // Add to hash table
   int hash = hashIndex(glyphIndex);

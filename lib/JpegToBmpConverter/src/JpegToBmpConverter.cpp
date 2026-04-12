@@ -1,9 +1,11 @@
 #include "JpegToBmpConverter.h"
 
+#include <Arduino.h>
 #include <Logging.h>
 
 #define TAG "JPEG"
 #include <SdFat.h>
+#include <SharedSpiLock.h>
 #include <picojpeg.h>
 
 #include <algorithm>
@@ -176,6 +178,11 @@ static void writeBmpHeader2bit(Print& bmpOut, const int width, const int height)
 // SOF9 (0xC9) = Extended sequential DCT, arithmetic (NOT supported)
 // SOF10 (0xCA) = Progressive DCT, arithmetic (NOT supported)
 static bool isUnsupportedJpeg(FsFile& file) {
+  papyrix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    return true;
+  }
+
   const uint64_t originalPos = file.position();
   file.seek(0);
 
@@ -231,6 +238,10 @@ unsigned char JpegToBmpConverter::jpegReadCallback(unsigned char* pBuf, const un
 
   // Check if we need to refill our context buffer
   if (context->bufferPos >= context->bufferFilled) {
+    papyrix::spi::SharedBusLock busLock;
+    if (!busLock) {
+      return PJPG_STREAM_READ_ERROR;
+    }
     context->bufferFilled = context->file.read(context->buffer, sizeof(context->buffer));
     context->bufferPos = 0;
 
@@ -324,15 +335,22 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
 
   // Write BMP header with output dimensions
   int bytesPerRow;
-  if (USE_8BIT_OUTPUT && !oneBit) {
-    writeBmpHeader8bit(bmpOut, outWidth, outHeight);
-    bytesPerRow = (outWidth + 3) / 4 * 4;
-  } else if (oneBit) {
-    writeBmpHeader1bit(bmpOut, outWidth, outHeight);
-    bytesPerRow = (outWidth + 31) / 32 * 4;  // 1 bit per pixel
-  } else {
-    writeBmpHeader2bit(bmpOut, outWidth, outHeight);
-    bytesPerRow = (outWidth * 2 + 31) / 32 * 4;
+  {
+    papyrix::spi::SharedBusLock busLock;
+    if (!busLock) {
+      LOG_ERR(TAG, "Shared SPI lock unavailable for BMP header write");
+      return false;
+    }
+    if (USE_8BIT_OUTPUT && !oneBit) {
+      writeBmpHeader8bit(bmpOut, outWidth, outHeight);
+      bytesPerRow = (outWidth + 3) / 4 * 4;
+    } else if (oneBit) {
+      writeBmpHeader1bit(bmpOut, outWidth, outHeight);
+      bytesPerRow = (outWidth + 31) / 32 * 4;  // 1 bit per pixel
+    } else {
+      writeBmpHeader2bit(bmpOut, outWidth, outHeight);
+      bytesPerRow = (outWidth * 2 + 31) / 32 * 4;
+    }
   }
 
   // Allocate row buffer
@@ -426,6 +444,10 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
       free(mcuRowBuffer);
       free(rowBuffer);
       return false;
+    }
+
+    if ((mcuY & 0x3) == 0) {
+      delay(1);
     }
 
     // Clear the MCU row buffer
@@ -528,7 +550,20 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
           else if (fsDitherer)
             fsDitherer->nextRow();
         }
-        bmpOut.write(rowBuffer, bytesPerRow);
+        {
+          papyrix::spi::SharedBusLock busLock;
+          if (!busLock || bmpOut.write(rowBuffer, bytesPerRow) != static_cast<size_t>(bytesPerRow)) {
+            LOG_ERR(TAG, "Failed to write BMP row");
+            if (rowAccum) delete[] rowAccum;
+            if (rowCount) delete[] rowCount;
+            if (atkinsonDitherer) delete atkinsonDitherer;
+            if (fsDitherer) delete fsDitherer;
+            if (atkinson1BitDitherer) delete atkinson1BitDitherer;
+            free(mcuRowBuffer);
+            free(rowBuffer);
+            return false;
+          }
+        }
       } else {
         // Fixed-point area averaging for exact fit scaling
         // For each output pixel X, accumulate source pixels that map to it
@@ -608,7 +643,20 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
               fsDitherer->nextRow();
           }
 
-          bmpOut.write(rowBuffer, bytesPerRow);
+          {
+            papyrix::spi::SharedBusLock busLock;
+            if (!busLock || bmpOut.write(rowBuffer, bytesPerRow) != static_cast<size_t>(bytesPerRow)) {
+              LOG_ERR(TAG, "Failed to write scaled BMP row");
+              if (rowAccum) delete[] rowAccum;
+              if (rowCount) delete[] rowCount;
+              if (atkinsonDitherer) delete atkinsonDitherer;
+              if (fsDitherer) delete fsDitherer;
+              if (atkinson1BitDitherer) delete atkinson1BitDitherer;
+              free(mcuRowBuffer);
+              free(rowBuffer);
+              return false;
+            }
+          }
           currentOutY++;
 
           // Reset accumulators for next output row
@@ -669,6 +717,6 @@ bool JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(FsFile& jpegFile, Print
 
 // Quick preview mode: simple threshold instead of dithering (faster but lower quality)
 bool JpegToBmpConverter::jpegFileToBmpStreamQuick(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
-                                                  int targetMaxHeight) {
-  return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, false, true);
+                                                  int targetMaxHeight, const std::function<bool()>& shouldAbort) {
+  return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, false, true, shouldAbort);
 }

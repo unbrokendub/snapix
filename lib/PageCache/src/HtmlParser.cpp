@@ -34,6 +34,10 @@ void HtmlParser::reset() {
   anchorMap_.clear();
 }
 
+bool HtmlParser::canResume() const {
+  return initialized_ && liveParser_ != nullptr && liveParser_->isSuspended() && !liveParser_->wasAborted();
+}
+
 const std::vector<std::pair<std::string, uint16_t>>& HtmlParser::getAnchorMap() const {
   if (liveParser_) {
     return liveParser_->getAnchorMap();
@@ -44,7 +48,7 @@ const std::vector<std::pair<std::string, uint16_t>>& HtmlParser::getAnchorMap() 
 bool HtmlParser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages,
                             const AbortCallback& shouldAbort) {
   // RESUME PATH
-  if (initialized_ && liveParser_ && liveParser_->isSuspended()) {
+  if (canResume()) {
     onPageComplete_ = onPageComplete;
     maxPages_ = maxPages;
     pagesCreated_ = 0;
@@ -107,7 +111,7 @@ bool HtmlParser::parsePages(const std::function<void(std::unique_ptr<Page>)>& on
   // No readItemFn (standalone HTML — images not extracted from ZIP)
   // No cssParser (standalone HTML — no external CSS)
   liveParser_.reset(new ChapterHtmlSlimParser(parseHtmlPath, renderer_, config_, wrappedCallback, nullptr,
-                                              chapterBasePath, "", nullptr, nullptr, shouldAbort));
+                                              chapterBasePath, "", nullptr, false, nullptr, shouldAbort));
 
   bool success = liveParser_->parseAndBuildPages();
   initialized_ = true;

@@ -7,6 +7,24 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
+if(APPLE AND NOT CMAKE_OSX_SYSROOT)
+  execute_process(
+    COMMAND xcrun --show-sdk-path
+    OUTPUT_VARIABLE XCRUN_SDK_PATH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(XCRUN_SDK_PATH)
+    set(CMAKE_OSX_SYSROOT "${XCRUN_SDK_PATH}" CACHE STRING "macOS SDK" FORCE)
+  endif()
+endif()
+
+if(APPLE)
+  set(CLANG_STDLIB_PATH "/Library/Developer/CommandLineTools/usr/include/c++/v1")
+  if(EXISTS "${CLANG_STDLIB_PATH}")
+    include_directories(SYSTEM "${CLANG_STDLIB_PATH}")
+  endif()
+endif()
+
 # Get project root (parent of test directory)
 get_filename_component(PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR} DIRECTORY)
 
@@ -245,6 +263,47 @@ foreach(TEST_SRC ${TEST_SOURCES})
     )
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/src
+    )
+  elseif(TEST_NAME STREQUAL "ReaderButtonDispatchTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/src/states/reader/ReaderNavigationController.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/src
+      ${PROJECT_ROOT}/src/states/reader
+    )
+  elseif(TEST_NAME STREQUAL "RenderCachedPageLogicTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/src/states/reader/ReaderDocumentResources.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/src
+      ${PROJECT_ROOT}/src/states/reader
+    )
+  elseif(TEST_NAME STREQUAL "ReaderAsyncJobsControllerTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/src/states/reader/ReaderAsyncJobsController.cpp
+      ${PROJECT_ROOT}/lib/AsyncTask/src/BackgroundTask.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/src
+      ${PROJECT_ROOT}/src/states/reader
+      ${PROJECT_ROOT}/lib/AsyncTask/src
+    )
+  elseif(TEST_NAME STREQUAL "LoggingDisabledTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/Logging/src/Logging.cpp
+    )
+    target_include_directories(${TEST_NAME} BEFORE PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/unit/logging
+      ${PROJECT_ROOT}/lib/Logging/src
     )
   else()
     add_executable(${TEST_NAME} ${TEST_SRC} ${TEST_HELPERS})

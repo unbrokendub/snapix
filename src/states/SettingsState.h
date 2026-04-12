@@ -37,7 +37,9 @@ class SettingsState : public State {
   bool goHome_;
   bool goNetwork_;
   bool themeWasChanged_;
+  bool firstRender_;
   SettingsScreen returnScreen_;  // Screen to return to after Network mode
+  SettingsScreen lastRenderedScreen_;
 
   // Pending action for confirmation dialog
   // 0=none, 10=Clear Book Cache, 11=Clear Device Storage, 12=Factory Reset
@@ -63,6 +65,10 @@ class SettingsState : public State {
   void loadDeviceSettings();
   void saveDeviceSettings();
   void populateSystemInfo();
+  void renderMenuScreen(const Theme& theme, bool partialRefresh);
+  void renderCleanupScreen(const Theme& theme, bool partialRefresh);
+  void renderReaderScreen(const Theme& theme, bool partialRefresh);
+  void renderDeviceScreen(const Theme& theme, bool partialRefresh);
 
   // Actions
   void clearCache(int type, Core& core);

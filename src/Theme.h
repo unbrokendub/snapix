@@ -38,16 +38,19 @@ struct Theme {
   uint8_t itemSpacing;
   uint8_t itemPaddingX;      // Horizontal padding inside items
   uint8_t itemValuePadding;  // Right padding for values
+  uint8_t statusBarOffsetY;  // Additional downward shift for status bar
 
   // Font IDs
   int uiFontId;
   int smallFontId;
+  int statusFontId;
   int readerFontIdXSmall;
   int readerFontId;
   int readerFontIdMedium;
   int readerFontIdLarge;
 
   // External font family names (empty = use builtin)
+  char statusFontFamily[32];
   char readerFontFamilyXSmall[32];
   char readerFontFamilySmall[32];
   char readerFontFamilyMedium[32];
@@ -72,12 +75,15 @@ inline Theme getBuiltinLightTheme() {
   theme.itemSpacing = 0;
   theme.itemPaddingX = 8;
   theme.itemValuePadding = 20;
+  theme.statusBarOffsetY = 0;
   theme.uiFontId = UI_FONT_ID;
   theme.smallFontId = SMALL_FONT_ID;
+  theme.statusFontId = SMALL_FONT_ID;
   theme.readerFontIdXSmall = READER_FONT_ID_XSMALL;
   theme.readerFontId = READER_FONT_ID;
   theme.readerFontIdMedium = READER_FONT_ID_MEDIUM;
   theme.readerFontIdLarge = READER_FONT_ID_LARGE;
+  theme.statusFontFamily[0] = '\0';
   theme.readerFontFamilyXSmall[0] = '\0';
   theme.readerFontFamilySmall[0] = '\0';
   theme.readerFontFamilyMedium[0] = '\0';
@@ -103,12 +109,15 @@ inline Theme getBuiltinDarkTheme() {
   theme.itemSpacing = 0;
   theme.itemPaddingX = 8;
   theme.itemValuePadding = 20;
+  theme.statusBarOffsetY = 0;
   theme.uiFontId = UI_FONT_ID;
   theme.smallFontId = SMALL_FONT_ID;
+  theme.statusFontId = SMALL_FONT_ID;
   theme.readerFontIdXSmall = READER_FONT_ID_XSMALL;
   theme.readerFontId = READER_FONT_ID;
   theme.readerFontIdMedium = READER_FONT_ID_MEDIUM;
   theme.readerFontIdLarge = READER_FONT_ID_LARGE;
+  theme.statusFontFamily[0] = '\0';
   theme.readerFontFamilyXSmall[0] = '\0';
   theme.readerFontFamilySmall[0] = '\0';
   theme.readerFontFamilyMedium[0] = '\0';

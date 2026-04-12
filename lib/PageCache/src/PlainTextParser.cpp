@@ -71,7 +71,7 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
       }
     }
 
-    currentPage->elements.push_back(std::make_shared<PageLine>(line, 0, currentPageY));
+    currentPage->elements.push_back(std::make_unique<PageLine>(std::move(line), 0, currentPageY));
     currentPageY += lineHeight;
     return true;
   };

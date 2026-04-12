@@ -76,17 +76,22 @@ struct Event {
   }
 };
 
-class EventQueue {
+ class EventQueue {
  public:
-  static constexpr size_t CAPACITY = 16;
+  static constexpr size_t CAPACITY = 32;
 
   bool push(Event e) {
     uint8_t nextHead = (head_ + 1) % CAPACITY;
     if (nextHead == tail_) {
+      dropped_++;
       return false;  // Full
     }
     buffer_[head_] = e;
     head_ = nextHead;
+    const size_t currentSize = size();
+    if (currentSize > highWaterMark_) {
+      highWaterMark_ = currentSize;
+    }
     return true;
   }
 
@@ -109,11 +114,15 @@ class EventQueue {
   }
 
   void clear() { tail_ = head_ = 0; }
+  size_t highWaterMark() const { return highWaterMark_; }
+  uint32_t droppedCount() const { return dropped_; }
 
  private:
   Event buffer_[CAPACITY] = {};
   uint8_t head_ = 0;
   uint8_t tail_ = 0;
+  uint8_t highWaterMark_ = 0;
+  uint32_t dropped_ = 0;
 };
 
 }  // namespace papyrix

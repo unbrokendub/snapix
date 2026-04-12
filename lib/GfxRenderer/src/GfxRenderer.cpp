@@ -30,6 +30,92 @@ bool GfxRenderer::tryResolveExternalFont() const {
   return _externalFont != nullptr;
 }
 
+namespace {
+
+struct TextScriptFlags {
+  bool hasArabic = false;
+  bool hasThai = false;
+};
+
+inline TextScriptFlags detectTextScripts(const char* text) {
+  TextScriptFlags flags;
+  if (!text) return flags;
+
+  const unsigned char* ptr = reinterpret_cast<const unsigned char*>(text);
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(&ptr))) {
+    if (!flags.hasArabic && ScriptDetector::isArabicCodepoint(cp)) {
+      flags.hasArabic = true;
+    } else if (!flags.hasThai && ScriptDetector::isThaiCodepoint(cp)) {
+      flags.hasThai = true;
+    }
+
+    if (flags.hasArabic && flags.hasThai) {
+      break;
+    }
+  }
+
+  return flags;
+}
+
+inline void writePhysicalPixel(uint8_t* frameBuffer, const int physX, const int physY, const bool state) {
+  const uint16_t byteIndex = physY * EInkDisplay::DISPLAY_WIDTH_BYTES + (physX >> 3);
+  const uint8_t bitMask = static_cast<uint8_t>(1U << (7 - (physX & 7)));
+  if (state) {
+    frameBuffer[byteIndex] &= static_cast<uint8_t>(~bitMask);
+  } else {
+    frameBuffer[byteIndex] |= bitMask;
+  }
+}
+
+inline void writeLogicalPixelUnchecked(uint8_t* frameBuffer, const GfxRenderer::Orientation orientation, const int x,
+                                       const int y, const bool state) {
+  switch (orientation) {
+    case GfxRenderer::Portrait:
+      writePhysicalPixel(frameBuffer, y, EInkDisplay::DISPLAY_HEIGHT - 1 - x, state);
+      break;
+    case GfxRenderer::LandscapeClockwise:
+      writePhysicalPixel(frameBuffer, EInkDisplay::DISPLAY_WIDTH - 1 - x, EInkDisplay::DISPLAY_HEIGHT - 1 - y, state);
+      break;
+    case GfxRenderer::PortraitInverted:
+      writePhysicalPixel(frameBuffer, EInkDisplay::DISPLAY_WIDTH - 1 - y, x, state);
+      break;
+    case GfxRenderer::LandscapeCounterClockwise:
+      writePhysicalPixel(frameBuffer, x, y, state);
+      break;
+  }
+}
+
+inline void plotPixelOptimized(uint8_t* frameBuffer, const GfxRenderer::Orientation orientation,
+                               const GfxRenderer::RenderMode renderMode, const int x, const int y, const bool state,
+                               const GfxRenderer* renderer) {
+  // The grayscale AA pipeline is sensitive to exact buffer semantics across the
+  // BW/RED controller RAM passes. Keep the original drawPixel path there.
+  if (renderMode == GfxRenderer::BW) {
+    writeLogicalPixelUnchecked(frameBuffer, orientation, x, y, state);
+  } else {
+    renderer->drawPixel(x, y, state);
+  }
+}
+
+std::vector<size_t> utf8PrefixBoundaries(const std::string& text) {
+  std::vector<size_t> boundaries;
+  boundaries.reserve(text.size() + 1);
+  boundaries.push_back(0);
+
+  const char* ptr = text.c_str();
+  while (*ptr) {
+    const char* next = ptr;
+    utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&next));
+    boundaries.push_back(static_cast<size_t>(next - text.c_str()));
+    ptr = next;
+  }
+
+  return boundaries;
+}
+
+}  // namespace
+
 static inline void rotateCoordinates(const GfxRenderer::Orientation orientation, const int x, const int y,
                                      int* rotatedX, int* rotatedY) {
   switch (orientation) {
@@ -93,7 +179,8 @@ void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
 int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style) const {
   if (!text || !*text) return 0;
 
-  if (fontMap.count(fontId) == 0) {
+  auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return 0;
   }
@@ -116,14 +203,15 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
 
   // Check if text contains Arabic or Thai - use specialized width calculation
   int w = 0;
-  if (ScriptDetector::containsArabic(text)) {
+  const TextScriptFlags scripts = detectTextScripts(text);
+  if (scripts.hasArabic) {
     w = getArabicTextWidth(fontId, text, style);
-  } else if (ScriptDetector::containsThai(text)) {
+  } else if (scripts.hasThai) {
     w = getThaiTextWidth(fontId, text, style);
   } else if (isExternalFontAllowed(fontId) &&
              ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont())) {
     // Character-by-character: try external font first, then builtin fallback
-    const auto& font = fontMap.at(fontId);
+    const auto& font = fontIt->second;
     const char* ptr = text;
     uint32_t cp;
     while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&ptr)))) {
@@ -144,7 +232,7 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     }
   } else {
     int h = 0;
-    fontMap.at(fontId).getTextDimensions(text, &w, &h, style);
+    fontIt->second.getTextDimensions(text, &w, &h, style);
   }
 
   // Insert into flat hash table; clear if full
@@ -166,10 +254,109 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   return w;
 }
 
+int GfxRenderer::getTextAdvanceWidth(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+  if (!text || !*text) return 0;
+
+  auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR(TAG, "Font %d not found", fontId);
+    return 0;
+  }
+
+  // Trigger lazy loading of deferred font variant (e.g., bold custom font)
+  if (style != EpdFontFamily::REGULAR) {
+    getStreamingFont(fontId, style);
+  }
+
+  const TextScriptFlags scripts = detectTextScripts(text);
+  if (scripts.hasArabic || scripts.hasThai) {
+    // Keep specialized shaping paths on the existing width implementation for now.
+    return getTextWidth(fontId, text, style);
+  }
+
+  int width = 0;
+  const auto& font = fontIt->second;
+  const char* ptr = text;
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&ptr)))) {
+    if (utf8IsCombiningMark(cp)) {
+      continue;
+    }
+
+    const int extWidth =
+        (isExternalFontAllowed(fontId) && ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont()))
+            ? getExternalGlyphWidth(cp)
+            : 0;
+    if (extWidth > 0) {
+      width += extWidth;
+      continue;
+    }
+
+    const EpdGlyph* glyph = font.getGlyph(cp, style);
+    if (!glyph && (cp == 0x2002 || cp == 0x2003 || cp == 0x00A0)) {
+      const EpdGlyph* spaceGlyph = font.getGlyph(' ', style);
+      if (spaceGlyph) {
+        width += spaceGlyph->advanceX;
+        if (cp == 0x2003) width += spaceGlyph->advanceX;
+        continue;
+      }
+    }
+
+    if (!glyph) {
+      glyph = font.getGlyph('?', style);
+    }
+    if (glyph) {
+      width += glyph->advanceX;
+    }
+  }
+
+  return width;
+}
+
 void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* text, const bool black,
                                    const EpdFontFamily::Style style) const {
   const int x = (getScreenWidth() - getTextWidth(fontId, text, style)) / 2;
   drawText(fontId, x, y, text, black, style);
+}
+
+void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+  if (!text || !*text) return;
+
+  StreamingEpdFont* streamingFont = getStreamingFont(fontId, style);
+  const bool externalAvailable =
+      isExternalFontAllowed(fontId) && ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont());
+
+  std::vector<uint32_t> codepoints;
+  codepoints.reserve(24);
+
+  const unsigned char* ptr = reinterpret_cast<const unsigned char*>(text);
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(&ptr))) {
+    codepoints.push_back(cp);
+  }
+
+  if (codepoints.empty()) {
+    return;
+  }
+
+  std::sort(codepoints.begin(), codepoints.end());
+  codepoints.erase(std::unique(codepoints.begin(), codepoints.end()), codepoints.end());
+
+  if (streamingFont) {
+    for (const uint32_t warmCp : codepoints) {
+      const EpdGlyph* glyph = streamingFont->getGlyph(warmCp);
+      if (glyph) {
+        streamingFont->getGlyphBitmap(glyph);
+      }
+    }
+  }
+
+  if (externalAvailable) {
+    auto firstExternal = std::lower_bound(codepoints.begin(), codepoints.end(), static_cast<uint32_t>(0x80));
+    if (firstExternal != codepoints.end()) {
+      _externalFont->preloadGlyphs(&(*firstExternal), static_cast<size_t>(codepoints.end() - firstExternal));
+    }
+  }
 }
 
 void GfxRenderer::drawText(const int fontId, const int x, const int y, const char* text, const bool black,
@@ -179,7 +366,8 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     return;
   }
 
-  if (fontMap.count(fontId) == 0) {
+  auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return;
   }
@@ -189,21 +377,17 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     getStreamingFont(fontId, style);
   }
 
-  const auto font = fontMap.at(fontId);
-
-  // no printable characters
-  if (!font.hasPrintableChars(text, style)) {
-    return;
-  }
+  const EpdFontFamily& font = fontIt->second;
 
   // Check if text contains Arabic script - use Arabic rendering path
-  if (ScriptDetector::containsArabic(text)) {
+  const TextScriptFlags scripts = detectTextScripts(text);
+  if (scripts.hasArabic) {
     drawArabicText(fontId, x, y, text, black, style);
     return;
   }
 
   // Check if text contains Thai script - use Thai rendering path if so
-  if (ScriptDetector::containsThai(text)) {
+  if (scripts.hasThai) {
     drawThaiText(fontId, x, y, text, black, style);
     return;
   }
@@ -342,11 +526,11 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       const uint8_t val = bitmapOutputRow_[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
 
       if (renderMode == BW && val < 3) {
-        drawPixel(screenX, screenY);
+        plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, true, this);
       } else if (renderMode == GRAYSCALE_MSB && (val == 1 || val == 2)) {
-        drawPixel(screenX, screenY, false);
+        plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, false, this);
       } else if (renderMode == GRAYSCALE_LSB && val == 1) {
-        drawPixel(screenX, screenY, false);
+        plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, false, this);
       }
     }
   }
@@ -406,15 +590,39 @@ void GfxRenderer::clearArea(const int x, const int y, const int width, const int
   const int x_end = std::min(physX + physW - 1, static_cast<int>(EInkDisplay::DISPLAY_WIDTH - 1));
   const int y_end = std::min(physY + physH - 1, static_cast<int>(EInkDisplay::DISPLAY_HEIGHT - 1));
 
-  // Calculate byte boundaries (8 pixels per byte)
   const int x_byte_start = x_start / 8;
   const int x_byte_end = x_end / 8;
-  const int byte_width = x_byte_end - x_byte_start + 1;
+  const int startBit = x_start & 7;
+  const int endBit = x_end & 7;
 
-  // Clear each row in the region
   for (int row = y_start; row <= y_end; row++) {
     const uint32_t buffer_offset = row * EInkDisplay::DISPLAY_WIDTH_BYTES + x_byte_start;
-    memset(&frameBuffer[buffer_offset], color, byte_width);
+    if (x_byte_start == x_byte_end) {
+      const uint8_t leftMask = static_cast<uint8_t>(0xFFu >> startBit);
+      const uint8_t rightMask = static_cast<uint8_t>(0xFFu << (7 - endBit));
+      const uint8_t mask = static_cast<uint8_t>(leftMask & rightMask);
+      frameBuffer[buffer_offset] = static_cast<uint8_t>((frameBuffer[buffer_offset] & ~mask) | (color & mask));
+      continue;
+    }
+
+    if (startBit == 0) {
+      frameBuffer[buffer_offset] = color;
+    } else {
+      const uint8_t startMask = static_cast<uint8_t>(0xFFu >> startBit);
+      frameBuffer[buffer_offset] = static_cast<uint8_t>((frameBuffer[buffer_offset] & ~startMask) | (color & startMask));
+    }
+
+    for (int byte = x_byte_start + 1; byte < x_byte_end; byte++) {
+      frameBuffer[row * EInkDisplay::DISPLAY_WIDTH_BYTES + byte] = color;
+    }
+
+    const uint32_t end_offset = row * EInkDisplay::DISPLAY_WIDTH_BYTES + x_byte_end;
+    if (endBit == 7) {
+      frameBuffer[end_offset] = color;
+    } else {
+      const uint8_t endMask = static_cast<uint8_t>(0xFFu << (7 - endBit));
+      frameBuffer[end_offset] = static_cast<uint8_t>((frameBuffer[end_offset] & ~endMask) | (color & endMask));
+    }
   }
 }
 
@@ -430,6 +638,22 @@ void GfxRenderer::displayBuffer(const EInkDisplay::RefreshMode refreshMode, bool
     renderStartMs = 0;
   }
   einkDisplay.displayBuffer(refreshMode, turnOffScreen);
+  frameBuffer = einkDisplay.getFrameBuffer();
+}
+
+void GfxRenderer::prepareCurrentFrameAsFastBaseline() const {
+#ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
+  einkDisplay.syncCurrentFrameAsPrevious();
+#endif
+  einkDisplay.armFastRefreshFromPowerOffOnce();
+  frameBuffer = einkDisplay.getFrameBuffer();
+}
+
+void GfxRenderer::preparePartialUpdateFrame() const {
+#ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
+  einkDisplay.syncDrawBufferWithCurrent();
+#endif
+  frameBuffer = einkDisplay.getFrameBuffer();
 }
 
 void GfxRenderer::displayWindow(int x, int y, int width, int height, bool turnOffScreen) const {
@@ -467,21 +691,43 @@ void GfxRenderer::displayWindow(int x, int y, int width, int height, bool turnOf
   physX = physX & ~7;
   physW = alignedEnd - physX;
   einkDisplay.displayWindow(physX, physY, physW, physH, turnOffScreen);
+  frameBuffer = einkDisplay.getFrameBuffer();
 }
 
 std::string GfxRenderer::truncatedText(const int fontId, const char* text, const int maxWidth,
                                        const EpdFontFamily::Style style) const {
   std::string item = text;
   int itemWidth = getTextWidth(fontId, item.c_str(), style);
-  while (itemWidth > maxWidth && item.length() > 8) {
-    // Remove "..." first, then remove one UTF-8 char, then add "..." back
-    if (item.length() >= 3 && item.compare(item.length() - 3, 3, "...") == 0) {
-      item.resize(item.length() - 3);
-    }
-    utf8RemoveLastChar(item);
-    item.append("...");
-    itemWidth = getTextWidth(fontId, item.c_str(), style);
+  if (itemWidth <= maxWidth || item.length() <= 8) {
+    return item;
   }
+
+  const std::vector<size_t> boundaries = utf8PrefixBoundaries(item);
+  size_t left = 0;
+  size_t right = boundaries.size() - 1;
+  size_t best = 0;
+
+  while (left <= right) {
+    const size_t mid = left + (right - left) / 2;
+    std::string candidate = item.substr(0, boundaries[mid]);
+    candidate.append("...");
+    const int candidateWidth = getTextWidth(fontId, candidate.c_str(), style);
+
+    if (candidateWidth <= maxWidth) {
+      best = mid;
+      left = mid + 1;
+    } else {
+      if (mid == 0) break;
+      right = mid - 1;
+    }
+  }
+
+  if (best == 0) {
+    return "...";
+  }
+
+  item.resize(boundaries[best]);
+  item.append("...");
   return item;
 }
 
@@ -498,39 +744,41 @@ std::vector<std::string> GfxRenderer::breakWordWithHyphenation(const int fontId,
       break;
     }
 
-    // Find max chars that fit with hyphen
-    std::string chunk;
-    const char* ptr = remaining.c_str();
-    const char* lastGoodPos = ptr;
+    const std::vector<size_t> boundaries = utf8PrefixBoundaries(remaining);
+    size_t left = 1;
+    size_t right = boundaries.size() - 1;
+    size_t best = 0;
 
-    while (*ptr) {
-      const char* nextChar = ptr;
-      utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&nextChar));
+    while (left <= right) {
+      const size_t mid = left + (right - left) / 2;
+      const bool hasTail = boundaries[mid] < remaining.size();
+      std::string candidate = remaining.substr(0, boundaries[mid]);
+      if (hasTail) {
+        candidate.push_back('-');
+      }
 
-      std::string testChunk = chunk;
-      testChunk.append(ptr, nextChar - ptr);
-      const int testWidth = getTextWidth(fontId, (testChunk + "-").c_str(), style);
-
-      if (testWidth > maxWidth && !chunk.empty()) break;
-
-      chunk = testChunk;
-      lastGoodPos = nextChar;
-      ptr = nextChar;
+      const int candidateWidth = getTextWidth(fontId, candidate.c_str(), style);
+      if (candidateWidth <= maxWidth) {
+        best = mid;
+        left = mid + 1;
+      } else {
+        if (mid == 0) break;
+        right = mid - 1;
+      }
     }
 
-    if (chunk.empty()) {
-      // Single char too wide - force it
-      const char* nextChar = remaining.c_str();
-      utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&nextChar));
-      chunk.append(remaining.c_str(), nextChar - remaining.c_str());
-      lastGoodPos = nextChar;
+    if (best == 0) {
+      best = 1;
     }
 
-    if (lastGoodPos < remaining.c_str() + remaining.size()) {
-      chunks.push_back(chunk + "-");
-      remaining = remaining.substr(lastGoodPos - remaining.c_str());
+    std::string chunk = remaining.substr(0, boundaries[best]);
+    const bool hasTail = boundaries[best] < remaining.size();
+    if (hasTail) {
+      chunk.push_back('-');
+      chunks.push_back(std::move(chunk));
+      remaining.erase(0, boundaries[best]);
     } else {
-      chunks.push_back(chunk);
+      chunks.push_back(std::move(chunk));
       remaining.clear();
     }
   }
@@ -546,6 +794,7 @@ std::vector<std::string> GfxRenderer::wrapTextWithHyphenation(const int fontId, 
   }
 
   std::string remaining = text;
+  const int spaceWidth = getSpaceWidth(fontId);
 
   while (!remaining.empty() && static_cast<int>(lines.size()) < maxLines) {
     const bool isLastLine = static_cast<int>(lines.size()) == maxLines - 1;
@@ -559,9 +808,11 @@ std::vector<std::string> GfxRenderer::wrapTextWithHyphenation(const int fontId, 
 
     // Find where to break the line
     std::string currentLine;
+    int currentLineWidth = 0;
     const char* ptr = remaining.c_str();
     const char* lastBreakPoint = nullptr;
     std::string lineAtBreak;
+    int lineAtBreakWidth = 0;
 
     while (*ptr) {
       // Skip to end of current word
@@ -570,20 +821,21 @@ std::vector<std::string> GfxRenderer::wrapTextWithHyphenation(const int fontId, 
         utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&wordEnd));
       }
 
+      const std::string wordStr(ptr, wordEnd - ptr);
+      const int wordWidth = getTextWidth(fontId, wordStr.c_str(), style);
+      const int candidateWidth = currentLine.empty() ? wordWidth : (currentLineWidth + spaceWidth + wordWidth);
+
       // Build line up to this word
-      std::string testLine = currentLine;
-      if (!testLine.empty()) {
-        testLine += ' ';
-      }
-      testLine.append(ptr, wordEnd - ptr);
-
-      const int testWidth = getTextWidth(fontId, testLine.c_str(), style);
-
-      if (testWidth <= maxWidth) {
+      if (candidateWidth <= maxWidth) {
         // Word fits, update current line and remember this as potential break point
-        currentLine = testLine;
+        if (!currentLine.empty()) {
+          currentLine += ' ';
+        }
+        currentLine += wordStr;
+        currentLineWidth = candidateWidth;
         lastBreakPoint = wordEnd;
         lineAtBreak = currentLine;
+        lineAtBreakWidth = currentLineWidth;
 
         // Move past the word and any spaces
         ptr = wordEnd;
@@ -594,7 +846,7 @@ std::vector<std::string> GfxRenderer::wrapTextWithHyphenation(const int fontId, 
         // Word doesn't fit
         if (currentLine.empty()) {
           // Word alone is too long - use helper
-          auto wordChunks = breakWordWithHyphenation(fontId, std::string(ptr, wordEnd - ptr).c_str(), maxWidth, style);
+          auto wordChunks = breakWordWithHyphenation(fontId, wordStr.c_str(), maxWidth, style);
           for (size_t i = 0; i < wordChunks.size() && static_cast<int>(lines.size()) < maxLines; i++) {
             lines.push_back(wordChunks[i]);
           }
@@ -606,6 +858,7 @@ std::vector<std::string> GfxRenderer::wrapTextWithHyphenation(const int fontId, 
         } else if (lastBreakPoint) {
           // Line has content, break at last good point
           lines.push_back(lineAtBreak);
+          currentLineWidth = lineAtBreakWidth;
           // Skip spaces after break point
           const char* nextStart = lastBreakPoint;
           while (*nextStart == ' ') {
@@ -678,15 +931,26 @@ int GfxRenderer::getScreenHeight() const {
   return EInkDisplay::DISPLAY_WIDTH;
 }
 
-int GfxRenderer::getSpaceWidth(const int fontId) const {
+int GfxRenderer::getSpaceWidth(const int fontId, const EpdFontFamily::Style style) const {
   auto it = fontMap.find(fontId);
   if (it == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return 0;
   }
 
-  const EpdGlyph* glyph = it->second.getGlyph(' ', EpdFontFamily::REGULAR);
+  const EpdGlyph* glyph = it->second.getGlyph(' ', style);
+  if (!glyph && style != EpdFontFamily::REGULAR) {
+    glyph = it->second.getGlyph(' ', EpdFontFamily::REGULAR);
+  }
   return glyph ? glyph->advanceX : 0;
+}
+
+int GfxRenderer::getSpaceWidth(const int fontId) const {
+  const int regular = getSpaceWidth(fontId, EpdFontFamily::REGULAR);
+  const int bold = getSpaceWidth(fontId, EpdFontFamily::BOLD);
+  const int italic = getSpaceWidth(fontId, EpdFontFamily::ITALIC);
+  const int boldItalic = getSpaceWidth(fontId, EpdFontFamily::BOLD_ITALIC);
+  return std::max(std::max(regular, bold), std::max(italic, boldItalic));
 }
 
 int GfxRenderer::getFontAscenderSize(const int fontId) const {
@@ -751,13 +1015,19 @@ uint8_t* GfxRenderer::getFrameBuffer() const { return frameBuffer; }
 
 size_t GfxRenderer::getBufferSize() { return EInkDisplay::BUFFER_SIZE; }
 
-void GfxRenderer::grayscaleRevert() const { einkDisplay.grayscaleRevert(); }
+void GfxRenderer::grayscaleRevert() const {
+  einkDisplay.grayscaleRevert();
+  frameBuffer = einkDisplay.getFrameBuffer();
+}
 
 void GfxRenderer::copyGrayscaleLsbBuffers() const { einkDisplay.copyGrayscaleLsbBuffers(frameBuffer); }
 
 void GfxRenderer::copyGrayscaleMsbBuffers() const { einkDisplay.copyGrayscaleMsbBuffers(frameBuffer); }
 
-void GfxRenderer::displayGrayBuffer(bool turnOffScreen) const { einkDisplay.displayGrayBuffer(turnOffScreen); }
+void GfxRenderer::displayGrayBuffer(bool turnOffScreen) const {
+  einkDisplay.displayGrayBuffer(turnOffScreen);
+  frameBuffer = einkDisplay.getFrameBuffer();
+}
 
 void GfxRenderer::freeBwBufferChunks() {
   for (auto& bwBufferChunk : bwBufferChunks) {
@@ -876,7 +1146,12 @@ void GfxRenderer::renderChar(const EpdFontFamily& fontFamily, const uint32_t cp,
     return;
   }
 
-  const int is2Bit = fontFamily.getData(style)->is2Bit;
+  const EpdFontData* fontData = fontFamily.getData(style);
+  if (!fontData) {
+    return;
+  }
+
+  const bool is2Bit = fontData->is2Bit;
   const uint32_t offset = glyph->dataOffset;
   const uint8_t width = glyph->width;
   const uint8_t height = glyph->height;
@@ -894,9 +1169,9 @@ void GfxRenderer::renderChar(const EpdFontFamily& fontFamily, const uint32_t cp,
       bitmap = sf->getGlyphBitmap(glyph);
     }
   }
-  if (!bitmap && fontFamily.getData(style)->bitmap) {
+  if (!bitmap && fontData->bitmap) {
     // Fall back to standard EpdFont bitmap access
-    bitmap = &fontFamily.getData(style)->bitmap[offset];
+    bitmap = &fontData->bitmap[offset];
   }
 
   if (bitmap != nullptr) {
@@ -923,21 +1198,21 @@ void GfxRenderer::renderChar(const EpdFontFamily& fontFamily, const uint32_t cp,
 
           if (renderMode == BW && bmpVal < 3) {
             // Black (also paints over the grays in BW mode)
-            drawPixel(screenX, screenY, pixelState);
+            plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, pixelState, this);
           } else if (renderMode == GRAYSCALE_MSB && (bmpVal == 1 || bmpVal == 2)) {
             // Light gray (also mark the MSB if it's going to be a dark gray too)
             // We have to flag pixels in reverse for the gray buffers, as 0 leave alone, 1 update
-            drawPixel(screenX, screenY, false);
+            plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, false, this);
           } else if (renderMode == GRAYSCALE_LSB && bmpVal == 1) {
             // Dark gray
-            drawPixel(screenX, screenY, false);
+            plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, false, this);
           }
         } else {
           const uint8_t byte = bitmap[pixelPosition / 8];
           const uint8_t bit_index = 7 - (pixelPosition % 8);
 
           if ((byte >> bit_index) & 1) {
-            drawPixel(screenX, screenY, pixelState);
+            plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, pixelState, this);
           }
         }
       }
@@ -1035,7 +1310,7 @@ void GfxRenderer::renderExternalGlyph(const uint32_t cp, int* x, const int y, co
       const int byteIdx = glyphY * bytesPerRow + (glyphX / 8);
       const int bitIdx = 7 - (glyphX % 8);
       if ((bitmap[byteIdx] >> bitIdx) & 1) {
-        drawPixel(screenX, screenY, pixelState);
+        plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, pixelState, this);
       }
     }
   }

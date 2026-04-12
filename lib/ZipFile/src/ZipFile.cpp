@@ -1,10 +1,12 @@
 #include "ZipFile.h"
 
+#include <Arduino.h>
 #include <Logging.h>
 
 #define TAG "ZIP"
 #include <InflateReader.h>
 #include <SDCardManager.h>
+#include <SharedSpiLock.h>
 #include <esp_heap_caps.h>
 
 #include <algorithm>
@@ -23,6 +25,7 @@ static_assert(offsetof(ZipInflateCtx, reader) == 0, "reader must be at offset 0 
 namespace {
 constexpr uint16_t ZIP_METHOD_STORED = 0;
 constexpr uint16_t ZIP_METHOD_DEFLATED = 8;
+constexpr uint8_t YIELD_CHUNK_INTERVAL = 8;
 
 int zipReadCallback(uzlib_uncomp* uncomp) {
   auto* ctx = reinterpret_cast<ZipInflateCtx*>(uncomp);
@@ -462,6 +465,11 @@ int ZipFile::findFirstExisting(const char* const* paths, int pathCount) {
 }
 
 uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const bool trailingNullByte) {
+  papyrix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    return nullptr;
+  }
+
   const bool wasOpen = isOpen();
   if (!wasOpen && !open()) {
     return nullptr;
@@ -563,22 +571,57 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
   return data;
 }
 
-bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t chunkSize, uint8_t* dictBuffer) {
+const char* ZipFile::streamReadResultToString(const StreamReadResult result) {
+  switch (result) {
+    case StreamReadResult::Success:
+      return "success";
+    case StreamReadResult::OpenFailed:
+      return "open-failed";
+    case StreamReadResult::NotFound:
+      return "not-found";
+    case StreamReadResult::InvalidOffset:
+      return "invalid-offset";
+    case StreamReadResult::UnsupportedMethod:
+      return "unsupported-method";
+    case StreamReadResult::AllocFailed:
+      return "alloc-failed";
+    case StreamReadResult::Aborted:
+      return "aborted";
+    case StreamReadResult::ReadError:
+      return "read-error";
+    case StreamReadResult::WriteError:
+      return "write-error";
+    case StreamReadResult::DecompressionError:
+      return "decompression-error";
+    case StreamReadResult::SizeMismatch:
+      return "size-mismatch";
+  }
+  return "unknown";
+}
+
+ZipFile::StreamReadResult ZipFile::readFileToStreamDetailed(const char* filename, Print& out, const size_t chunkSize,
+                                                            uint8_t* dictBuffer,
+                                                            const std::function<bool()>& shouldAbort) {
+  papyrix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    return StreamReadResult::AllocFailed;
+  }
+
   const bool wasOpen = isOpen();
   if (!wasOpen && !open()) {
-    return false;
+    return StreamReadResult::OpenFailed;
   }
 
   FileStatSlim fileStat = {};
   if (!loadFileStatSlim(filename, &fileStat)) {
     if (!wasOpen) close();
-    return false;
+    return StreamReadResult::NotFound;
   }
 
   const long fileOffset = getDataOffset(fileStat);
   if (fileOffset < 0) {
     if (!wasOpen) close();
-    return false;
+    return StreamReadResult::InvalidOffset;
   }
 
   file.seek(fileOffset);
@@ -593,11 +636,25 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       if (!wasOpen) {
         close();
       }
-      return false;
+      return StreamReadResult::AllocFailed;
     }
 
     size_t remaining = inflatedDataSize;
+    uint8_t chunkCounter = 0;
     while (remaining > 0) {
+      if (++chunkCounter >= YIELD_CHUNK_INTERVAL) {
+        chunkCounter = 0;
+        if (shouldAbort && shouldAbort()) {
+          LOG_ERR(TAG, "Stored stream extraction aborted");
+          free(buffer);
+          if (!wasOpen) {
+            close();
+          }
+          return StreamReadResult::Aborted;
+        }
+        delay(1);
+      }
+
       const size_t dataRead = file.read(buffer, remaining < chunkSize ? remaining : chunkSize);
       if (dataRead == 0) {
         LOG_ERR(TAG, "Could not read more bytes");
@@ -605,10 +662,17 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
         if (!wasOpen) {
           close();
         }
-        return false;
+        return StreamReadResult::ReadError;
       }
 
-      out.write(buffer, dataRead);
+      if (out.write(buffer, dataRead) != dataRead) {
+        LOG_ERR(TAG, "Failed to write all stored output bytes to stream");
+        free(buffer);
+        if (!wasOpen) {
+          close();
+        }
+        return StreamReadResult::WriteError;
+      }
       remaining -= dataRead;
     }
 
@@ -616,7 +680,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       close();
     }
     free(buffer);
-    return true;
+    return StreamReadResult::Success;
   }
 
   if (fileStat.method == ZIP_METHOD_DEFLATED) {
@@ -626,7 +690,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       if (!wasOpen) {
         close();
       }
-      return false;
+      return StreamReadResult::AllocFailed;
     }
 
     auto* outputBuffer = static_cast<uint8_t*>(malloc(chunkSize));
@@ -635,7 +699,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       if (!wasOpen) {
         close();
       }
-      return false;
+      return StreamReadResult::AllocFailed;
     }
 
     ZipInflateCtx ctx;
@@ -652,14 +716,25 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       if (!wasOpen) {
         close();
       }
-      return false;
+      return StreamReadResult::AllocFailed;
     }
     ctx.reader.setReadCallback(zipReadCallback);
 
-    bool success = false;
+    StreamReadResult result = StreamReadResult::DecompressionError;
     size_t totalProduced = 0;
+    uint8_t chunkCounter = 0;
 
     while (true) {
+      if (++chunkCounter >= YIELD_CHUNK_INTERVAL) {
+        chunkCounter = 0;
+        if (shouldAbort && shouldAbort()) {
+          LOG_ERR(TAG, "Deflated stream extraction aborted");
+          result = StreamReadResult::Aborted;
+          break;
+        }
+        delay(1);
+      }
+
       size_t produced;
       const InflateStatus status = ctx.reader.readAtMost(outputBuffer, chunkSize, &produced);
 
@@ -667,12 +742,14 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       if (totalProduced > static_cast<size_t>(inflatedDataSize)) {
         LOG_ERR(TAG, "Decompressed size exceeds expected (%zu > %zu)", totalProduced,
                 static_cast<size_t>(inflatedDataSize));
+        result = StreamReadResult::SizeMismatch;
         break;
       }
 
       if (produced > 0) {
         if (out.write(outputBuffer, produced) != produced) {
           LOG_ERR(TAG, "Failed to write all output bytes to stream");
+          result = StreamReadResult::WriteError;
           break;
         }
       }
@@ -681,15 +758,17 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
         if (totalProduced != static_cast<size_t>(inflatedDataSize)) {
           LOG_ERR(TAG, "Decompressed size mismatch (expected %zu, got %zu)", static_cast<size_t>(inflatedDataSize),
                   totalProduced);
+          result = StreamReadResult::SizeMismatch;
           break;
         }
         LOG_DBG(TAG, "Decompressed %d bytes into %d bytes", deflatedDataSize, inflatedDataSize);
-        success = true;
+        result = StreamReadResult::Success;
         break;
       }
 
       if (status == InflateStatus::Error) {
         LOG_ERR(TAG, "Decompression failed");
+        result = StreamReadResult::DecompressionError;
         break;
       }
     }
@@ -699,7 +778,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
     }
     free(outputBuffer);
     free(fileReadBuffer);
-    return success;  // ctx.reader destructor frees the ring buffer (if owned)
+    return result;  // ctx.reader destructor frees the ring buffer (if owned)
   }
 
   if (!wasOpen) {
@@ -707,5 +786,10 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
   }
 
   LOG_ERR(TAG, "Unsupported compression method");
-  return false;
+  return StreamReadResult::UnsupportedMethod;
+}
+
+bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t chunkSize, uint8_t* dictBuffer,
+                               const std::function<bool()>& shouldAbort) {
+  return readFileToStreamDetailed(filename, out, chunkSize, dictBuffer, shouldAbort) == StreamReadResult::Success;
 }

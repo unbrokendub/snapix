@@ -60,6 +60,10 @@ void SleepState::enter(Core& core) {
 
   // Save power button duration to RTC memory for wake-up verification
   rtcPowerButtonDurationMs = core.settings.getPowerButtonDuration();
+  core.settings.pendingSleepWake = 1;
+  if (!core.settings.saveToFile()) {
+    LOG_ERR(TAG, "Failed to persist pending sleep wake flag");
+  }
 
   // Put display into low-power mode after rendering
   core.display.sleep();
@@ -115,7 +119,9 @@ void SleepState::renderDefaultSleepScreen(const Core& core) const {
     renderer_.invertScreen();
   }
 
-  renderer_.displayBuffer(EInkDisplay::HALF_REFRESH);
+  const EInkDisplay::RefreshMode sleepRefresh =
+      (core.settings.sleepScreen == Settings::SleepLight) ? EInkDisplay::FAST_REFRESH : EInkDisplay::HALF_REFRESH;
+  renderer_.displayBuffer(sleepRefresh);
 }
 
 void SleepState::renderCustomSleepScreen(const Core& core) const {

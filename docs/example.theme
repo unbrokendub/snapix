@@ -33,8 +33,13 @@ margin_side = 3
 item_height = 30
 # Vertical space between items in pixels
 item_spacing = 0
+# Optional additional downward shift for reader status bar (0-20 px)
+status_bar_offset_y = 0
 
 [fonts]
+# Optional status bar font (leave empty for builtin small font)
+# Example: status_font = jetbrains-6
+status_font =
 # Custom reader font for each size (leave empty for builtin)
 # Must match directory name under /config/fonts/ on SD card
 # Example: reader_font_small = noto-serif-14

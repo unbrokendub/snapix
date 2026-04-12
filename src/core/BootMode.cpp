@@ -22,9 +22,39 @@ extern Core core;
 // Cached transition for current boot
 static ModeTransition cachedTransition = {};
 static bool transitionCached = false;
+static bool transitionNotificationVisible = false;
+
+namespace {
+
+const char* transitionNotificationForMode(const BootMode mode) {
+  switch (mode) {
+    case BootMode::READER:
+      return "Opening book...";
+    case BootMode::UI:
+      return "Returning to library...";
+  }
+  return nullptr;
+}
+
+void renderTransitionNotificationFrameInternal(const char* message) {
+  const Theme& theme = THEME_MANAGER.current();
+
+  renderer.clearScreen(theme.backgroundColor);
+
+  // Draw centered message
+  const int screenHeight = renderer.getScreenHeight();
+  const int y = screenHeight / 2 - 20;
+
+  renderer.drawCenteredText(theme.uiFontId, y, message, theme.primaryTextBlack, REGULAR);
+}
+
+}  // namespace
 
 BootMode detectBootMode() {
   LOG_DBG(TAG, "Checking boot mode...");
+
+  transitionCached = false;
+  transitionNotificationVisible = false;
 
   // Check settings for pending UI transition (1=UI mode)
   if (core.settings.pendingTransition == 1) {
@@ -36,6 +66,7 @@ BootMode detectBootMode() {
     cachedTransition.returnTo = static_cast<ReturnTo>(core.settings.transitionReturnTo);
     cachedTransition.bookPath[0] = '\0';
     transitionCached = true;
+    transitionNotificationVisible = true;
 
     clearTransition();
     return BootMode::UI;
@@ -54,6 +85,7 @@ BootMode detectBootMode() {
     strncpy(cachedTransition.bookPath, core.settings.lastBookPath, sizeof(cachedTransition.bookPath) - 1);
     cachedTransition.bookPath[sizeof(cachedTransition.bookPath) - 1] = '\0';
     transitionCached = true;
+    transitionNotificationVisible = true;
 
     // Clear the pending flag to prevent boot loop
     clearTransition();
@@ -73,6 +105,7 @@ BootMode detectBootMode() {
     strncpy(cachedTransition.bookPath, core.settings.lastBookPath, sizeof(cachedTransition.bookPath) - 1);
     cachedTransition.bookPath[sizeof(cachedTransition.bookPath) - 1] = '\0';
     transitionCached = true;
+    transitionNotificationVisible = false;
 
     // Clear lastBookPath to prevent boot loop if reader fails
     // ReaderState will re-save it after successful open
@@ -87,6 +120,17 @@ BootMode detectBootMode() {
 }
 
 const ModeTransition& getTransition() { return cachedTransition; }
+
+bool hasTransitionNotification() { return transitionNotificationVisible; }
+
+const char* getTransitionNotificationMessage() {
+  if (!transitionNotificationVisible || !transitionCached) {
+    return nullptr;
+  }
+  return transitionNotificationForMode(cachedTransition.mode);
+}
+
+void prepareTransitionNotificationFrame(const char* message) { renderTransitionNotificationFrameInternal(message); }
 
 void saveTransition(BootMode mode, const char* bookPath, ReturnTo returnTo) {
   // Only set lastBookPath when transitioning to Reader mode
@@ -113,18 +157,10 @@ void clearTransition() {
 }
 
 void showTransitionNotification(const char* message) {
-  const Theme& theme = THEME_MANAGER.current();
+  renderTransitionNotificationFrameInternal(message);
 
-  renderer.clearScreen(theme.backgroundColor);
-
-  // Draw centered message
-  const int screenHeight = renderer.getScreenHeight();
-  const int y = screenHeight / 2 - 20;
-
-  renderer.drawCenteredText(theme.uiFontId, y, message, theme.primaryTextBlack, REGULAR);
-
-  // Display immediately (partial refresh for speed)
-  renderer.displayBuffer(EInkDisplay::HALF_REFRESH);
+  // When transition refresh cleanup is disabled, keep the notification itself fast too.
+  renderer.displayBuffer(core.settings.transitionFullRefresh ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
 
   LOG_DBG(TAG, "Displayed notification: %s", message);
 }

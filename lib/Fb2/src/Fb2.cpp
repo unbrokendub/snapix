@@ -17,7 +17,7 @@
 #include <cstring>
 
 namespace {
-constexpr uint8_t kMetaCacheVersion = 2;
+constexpr uint8_t kMetaCacheVersion = 4;
 constexpr char kMetaCacheFile[] = "/meta.bin";
 }  // namespace
 
@@ -174,6 +174,9 @@ void XMLCALL Fb2::startElement(void* userData, const XML_Char* name, const XML_C
     self->inBody = (self->bodyCount_ == 1);
   } else if (strcmp(tag, "section") == 0 && self->inBody) {
     self->sectionCounter_++;
+    self->sectionDepth_++;
+    const long byteIndex = self->xmlParser_ ? XML_GetCurrentByteIndex(self->xmlParser_) : -1;
+    self->currentSectionOffset_ = byteIndex >= 0 ? static_cast<uint32_t>(byteIndex) : 0;
   } else if (strcmp(tag, "title") == 0 && self->inBody && self->sectionCounter_ > 0) {
     self->inSectionTitle_ = true;
     self->sectionTitleDepth_ = self->depth;
@@ -255,8 +258,15 @@ void XMLCALL Fb2::endElement(void* userData, const XML_Char* name) {
     }
 
     if (!t.empty()) {
-      self->tocItems_.push_back({t, self->sectionCounter_ - 1});
+      TocItem item;
+      item.title = t;
+      item.sectionIndex = self->sectionCounter_ - 1;
+      item.sourceOffset = self->currentSectionOffset_;
+      item.depth = self->sectionDepth_ > 0 ? static_cast<uint8_t>(self->sectionDepth_ - 1) : 0;
+      self->tocItems_.push_back(std::move(item));
     }
+  } else if (strcmp(tag, "section") == 0 && self->inBody && self->sectionDepth_ > 0) {
+    self->sectionDepth_--;
   }
 
   self->depth--;
@@ -378,6 +388,7 @@ void Fb2::setupCacheDir() const {
     }
   }
   SdMan.mkdir(cachePath.c_str());
+  SdMan.mkdir((cachePath + "/sections").c_str());
 }
 
 std::string Fb2::getCoverBmpPath() const { return cachePath + "/cover.bmp"; }
@@ -519,7 +530,10 @@ bool Fb2::loadMetaCache() {
   for (uint16_t i = 0; i < tocItemCount; i++) {
     tocLut_.push_back(static_cast<uint32_t>(file.position()));
     int16_t dummyIdx;
-    if (!serialization::skipString(file) || !serialization::readPodChecked(file, dummyIdx)) {
+    uint32_t dummyOffset;
+    uint8_t dummyDepth;
+    if (!serialization::skipString(file) || !serialization::readPodChecked(file, dummyIdx) ||
+        !serialization::readPodChecked(file, dummyOffset) || !serialization::readPodChecked(file, dummyDepth)) {
       tocLut_.clear();
       tocItemCount_ = 0;
       file.close();
@@ -558,6 +572,8 @@ bool Fb2::saveMetaCache() const {
     serialization::writeString(file, item.title);
     const int16_t idx = static_cast<int16_t>(item.sectionIndex);
     serialization::writePod(file, idx);
+    serialization::writePod(file, item.sourceOffset);
+    serialization::writePod(file, item.depth);
   }
 
   file.close();
@@ -573,10 +589,19 @@ Fb2::TocItem Fb2::getTocItem(uint16_t index) const {
   if (!SdMan.openFileForRead("FB2", metaCachePath(), file)) return item;
 
   file.seek(tocLut_[index]);
-  serialization::readString(file, item.title);
+  if (!serialization::readString(file, item.title)) {
+    file.close();
+    return TocItem{};
+  }
   int16_t idx;
   if (serialization::readPodChecked(file, idx)) {
     item.sectionIndex = idx;
+  }
+  if (!serialization::readPodChecked(file, item.sourceOffset)) {
+    item.sourceOffset = 0;
+  }
+  if (!serialization::readPodChecked(file, item.depth)) {
+    item.depth = 0;
   }
   file.close();
   return item;

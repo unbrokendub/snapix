@@ -13,6 +13,10 @@
 
 namespace papyrix {
 
+namespace {
+constexpr uint8_t kFb2SectionedMarker = 0x80;
+}
+
 bool ProgressManager::save(Core& core, const char* cacheDir, ContentType type, const Progress& progress) {
   if (!cacheDir || cacheDir[0] == '\0') {
     return false;
@@ -38,6 +42,13 @@ bool ProgressManager::save(Core& core, const char* cacheDir, ContentType type, c
     data[3] = (progress.sectionPage >> 8) & 0xFF;
     file.write(data, 4);
     LOG_DBG(TAG, "Saved EPUB: spine=%d page=%d", progress.spineIndex, progress.sectionPage);
+  } else if (type == ContentType::Fb2) {
+    data[0] = progress.spineIndex & 0xFF;
+    data[1] = ((progress.spineIndex >> 8) & 0x7F) | kFb2SectionedMarker;
+    data[2] = progress.sectionPage & 0xFF;
+    data[3] = (progress.sectionPage >> 8) & 0xFF;
+    file.write(data, 4);
+    LOG_DBG(TAG, "Saved FB2: section=%d page=%d", progress.spineIndex, progress.sectionPage);
   } else if (type == ContentType::Xtc) {
     // XTC: save flat page number (4 bytes)
     data[0] = progress.flatPage & 0xFF;
@@ -96,6 +107,16 @@ ProgressManager::Progress ProgressManager::load(Core& core, const char* cacheDir
     progress.spineIndex = data[0] | (data[1] << 8);
     progress.sectionPage = data[2] | (data[3] << 8);
     LOG_DBG(TAG, "Loaded EPUB: spine=%d page=%d", progress.spineIndex, progress.sectionPage);
+  } else if (type == ContentType::Fb2) {
+    if ((data[1] & kFb2SectionedMarker) != 0) {
+      progress.spineIndex = data[0] | ((data[1] & 0x7F) << 8);
+      progress.sectionPage = data[2] | (data[3] << 8);
+      LOG_DBG(TAG, "Loaded FB2: section=%d page=%d", progress.spineIndex, progress.sectionPage);
+    } else {
+      progress.spineIndex = 0;
+      progress.sectionPage = 0;
+      LOG_DBG(TAG, "Loaded legacy FB2 progress; resetting to section start");
+    }
   } else if (type == ContentType::Xtc) {
     progress.flatPage = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
     LOG_DBG(TAG, "Loaded XTC: page %u", progress.flatPage);
@@ -124,6 +145,18 @@ ProgressManager::Progress ProgressManager::validate(Core& core, ContentType type
         validated.spineIndex = spineCount > 0 ? spineCount - 1 : 0;
         validated.sectionPage = 0;
       }
+    }
+  } else if (type == ContentType::Fb2) {
+    const uint16_t tocCount = core.content.tocCount();
+    if (validated.spineIndex < 0) {
+      validated.spineIndex = 0;
+    }
+    if (validated.sectionPage < 0) {
+      validated.sectionPage = 0;
+    }
+    if (tocCount > 0 && validated.spineIndex >= static_cast<int>(tocCount)) {
+      validated.spineIndex = 0;
+      validated.sectionPage = 0;
     }
   } else if (type == ContentType::Xtc) {
     // Validate flat page

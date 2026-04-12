@@ -4,21 +4,42 @@
 
 class EInkDisplay {
  public:
+  using WaitHook = void (*)();
+
   // Constructor with pin configuration
   EInkDisplay(int8_t sclk, int8_t mosi, int8_t cs, int8_t dc, int8_t rst, int8_t busy);
 
   // Destructor
   ~EInkDisplay() = default;
 
-  // Refresh modes (guarded to avoid redefinition in test builds)
+ // Refresh modes (guarded to avoid redefinition in test builds)
   enum RefreshMode {
     FULL_REFRESH,  // Full refresh with complete waveform
     HALF_REFRESH,  // Half refresh (1720ms) - balanced quality and speed
     FAST_REFRESH   // Fast refresh using custom LUT
   };
 
+  enum class ControllerState : uint8_t {
+    Uninitialized,
+    Ready,
+    WarmPreserved,
+    Recovering,
+    Faulted,
+  };
+
+  enum class PowerState : uint8_t {
+    Off,
+    On,
+  };
+
+  enum class RenderState : uint8_t {
+    Bw,
+    Grayscale,
+  };
+
   // Initialize the display hardware and driver
   void begin();
+  void beginPreservingPanelState();
 
   // Display dimensions
   static constexpr uint16_t DISPLAY_WIDTH = 800;
@@ -33,6 +54,8 @@ class EInkDisplay {
 
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
   void swapBuffers();
+  void syncDrawBufferWithCurrent();
+  void syncCurrentFrameAsPrevious();
 #endif
   void setFramebuffer(const uint8_t* bwBuffer) const;
 
@@ -51,6 +74,8 @@ class EInkDisplay {
   void displayGrayBuffer(bool turnOffScreen = false);
 
   void refreshDisplay(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);
+  void setWaitHook(WaitHook hook) { waitHook_ = hook; }
+  void armFastRefreshFromPowerOffOnce() { fastRefreshFromPowerOffArmed_ = true; }
 
   // debug function
   void grayscaleRevert();
@@ -68,6 +93,14 @@ class EInkDisplay {
   void saveFrameBufferAsPBM(const char* filename);
 
  private:
+  struct RuntimeState {
+    ControllerState controller = ControllerState::Uninitialized;
+    PowerState power = PowerState::Off;
+    RenderState render = RenderState::Bw;
+    bool differentialBaselineValid = false;
+    bool customLutActive = false;
+  };
+
   // Pin configuration
   int8_t _sclk, _mosi, _cs, _dc, _rst, _busy;
 
@@ -83,20 +116,25 @@ class EInkDisplay {
   SPISettings spiSettings;
 
   // State
-  bool isScreenOn;
-  bool customLutActive;
-  bool inGrayscaleMode;
-  bool drawGrayscale;
+  RuntimeState state_;
+  uint16_t busyTimeoutRecoveries_ = 0;
+  bool fastRefreshFromPowerOffArmed_ = false;
+  WaitHook waitHook_ = nullptr;
 
   // Low-level display control
+  void initTransport();
   void resetDisplay();
-  void sendCommand(uint8_t command);
-  void sendData(uint8_t data);
-  void sendData(const uint8_t* data, uint16_t length);
-  void waitWhileBusy(const char* comment = nullptr);
-  void initDisplayController();
+  void IRAM_ATTR sendCommand(uint8_t command);
+  void IRAM_ATTR sendData(uint8_t data);
+  void IRAM_ATTR sendData(const uint8_t* data, uint16_t length);
+  void IRAM_ATTR sendCommandWithData(uint8_t command, const uint8_t* data, uint16_t length);
+  bool waitWhileBusy(const char* comment = nullptr);
+  bool initDisplayController();
+  bool recoverFromBusyTimeout(const char* comment);
+  bool canUseFastRefresh() const;
+  void markBaselineKnown(bool valid);
 
   // Low-level display operations
-  void setRamArea(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
-  void writeRamBuffer(uint8_t ramBuffer, const uint8_t* data, uint32_t size);
+  void IRAM_ATTR setRamArea(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
+  void IRAM_ATTR writeRamBuffer(uint8_t ramBuffer, const uint8_t* data, uint32_t size);
 };

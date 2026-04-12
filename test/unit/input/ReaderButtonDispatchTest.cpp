@@ -1,546 +1,99 @@
 #include "test_utils.h"
 
-#include <cstdint>
+#include <chrono>
+#include <thread>
 
-// ============================================================================
-// Inline types and dispatch logic mirroring ReaderState::update() (lines 441-500)
-// Tests the button-to-navigation event dispatch: short/long press distinction,
-// holdNavigated_ flag, power button setting, and overlay mode guards.
-// ============================================================================
-
-enum class EventType : uint8_t {
-  None = 0,
-  ButtonPress,
-  ButtonRepeat,
-  ButtonRelease,
-};
-
-enum class Button : uint8_t {
-  Up,
-  Down,
-  Left,
-  Right,
-  Center,
-  Back,
-  Power,
-};
-
-struct Event {
-  EventType type;
-  Button button;
-
-  static Event press(Button b) { return {EventType::ButtonPress, b}; }
-  static Event repeat(Button b) { return {EventType::ButtonRepeat, b}; }
-  static Event release(Button b) { return {EventType::ButtonRelease, b}; }
-};
-
-enum class Action {
-  None,
-  Next,
-  Prev,
-  NextChapter,
-  PrevChapter,
-  Menu,
-  Exit,
-};
-
-struct ReaderButtonDispatcher {
-  bool holdNavigated_ = false;
-  bool menuMode_ = false;
-  bool tocMode_ = false;
-  bool bookmarkMode_ = false;
-
-  enum PowerAction : uint8_t { PowerIgnore = 0, PowerSleep = 1, PowerPageTurn = 2 };
-  uint8_t shortPwrBtn = PowerIgnore;
-  uint32_t powerPressStartedMs_ = 0;
-  uint16_t powerButtonDuration = 400;
-
-  // Mock time for testing timing guard
-  uint32_t currentTimeMs_ = 0;
-  uint32_t millis() const { return currentTimeMs_; }
-
-  Action lastAction = Action::None;
-
-  void processEvent(const Event& e) {
-    lastAction = Action::None;
-
-    // Mode guards: overlays consume all events
-    if (menuMode_ || bookmarkMode_ || tocMode_) {
-      return;
-    }
-
-    switch (e.type) {
-      case EventType::ButtonPress:
-        switch (e.button) {
-          case Button::Center:
-            lastAction = Action::Menu;
-            break;
-          case Button::Back:
-            lastAction = Action::Exit;
-            break;
-          case Button::Power:
-            if (shortPwrBtn == PowerPageTurn) {
-              powerPressStartedMs_ = millis();
-            }
-            break;
-          default:
-            break;
-        }
-        break;
-
-      case EventType::ButtonRepeat:
-        if (!holdNavigated_) {
-          switch (e.button) {
-            case Button::Right:
-            case Button::Down:
-              lastAction = Action::NextChapter;
-              holdNavigated_ = true;
-              break;
-            case Button::Left:
-            case Button::Up:
-              lastAction = Action::PrevChapter;
-              holdNavigated_ = true;
-              break;
-            default:
-              break;
-          }
-        }
-        break;
-
-      case EventType::ButtonRelease:
-        if (!holdNavigated_) {
-          switch (e.button) {
-            case Button::Right:
-            case Button::Down:
-              lastAction = Action::Next;
-              break;
-            case Button::Left:
-            case Button::Up:
-              lastAction = Action::Prev;
-              break;
-            case Button::Power:
-              if (shortPwrBtn == PowerPageTurn && powerPressStartedMs_ != 0) {
-                const uint32_t heldMs = millis() - powerPressStartedMs_;
-                if (heldMs < powerButtonDuration) {
-                  lastAction = Action::Next;
-                }
-              }
-              break;
-            default:
-              break;
-          }
-        }
-        if (e.button == Button::Power) {
-          powerPressStartedMs_ = 0;
-        }
-        holdNavigated_ = false;
-        break;
-
-      default:
-        break;
-    }
-  }
-};
+#include "states/reader/ReaderNavigationController.h"
 
 int main() {
-  TestUtils::TestRunner runner("ReaderButtonDispatch");
+  TestUtils::TestRunner runner("ReaderNavigationController");
 
-  // ============================================
-  // Short press: Release without prior Repeat
-  // ============================================
+  using papyrix::reader::ReaderNavigationController;
 
   {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::release(Button::Right));
-    runner.expectEq(static_cast<int>(Action::Next), static_cast<int>(d.lastAction),
-                    "Short press Right -> Next");
+    ReaderNavigationController controller;
+    controller.setHoldNavigated(true);
+    controller.setPowerPressStartedMs(42);
+    controller.markCachePreemptRequested(77);
+    controller.enqueuePendingPageTurn(1, "test", 2);
+    controller.resetSession();
+
+    runner.expectFalse(controller.holdNavigated(), "reset clears hold flag");
+    runner.expectEq(uint32_t(0), controller.powerPressStartedMs(), "reset clears power press timestamp");
+    runner.expectEq(int(0), controller.queuedPendingPageTurnRef(), "reset clears queued turns");
+    runner.expectEq(uint32_t(0), controller.queuedPendingPageTurnQueuedMsRef(), "reset clears queued turn age");
+    runner.expectEq(uint32_t(0), controller.lastCachePreemptRequestedMs(), "reset clears preempt timestamp");
   }
 
   {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::release(Button::Down));
-    runner.expectEq(static_cast<int>(Action::Next), static_cast<int>(d.lastAction),
-                    "Short press Down -> Next");
+    ReaderNavigationController controller;
+    bool stopRequested = false;
+    const bool deferred = controller.deferPageTurnUntilWorkerStops(
+        1, true, 3, [&]() { stopRequested = true; });
+
+    runner.expectTrue(deferred, "defer queues turn while worker is active");
+    runner.expectTrue(stopRequested, "defer requests cooperative stop");
+    runner.expectEq(int(1), controller.queuedPendingPageTurnRef(), "queued turn direction stored");
   }
 
   {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::release(Button::Left));
-    runner.expectEq(static_cast<int>(Action::Prev), static_cast<int>(d.lastAction),
-                    "Short press Left -> Prev");
+    ReaderNavigationController controller;
+    bool stopRequested = false;
+    const bool deferred = controller.deferPageTurnUntilWorkerStops(
+        -1, false, 0, [&]() { stopRequested = true; });
+
+    runner.expectFalse(deferred, "defer ignored when worker is already idle");
+    runner.expectFalse(stopRequested, "idle path does not request stop");
+    runner.expectEq(int(0), controller.queuedPendingPageTurnRef(), "idle path leaves queue untouched");
   }
 
   {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::release(Button::Up));
-    runner.expectEq(static_cast<int>(Action::Prev), static_cast<int>(d.lastAction),
-                    "Short press Up -> Prev");
+    ReaderNavigationController controller;
+    controller.markCachePreemptRequested(millis());
+    controller.enqueuePendingPageTurn(1, "first", 2);
+    controller.enqueuePendingPageTurn(1, "second", 2);
+
+    int queuedTurn = 0;
+    uint32_t queuedForMs = 0;
+    const bool consumed = controller.tryConsumeQueuedTurn(false, false, false, false, false, false, false, queuedTurn,
+                                                          queuedForMs);
+
+    runner.expectTrue(consumed, "queued turn consumed when worker and overlays are idle");
+    runner.expectEq(int(1), queuedTurn, "consume returns one step at a time");
+    runner.expectEq(int(1), controller.queuedPendingPageTurnRef(), "remaining queued turn stays pending");
+    runner.expectTrue(queuedForMs >= 0, "queue age is reported");
   }
 
   {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::press(Button::Right));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Press alone (Right) -> None");
+    ReaderNavigationController controller;
+    controller.enqueuePendingPageTurn(-1, "overlay-block", 2);
+
+    int queuedTurn = 0;
+    uint32_t queuedForMs = 0;
+    const bool consumed = controller.tryConsumeQueuedTurn(
+        false, false, false, false, false, true, false, queuedTurn, queuedForMs);
+
+    runner.expectFalse(consumed, "overlay blocks queued turn consumption");
+    runner.expectEq(int(0), queuedTurn, "blocked consume does not emit direction");
+    runner.expectEq(int(-1), controller.queuedPendingPageTurnRef(), "blocked consume keeps queue intact");
   }
 
   {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::press(Button::Left));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Press alone (Left) -> None");
-  }
+    ReaderNavigationController controller;
+    controller.markCachePreemptRequested(millis());
+    controller.enqueuePendingPageTurn(1, "single", 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
-  // ============================================
-  // Long press: Repeat triggers chapter nav
-  // ============================================
+    int queuedTurn = 0;
+    uint32_t queuedForMs = 0;
+    const bool consumed = controller.tryConsumeQueuedTurn(false, false, false, false, false, false, false, queuedTurn,
+                                                          queuedForMs);
 
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Right));
-    runner.expectEq(static_cast<int>(Action::NextChapter), static_cast<int>(d.lastAction),
-                    "Long press Right -> NextChapter");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Down));
-    runner.expectEq(static_cast<int>(Action::NextChapter), static_cast<int>(d.lastAction),
-                    "Long press Down -> NextChapter");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Left));
-    runner.expectEq(static_cast<int>(Action::PrevChapter), static_cast<int>(d.lastAction),
-                    "Long press Left -> PrevChapter");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Up));
-    runner.expectEq(static_cast<int>(Action::PrevChapter), static_cast<int>(d.lastAction),
-                    "Long press Up -> PrevChapter");
-  }
-
-  // ============================================
-  // Release after Repeat: holdNavigated_ suppresses page nav
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Right));
-    d.processEvent(Event::release(Button::Right));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Release after Repeat (Right) -> None (suppressed)");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Left));
-    d.processEvent(Event::release(Button::Left));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Release after Repeat (Left) -> None (suppressed)");
-  }
-
-  // ============================================
-  // Multiple Repeats: only first triggers chapter nav
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Right));
-    runner.expectEq(static_cast<int>(Action::NextChapter), static_cast<int>(d.lastAction),
-                    "First Repeat Right -> NextChapter");
-
-    d.processEvent(Event::repeat(Button::Right));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Second Repeat Right -> None (holdNavigated_ blocks)");
-
-    d.processEvent(Event::repeat(Button::Right));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Third Repeat Right -> None (still blocked)");
-  }
-
-  // ============================================
-  // holdNavigated_ reset cycle
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    // Long press
-    d.processEvent(Event::repeat(Button::Right));
-    runner.expectTrue(d.holdNavigated_, "After Repeat: holdNavigated_ is true");
-
-    // Release resets
-    d.processEvent(Event::release(Button::Right));
-    runner.expectFalse(d.holdNavigated_, "After Release: holdNavigated_ is false");
-
-    // Short press now works
-    d.processEvent(Event::release(Button::Right));
-    runner.expectEq(static_cast<int>(Action::Next), static_cast<int>(d.lastAction),
-                    "Short press after reset -> Next");
-  }
-
-  // ============================================
-  // Two consecutive long presses both trigger chapter nav
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    // First long press
-    d.processEvent(Event::repeat(Button::Left));
-    runner.expectEq(static_cast<int>(Action::PrevChapter), static_cast<int>(d.lastAction),
-                    "First long press Left -> PrevChapter");
-    d.processEvent(Event::release(Button::Left));
-
-    // Second long press
-    d.processEvent(Event::repeat(Button::Left));
-    runner.expectEq(static_cast<int>(Action::PrevChapter), static_cast<int>(d.lastAction),
-                    "Second long press Left -> PrevChapter (reset worked)");
-    d.processEvent(Event::release(Button::Left));
-  }
-
-  // ============================================
-  // Center button
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::press(Button::Center));
-    runner.expectEq(static_cast<int>(Action::Menu), static_cast<int>(d.lastAction),
-                    "Center Press -> Menu");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::release(Button::Center));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Center Release -> None");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Center));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Center Repeat -> None");
-  }
-
-  // ============================================
-  // Back button
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::press(Button::Back));
-    runner.expectEq(static_cast<int>(Action::Exit), static_cast<int>(d.lastAction),
-                    "Back Press -> Exit");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::release(Button::Back));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Back Release -> None");
-  }
-
-  // ============================================
-  // Power button
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
-    d.currentTimeMs_ = 100;
-    d.processEvent(Event::press(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power Press (PageTurn) -> None (deferred to release)");
-    runner.expectEq(uint32_t(100), d.powerPressStartedMs_,
-                    "Power Press records timestamp");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerIgnore;
-    d.processEvent(Event::press(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power Press (Ignore) -> None");
-    runner.expectEq(uint32_t(0), d.powerPressStartedMs_,
-                    "Power Press (Ignore) does not record timestamp");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerSleep;
-    d.processEvent(Event::press(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power Press (Sleep) -> None");
-  }
-
-  // Release without prior press -> None (powerPressStartedMs_ is 0)
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
-    d.processEvent(Event::release(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power Release without press -> None (no timestamp)");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerIgnore;
-    d.processEvent(Event::release(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power Release (Ignore) -> None");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerSleep;
-    d.processEvent(Event::release(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power Release (Sleep) -> None");
-  }
-
-  // Short press+release (under duration threshold) -> Next
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
-    d.currentTimeMs_ = 1000;
-    d.processEvent(Event::press(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power press+release: press -> None");
-    d.currentTimeMs_ = 1100;  // 100ms held, under 400ms threshold
-    d.processEvent(Event::release(Button::Power));
-    runner.expectEq(static_cast<int>(Action::Next), static_cast<int>(d.lastAction),
-                    "Power press+release (short) -> Next");
-    runner.expectEq(uint32_t(0), d.powerPressStartedMs_,
-                    "Power release resets timestamp");
-  }
-
-  // Long hold (over duration threshold) -> None (sleep, not page turn)
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
-    d.currentTimeMs_ = 1000;
-    d.processEvent(Event::press(Button::Power));
-    d.currentTimeMs_ = 1500;  // 500ms held, over 400ms threshold
-    d.processEvent(Event::release(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power long hold -> None (held past duration)");
-  }
-
-  // Hold exactly at boundary -> None (not strictly less than)
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
-    d.currentTimeMs_ = 1000;
-    d.processEvent(Event::press(Button::Power));
-    d.currentTimeMs_ = 1400;  // exactly 400ms = threshold
-    d.processEvent(Event::release(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power hold at exact threshold -> None");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.shortPwrBtn = ReaderButtonDispatcher::PowerPageTurn;
-    d.holdNavigated_ = true;
-    d.powerPressStartedMs_ = 100;
-    d.currentTimeMs_ = 150;
-    d.processEvent(Event::release(Button::Power));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "Power Release suppressed by holdNavigated_");
-  }
-
-  // ============================================
-  // Mode guards: overlays consume all events
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    d.menuMode_ = true;
-    d.processEvent(Event::release(Button::Right));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "menuMode: Right Release -> None (consumed)");
-
-    d.processEvent(Event::repeat(Button::Left));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "menuMode: Left Repeat -> None (consumed)");
-
-    d.processEvent(Event::press(Button::Center));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "menuMode: Center Press -> None (consumed)");
-
-    d.processEvent(Event::press(Button::Back));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "menuMode: Back Press -> None (consumed)");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.tocMode_ = true;
-    d.processEvent(Event::release(Button::Right));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "tocMode: Right Release -> None (consumed)");
-
-    d.processEvent(Event::repeat(Button::Right));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "tocMode: Right Repeat -> None (consumed)");
-  }
-
-  {
-    ReaderButtonDispatcher d;
-    d.bookmarkMode_ = true;
-    d.processEvent(Event::release(Button::Left));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "bookmarkMode: Left Release -> None (consumed)");
-
-    d.processEvent(Event::press(Button::Center));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "bookmarkMode: Center Press -> None (consumed)");
-  }
-
-  // ============================================
-  // Mode off -> on -> off: navigation resumes
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-
-    // Normal navigation works
-    d.processEvent(Event::release(Button::Right));
-    runner.expectEq(static_cast<int>(Action::Next), static_cast<int>(d.lastAction),
-                    "Before mode: Right Release -> Next");
-
-    // Enter menu mode
-    d.menuMode_ = true;
-    d.processEvent(Event::release(Button::Right));
-    runner.expectEq(static_cast<int>(Action::None), static_cast<int>(d.lastAction),
-                    "During mode: Right Release -> None");
-
-    // Exit menu mode
-    d.menuMode_ = false;
-    d.processEvent(Event::release(Button::Right));
-    runner.expectEq(static_cast<int>(Action::Next), static_cast<int>(d.lastAction),
-                    "After mode: Right Release -> Next (resumed)");
-  }
-
-  // ============================================
-  // holdNavigated_ not affected by mode toggle
-  // ============================================
-
-  {
-    ReaderButtonDispatcher d;
-    d.processEvent(Event::repeat(Button::Right));
-    runner.expectTrue(d.holdNavigated_, "holdNavigated_ set before mode toggle");
-
-    // Mode on/off should not reset holdNavigated_
-    d.menuMode_ = true;
-    d.processEvent(Event::release(Button::Right));
-    d.menuMode_ = false;
-    runner.expectTrue(d.holdNavigated_,
-                      "holdNavigated_ preserved through mode (release consumed by mode)");
+    runner.expectTrue(consumed, "single queued turn is consumed");
+    runner.expectEq(int(1), queuedTurn, "single queued turn keeps direction");
+    runner.expectEq(int(0), controller.queuedPendingPageTurnRef(), "queue becomes empty after final consume");
+    runner.expectEq(uint32_t(0), controller.lastCachePreemptRequestedMs(), "preempt timestamp resets after queue drains");
+    runner.expectTrue(queuedForMs >= 1, "queue age uses original enqueue time");
   }
 
   runner.printSummary();

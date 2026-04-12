@@ -1,9 +1,11 @@
 #include "Html5Normalizer.h"
 
+#include <Arduino.h>
 #include <SDCardManager.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 namespace html5 {
 
@@ -14,34 +16,129 @@ constexpr const char* VOID_ELEMENTS[] = {"img",  "br",  "hr",    "input", "meta"
                                          "base", "col", "embed", "param", "source", "track", "wbr"};
 constexpr size_t VOID_ELEMENT_COUNT = sizeof(VOID_ELEMENTS) / sizeof(VOID_ELEMENTS[0]);
 constexpr size_t MAX_TAG_NAME_LENGTH = 8;
-constexpr size_t BUFFER_SIZE = 512;
+constexpr size_t BUFFER_SIZE = 2048;
+constexpr size_t CANDIDATE_TAIL = 16;
+constexpr uint8_t YIELD_CHUNK_INTERVAL = 8;
 
 enum class State { Normal, InTagStart, InTagName, InTagAttrs, InQuote, InClosingTagName, InClosingTagRest };
 
 char toLowerAscii(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c; }
 
 bool isVoidElement(const char* name, size_t len) {
-  for (size_t i = 0; i < VOID_ELEMENT_COUNT; i++) {
-    const char* ve = VOID_ELEMENTS[i];
-    size_t veLen = 0;
-    while (ve[veLen] != '\0') veLen++;
-    if (len == veLen) {
-      bool match = true;
-      for (size_t j = 0; j < len && match; j++) {
-        if (toLowerAscii(name[j]) != ve[j]) match = false;
+  switch (len) {
+    case 2:
+      return (toLowerAscii(name[0]) == 'b' && toLowerAscii(name[1]) == 'r') ||
+             (toLowerAscii(name[0]) == 'h' && toLowerAscii(name[1]) == 'r');
+    case 3:
+      return (toLowerAscii(name[0]) == 'i' && toLowerAscii(name[1]) == 'm' && toLowerAscii(name[2]) == 'g') ||
+             (toLowerAscii(name[0]) == 'w' && toLowerAscii(name[1]) == 'b' && toLowerAscii(name[2]) == 'r') ||
+             (toLowerAscii(name[0]) == 'c' && toLowerAscii(name[1]) == 'o' && toLowerAscii(name[2]) == 'l');
+    case 4:
+      return (toLowerAscii(name[0]) == 'm' && toLowerAscii(name[1]) == 'e' && toLowerAscii(name[2]) == 't' &&
+              toLowerAscii(name[3]) == 'a') ||
+             (toLowerAscii(name[0]) == 'l' && toLowerAscii(name[1]) == 'i' && toLowerAscii(name[2]) == 'n' &&
+              toLowerAscii(name[3]) == 'k') ||
+             (toLowerAscii(name[0]) == 'b' && toLowerAscii(name[1]) == 'a' && toLowerAscii(name[2]) == 's' &&
+              toLowerAscii(name[3]) == 'e') ||
+             (toLowerAscii(name[0]) == 'a' && toLowerAscii(name[1]) == 'r' && toLowerAscii(name[2]) == 'e' &&
+              toLowerAscii(name[3]) == 'a');
+    case 5:
+      return (toLowerAscii(name[0]) == 'i' && toLowerAscii(name[1]) == 'n' && toLowerAscii(name[2]) == 'p' &&
+              toLowerAscii(name[3]) == 'u' && toLowerAscii(name[4]) == 't') ||
+             (toLowerAscii(name[0]) == 'e' && toLowerAscii(name[1]) == 'm' && toLowerAscii(name[2]) == 'b' &&
+              toLowerAscii(name[3]) == 'e' && toLowerAscii(name[4]) == 'd') ||
+             (toLowerAscii(name[0]) == 'p' && toLowerAscii(name[1]) == 'a' && toLowerAscii(name[2]) == 'r' &&
+              toLowerAscii(name[3]) == 'a' && toLowerAscii(name[4]) == 'm') ||
+             (toLowerAscii(name[0]) == 't' && toLowerAscii(name[1]) == 'r' && toLowerAscii(name[2]) == 'a' &&
+              toLowerAscii(name[3]) == 'c' && toLowerAscii(name[4]) == 'k');
+    case 6:
+      return toLowerAscii(name[0]) == 's' && toLowerAscii(name[1]) == 'o' && toLowerAscii(name[2]) == 'u' &&
+             toLowerAscii(name[3]) == 'r' && toLowerAscii(name[4]) == 'c' && toLowerAscii(name[5]) == 'e';
+    default:
+      for (size_t i = 0; i < VOID_ELEMENT_COUNT; i++) {
+        const char* ve = VOID_ELEMENTS[i];
+        size_t veLen = 0;
+        while (ve[veLen] != '\0') veLen++;
+        if (len == veLen) {
+          bool match = true;
+          for (size_t j = 0; j < len && match; j++) {
+            if (toLowerAscii(name[j]) != ve[j]) match = false;
+          }
+          if (match) return true;
+        }
       }
-      if (match) return true;
+      return false;
+  }
+}
+
+bool matchesCandidateAt(const char* data, size_t available, const char* pattern) {
+  size_t i = 0;
+  while (pattern[i] != '\0') {
+    if (i >= available) return false;
+    if (toLowerAscii(data[i]) != pattern[i]) return false;
+    ++i;
+  }
+  return true;
+}
+
+bool mayContainVoidTagCandidate(FsFile& file, const std::function<bool()>& shouldAbort) {
+  static constexpr const char* PATTERNS[] = {"<img",   "</img", "<br",    "</br",  "<hr",    "</hr",
+                                             "<input", "</input", "<meta", "</meta", "<link", "</link",
+                                             "<area",  "</area", "<base",  "</base", "<col",  "</col",
+                                             "<embed", "</embed", "<param", "</param", "<source", "</source",
+                                             "<track", "</track", "<wbr",   "</wbr"};
+
+  char buffer[BUFFER_SIZE + CANDIDATE_TAIL];
+  size_t carry = 0;
+  uint8_t chunkCounter = 0;
+
+  while (file.available()) {
+    if (++chunkCounter >= YIELD_CHUNK_INTERVAL) {
+      chunkCounter = 0;
+      if (shouldAbort && shouldAbort()) {
+        file.seekSet(0);
+        return false;
+      }
+      delay(1);
+    }
+
+    const int bytesRead = file.read(reinterpret_cast<uint8_t*>(buffer + carry), BUFFER_SIZE);
+    if (bytesRead <= 0) break;
+    const size_t total = carry + static_cast<size_t>(bytesRead);
+
+    for (size_t i = 0; i < total; ++i) {
+      if (buffer[i] != '<') continue;
+      const size_t available = total - i;
+      for (const char* pattern : PATTERNS) {
+        if (matchesCandidateAt(buffer + i, available, pattern)) {
+          file.seekSet(0);
+          return true;
+        }
+      }
+    }
+
+    carry = std::min(CANDIDATE_TAIL, total);
+    if (carry > 0) {
+      memmove(buffer, buffer + (total - carry), carry);
     }
   }
+
+  file.seekSet(0);
   return false;
 }
 
 }  // namespace
 
-bool normalizeVoidElements(const std::string& inputPath, const std::string& outputPath) {
+bool normalizeVoidElements(const std::string& inputPath, const std::string& outputPath,
+                           const std::function<bool()>& shouldAbort) {
   FsFile inFile, outFile;
 
   if (!SdMan.openFileForRead("H5N", inputPath, inFile)) {
+    return false;
+  }
+
+  if (!mayContainVoidTagCandidate(inFile, shouldAbort)) {
+    inFile.close();
     return false;
   }
 
@@ -58,10 +155,12 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
   bool isCurrentTagVoid = false;
   char quoteChar = 0;
   char prevChar = 0;
+  bool modified = false;
 
   uint8_t readBuffer[BUFFER_SIZE];
   uint8_t writeBuffer[BUFFER_SIZE + 64];  // Extra space for insertions
   size_t writePos = 0;
+  uint8_t chunkCounter = 0;
 
   auto flushWrite = [&]() -> bool {
     if (writePos > 0) {
@@ -69,6 +168,20 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
         return false;
       }
       writePos = 0;
+    }
+    return true;
+  };
+
+  auto writeBytes = [&](const char* data, size_t len) -> bool {
+    while (len > 0) {
+      const size_t chunk = std::min(len, sizeof(writeBuffer) - writePos);
+      memcpy(writeBuffer + writePos, data, chunk);
+      writePos += chunk;
+      data += chunk;
+      len -= chunk;
+      if (writePos >= BUFFER_SIZE && !flushWrite()) {
+        return false;
+      }
     }
     return true;
   };
@@ -82,6 +195,12 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
   };
 
   while (inFile.available()) {
+    if (++chunkCounter >= YIELD_CHUNK_INTERVAL) {
+      chunkCounter = 0;
+      if (shouldAbort && shouldAbort()) goto error;
+      delay(1);
+    }
+
     int bytesRead = inFile.read(readBuffer, BUFFER_SIZE);
     if (bytesRead <= 0) break;
 
@@ -139,6 +258,7 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
             if (c == '>') {
               // Tag ends immediately after name
               if (isCurrentTagVoid && prevChar != '/') {
+                modified = true;
                 if (!writeChar(' ')) goto error;
                 if (!writeChar('/')) goto error;
               }
@@ -167,6 +287,7 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
           } else if (c == '>') {
             // End of tag - insert self-closing if needed
             if (isCurrentTagVoid && prevChar != '/') {
+              modified = true;
               if (!writeChar(' ')) goto error;
               if (!writeChar('/')) goto error;
             }
@@ -203,16 +324,13 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
             tagName[tagNameLen] = '\0';
             if (isVoidElement(tagName, tagNameLen)) {
               // Skip the entire closing tag (don't output anything)
+              modified = true;
             } else {
               // Not a void element - output the buffered "</tagname>" with any whitespace
               if (!writeChar('<')) goto error;
               if (!writeChar('/')) goto error;
-              for (size_t j = 0; j < tagNameLen; j++) {
-                if (!writeChar(tagName[j])) goto error;
-              }
-              for (size_t j = 0; j < closingTagWsLen; j++) {
-                if (!writeChar(closingTagWhitespace[j])) goto error;
-              }
+              if (!writeBytes(tagName, tagNameLen)) goto error;
+              if (!writeBytes(closingTagWhitespace, closingTagWsLen)) goto error;
               if (!writeChar('>')) goto error;
             }
             state = State::Normal;
@@ -226,9 +344,7 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
             // Unexpected character - output what we have and return to normal
             if (!writeChar('<')) goto error;
             if (!writeChar('/')) goto error;
-            for (size_t j = 0; j < tagNameLen; j++) {
-              if (!writeChar(tagName[j])) goto error;
-            }
+            if (!writeBytes(tagName, tagNameLen)) goto error;
             if (!writeChar(c)) goto error;
             state = State::Normal;
           }
@@ -254,18 +370,18 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
     // We were in the middle of a closing tag - output what we have
     if (!writeChar('<')) goto error;
     if (!writeChar('/')) goto error;
-    for (size_t j = 0; j < tagNameLen; j++) {
-      if (!writeChar(tagName[j])) goto error;
-    }
-    for (size_t j = 0; j < closingTagWsLen; j++) {
-      if (!writeChar(closingTagWhitespace[j])) goto error;
-    }
+    if (!writeBytes(tagName, tagNameLen)) goto error;
+    if (!writeBytes(closingTagWhitespace, closingTagWsLen)) goto error;
   }
 
   if (!flushWrite()) goto error;
 
   inFile.close();
   outFile.close();
+  if (!modified) {
+    SdMan.remove(outputPath.c_str());
+    return false;
+  }
   return true;
 
 error:

@@ -23,5 +23,6 @@ class JpegToBmpConverter {
   // Convert to 1-bit BMP with custom target size (for thumbnails)
   static bool jpegFileTo1BitBmpStreamWithSize(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight);
   // Quick preview mode: simple threshold instead of dithering (faster but lower quality)
-  static bool jpegFileToBmpStreamQuick(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight);
+  static bool jpegFileToBmpStreamQuick(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight,
+                                       const std::function<bool()>& shouldAbort = nullptr);
 };

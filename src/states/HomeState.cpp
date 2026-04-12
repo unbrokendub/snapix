@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Bitmap.h>
 #include <CoverHelpers.h>
+#include <EInkDisplay.h>
 #include <GfxRenderer.h>
 #include <Group5.h>
 #include <Logging.h>
@@ -34,7 +35,13 @@ void HomeState::enter(Core& core) {
   // Update battery
   updateBattery();
 
+  returningFromReader_ = core.pendingUiReturnFromReader && core.pendingReaderReturnState == StateId::Home;
+  if (returningFromReader_) {
+    core.pendingUiReturnFromReader = false;
+  }
+
   view_.needsRender = true;
+  firstRender_ = true;
 }
 
 void HomeState::exit(Core& core) {
@@ -114,6 +121,15 @@ StateTransition HomeState::update(Core& core) {
           case Button::Back:
             // btn1: Read - Continue reading if book is open
             if (view_.buttons.isActive(0) && view_.hasBook) {
+              if (!core.settings.transitionFullRefresh) {
+                if (core.buf.path[0] == '\0' && core.settings.lastBookPath[0] != '\0') {
+                  strncpy(core.buf.path, core.settings.lastBookPath, sizeof(core.buf.path) - 1);
+                  core.buf.path[sizeof(core.buf.path) - 1] = '\0';
+                }
+                core.pendingDirectReaderTransition = true;
+                core.pendingReaderReturnState = StateId::Home;
+                return StateTransition::to(StateId::Reader);
+              }
               showTransitionNotification("Opening book...");
               saveTransition(BootMode::READER, core.buf.path, ReturnTo::HOME);
               vTaskDelay(50 / portTICK_PERIOD_MS);
@@ -161,13 +177,18 @@ void HomeState::render(Core& core) {
   }
 
   const Theme& theme = THEME;
+  const bool deferCoverThisFrame = returningFromReader_ && hasCoverImage_ && !coverLoadFailed_;
+  const bool hadCoverBmp = view_.hasCoverBmp;
+  if (deferCoverThisFrame) {
+    view_.hasCoverBmp = false;
+  }
 
   // If we have a stored compressed thumbnail, restore it instead of re-reading from SD
-  const bool bufferRestored = coverBufferStored_ && restoreCoverThumbnail();
+  const bool bufferRestored = !deferCoverThisFrame && coverBufferStored_ && restoreCoverThumbnail();
 
   // When cover is present, HomeState handles clear and card border
   // so cover can be drawn before text boxes
-  if (hasCoverImage_ && !coverLoadFailed_) {
+  if (!deferCoverThisFrame && hasCoverImage_ && !coverLoadFailed_) {
     const auto card = ui::CardDimensions::calculate(renderer_.getScreenWidth(), renderer_.getScreenHeight());
 
     if (!bufferRestored) {
@@ -197,8 +218,25 @@ void HomeState::render(Core& core) {
   // Render rest of UI (text boxes will draw on top of cover)
   ui::render(renderer_, theme, view_);
 
-  renderer_.displayBuffer();
+  if (firstRender_) {
+    if (core.wokeFromSleep) {
+      renderer_.displayBuffer(EInkDisplay::FAST_REFRESH);
+      core.wokeFromSleep = false;
+    } else if (core.settings.transitionFullRefresh) {
+      renderer_.displayBuffer(EInkDisplay::HALF_REFRESH);
+    } else {
+      renderer_.displayBuffer(EInkDisplay::FAST_REFRESH);
+    }
+    firstRender_ = false;
+  } else {
+    renderer_.displayBuffer();
+  }
   view_.needsRender = false;
+  view_.hasCoverBmp = hadCoverBmp;
+  if (deferCoverThisFrame) {
+    returningFromReader_ = false;
+    view_.needsRender = true;
+  }
   core.display.markDirty();
 }
 

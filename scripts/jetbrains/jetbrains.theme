@@ -1,0 +1,27 @@
+[theme]
+name = JetBrains    # Display name shown in Settings UI (optional)
+
+[colors]
+inverted_mode = false     # true = dark mode, false = light mode
+background = white        # white or black
+
+[selection]
+fill_color = black        # Selection highlight color
+text_color = white        # Text on selection
+
+[text]
+primary_color = black     # Normal text color
+secondary_color = black   # Secondary/dimmed text color
+
+[layout]
+margin_top = 5            # Top margin in pixels
+margin_side = 3           # Side margin in pixels
+item_height = 30          # Menu item height
+item_spacing = 1
+status_bar_offset_y = 10
+[fonts]
+status_font = jetbrains-4
+reader_font_xsmall = jetbrains-10
+reader_font_small = jetbrains-11
+reader_font_medium = jetbrains-12
+reader_font_large = jetbrains-13

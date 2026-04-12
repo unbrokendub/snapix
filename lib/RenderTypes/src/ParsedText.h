@@ -19,13 +19,18 @@ class GfxRenderer;
 using AbortCallback = std::function<bool()>;
 
 class ParsedText {
-  std::list<std::string> words;
-  std::list<EpdFontFamily::Style> wordStyles;
+  struct WordEntry {
+    std::string word;
+    EpdFontFamily::Style style;
+  };
+
+  std::list<WordEntry> words;
   TextBlock::BLOCK_STYLE style;
   uint8_t indentLevel;
   bool hyphenationEnabled;
   bool useGreedyBreaking = true;  // Default to greedy to avoid Knuth-Plass memory spike
   bool isRtl = false;
+  bool indentApplied = false;
 
   std::vector<size_t> computeLineBreaks(int pageWidth, int spaceWidth, const std::vector<uint16_t>& wordWidths,
                                         const AbortCallback& shouldAbort = nullptr) const;
@@ -33,10 +38,10 @@ class ParsedText {
                                               std::vector<uint16_t>& wordWidths,
                                               const AbortCallback& shouldAbort = nullptr);
   bool trySplitWordForLineEnd(const GfxRenderer& renderer, int fontId, int remainingWidth,
-                              std::list<std::string>::iterator wordIt,
-                              std::list<EpdFontFamily::Style>::iterator styleIt, size_t wordIndex,
+                              std::list<WordEntry>::iterator wordIt, size_t wordIndex,
                               std::vector<uint16_t>& wordWidths);
-  void extractLine(size_t breakIndex, int pageWidth, int spaceWidth, const std::vector<uint16_t>& wordWidths,
+  void extractLine(const GfxRenderer& renderer, int fontId, size_t breakIndex, int pageWidth, int spaceWidth,
+                   const std::vector<uint16_t>& wordWidths,
                    const std::vector<size_t>& lineBreakIndices,
                    const std::function<void(std::shared_ptr<TextBlock>)>& processLine);
   std::vector<uint16_t> calculateWordWidths(const GfxRenderer& renderer, int fontId);
@@ -60,6 +65,7 @@ class ParsedText {
   TextBlock::BLOCK_STYLE getStyle() const { return style; }
   size_t size() const { return words.size(); }
   bool isEmpty() const { return words.empty(); }
+  std::string previewText(size_t maxWords = 8, size_t maxChars = 96) const;
   bool layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
                              const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
                              bool includeLastLine = true, const AbortCallback& shouldAbort = nullptr);

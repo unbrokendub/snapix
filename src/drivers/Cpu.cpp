@@ -7,8 +7,10 @@ namespace drivers {
 
 static constexpr uint8_t kIdleFreqMhz = 10;
 static constexpr uint8_t kActiveFreqMhz = 160;
-static constexpr uint8_t kIdleLoopDelayMs = 50;
-static constexpr uint8_t kActiveLoopDelayMs = 10;
+// Более короткий sleep в основном цикле заметно снижает input/UI latency.
+// Значения оставлены достаточно консервативными, чтобы не устроить бессмысленный busy-spin.
+static constexpr uint8_t kIdleLoopDelayMs = 20;
+static constexpr uint8_t kActiveLoopDelayMs = 2;
 
 void Cpu::throttle() {
   if (!throttled_) {

@@ -89,6 +89,15 @@ class FontManager {
   int getReaderFontId(const char* familyName, int builtinFontId);
 
   /**
+   * Get font ID for status bar fonts with cleanup of the previous custom status font.
+   *
+   * @param familyName Font family name (empty = builtin)
+   * @param builtinFontId Fallback font ID
+   * @return Font ID to use
+   */
+  int getStatusFontId(const char* familyName, int builtinFontId);
+
+  /**
    * Generate a unique font ID for a family name.
    * Uses hash of the name for consistency.
    */
@@ -216,6 +225,7 @@ class FontManager {
 
   // Track active reader font for cleanup when switching sizes
   int _activeReaderFontId = 0;
+  int _activeStatusFontId = 0;
 
   // External font for CJK fallback (pointer to avoid 54KB allocation when unused)
   ExternalFont* _externalFont = nullptr;

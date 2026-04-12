@@ -99,11 +99,17 @@ bool ThemeManager::loadFromFileToTheme(const char* path, Theme& theme) {
         theme.itemPaddingX = static_cast<uint8_t>(IniParser::parseInt(value, 8));
       } else if (strcmp(key, "item_value_padding") == 0) {
         theme.itemValuePadding = static_cast<uint8_t>(IniParser::parseInt(value, 20));
+      } else if (strcmp(key, "status_bar_offset_y") == 0) {
+        const int offset = IniParser::parseInt(value, 0);
+        theme.statusBarOffsetY = static_cast<uint8_t>(std::clamp(offset, 0, 20));
       }
     }
     // [fonts] section
     else if (strcmp(section, "fonts") == 0) {
-      if (strcmp(key, "reader_font_xsmall") == 0) {
+      if (strcmp(key, "status_font") == 0) {
+        strncpy(theme.statusFontFamily, value, sizeof(theme.statusFontFamily) - 1);
+        theme.statusFontFamily[sizeof(theme.statusFontFamily) - 1] = '\0';
+      } else if (strcmp(key, "reader_font_xsmall") == 0) {
         strncpy(theme.readerFontFamilyXSmall, value, sizeof(theme.readerFontFamilyXSmall) - 1);
         theme.readerFontFamilyXSmall[sizeof(theme.readerFontFamilyXSmall) - 1] = '\0';
       } else if (strcmp(key, "reader_font_small") == 0) {
@@ -188,9 +194,11 @@ bool ThemeManager::saveToFile(const char* path, const Theme& theme) {
   file.printf("item_spacing = %d\n", theme.itemSpacing);
   file.printf("item_padding_x = %d\n", theme.itemPaddingX);
   file.printf("item_value_padding = %d\n", theme.itemValuePadding);
+  file.printf("status_bar_offset_y = %d\n", theme.statusBarOffsetY);
   file.println();
 
   file.println("[fonts]");
+  file.printf("status_font = %s\n", theme.statusFontFamily);
   file.printf("reader_font_xsmall = %s\n", theme.readerFontFamilyXSmall);
   file.printf("reader_font_small = %s\n", theme.readerFontFamilySmall);
   file.printf("reader_font_medium = %s\n", theme.readerFontFamilyMedium);

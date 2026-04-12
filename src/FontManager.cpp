@@ -304,10 +304,11 @@ bool FontManager::isBinFont(const char* familyName) {
 int FontManager::getReaderFontId(const char* familyName, int builtinFontId) {
   if (!familyName || !*familyName) {
     // Using built-in font - unload any custom reader font and external font
-    if (_activeReaderFontId != 0 && _activeReaderFontId != builtinFontId) {
+    if (_activeReaderFontId != 0 && _activeReaderFontId != builtinFontId &&
+        _activeReaderFontId != _activeStatusFontId) {
       unloadFontFamily(_activeReaderFontId);
-      _activeReaderFontId = 0;
     }
+    _activeReaderFontId = 0;
     unloadExternalFont();
     return builtinFontId;
   }
@@ -315,10 +316,11 @@ int FontManager::getReaderFontId(const char* familyName, int builtinFontId) {
   // Handle .bin fonts as external fonts (CJK fallback)
   if (isBinFont(familyName)) {
     // Unload any previous custom .epdfont reader font
-    if (_activeReaderFontId != 0 && _activeReaderFontId != builtinFontId) {
+    if (_activeReaderFontId != 0 && _activeReaderFontId != builtinFontId &&
+        _activeReaderFontId != _activeStatusFontId) {
       unloadFontFamily(_activeReaderFontId);
-      _activeReaderFontId = 0;
     }
+    _activeReaderFontId = 0;
 
     // Defer external font loading until a CJK character is actually encountered.
     // Saves ~13KB for non-CJK books.
@@ -330,7 +332,7 @@ int FontManager::getReaderFontId(const char* familyName, int builtinFontId) {
   int targetId = generateFontId(familyName);
 
   // If switching to a different custom font, unload previous
-  if (_activeReaderFontId != 0 && _activeReaderFontId != targetId) {
+  if (_activeReaderFontId != 0 && _activeReaderFontId != targetId && _activeReaderFontId != _activeStatusFontId) {
     unloadFontFamily(_activeReaderFontId);
   }
 
@@ -343,6 +345,33 @@ int FontManager::getReaderFontId(const char* familyName, int builtinFontId) {
   }
 
   _activeReaderFontId = targetId;
+  return targetId;
+}
+
+int FontManager::getStatusFontId(const char* familyName, int builtinFontId) {
+  if (!familyName || !*familyName || isBinFont(familyName)) {
+    if (_activeStatusFontId != 0 && _activeStatusFontId != builtinFontId &&
+        _activeStatusFontId != _activeReaderFontId) {
+      unloadFontFamily(_activeStatusFontId);
+    }
+    _activeStatusFontId = 0;
+    return builtinFontId;
+  }
+
+  const int targetId = generateFontId(familyName);
+
+  if (_activeStatusFontId != 0 && _activeStatusFontId != targetId && _activeStatusFontId != _activeReaderFontId) {
+    unloadFontFamily(_activeStatusFontId);
+  }
+
+  if (loadedFamilies.find(targetId) == loadedFamilies.end()) {
+    if (!loadFontFamily(familyName, targetId)) {
+      _activeStatusFontId = 0;
+      return builtinFontId;
+    }
+  }
+
+  _activeStatusFontId = targetId;
   return targetId;
 }
 
@@ -413,7 +442,9 @@ void FontManager::logMemoryStatus(const char*) const {
 void FontManager::unloadReaderFonts() {
   // Unload any custom .epdfont reader font
   if (_activeReaderFontId != 0) {
-    unloadFontFamily(_activeReaderFontId);
+    if (_activeReaderFontId != _activeStatusFontId) {
+      unloadFontFamily(_activeReaderFontId);
+    }
     _activeReaderFontId = 0;
   }
 

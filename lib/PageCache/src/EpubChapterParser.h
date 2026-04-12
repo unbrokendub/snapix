@@ -25,11 +25,12 @@ class EpubChapterParser : public ContentParser {
   GfxRenderer& renderer_;
   RenderConfig config_;
   std::string imageCachePath_;
+  bool quickImageDecode_ = false;
   bool hasMore_ = true;
 
   // Persistent parser state for incremental parsing (hot extend)
   std::unique_ptr<ChapterHtmlSlimParser> liveParser_;
-  std::string tmpHtmlPath_;
+  std::string sourceHtmlPath_;
   std::string normalizedPath_;
   std::string parseHtmlPath_;
   std::string chapterBasePath_;
@@ -46,17 +47,19 @@ class EpubChapterParser : public ContentParser {
   // Captured anchor map from parser (persisted after liveParser_ is destroyed)
   std::vector<std::pair<std::string, uint16_t>> anchorMap_;
 
-  void cleanupTempFiles();
+  void releasePreparedPaths();
+  void invalidatePreparedHtmlCaches(const char* reason);
+  bool prepareChapterHtml(const AbortCallback& shouldAbort);
 
  public:
   EpubChapterParser(std::shared_ptr<Epub> epub, int spineIndex, GfxRenderer& renderer, const RenderConfig& config,
-                    const std::string& imageCachePath = "");
+                    const std::string& imageCachePath = "", bool quickImageDecode = false);
   ~EpubChapterParser() override;
 
   bool parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages = 0,
                   const AbortCallback& shouldAbort = nullptr) override;
   bool hasMoreContent() const override { return hasMore_; }
-  bool canResume() const override { return initialized_ && liveParser_ != nullptr; }
+  bool canResume() const override;
   void reset() override;
   const std::vector<std::pair<std::string, uint16_t>>& getAnchorMap() const override;
 };

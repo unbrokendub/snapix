@@ -70,6 +70,9 @@ class BackgroundTask {
    */
   bool stop(uint32_t maxWaitMs = 10000);
 
+  /** Request cooperative stop without waiting for task exit. */
+  void requestStop();
+
   /** Check if stop was requested. Call frequently in task loop. */
   bool shouldStop() const { return stopRequested_.load(std::memory_order_acquire); }
 

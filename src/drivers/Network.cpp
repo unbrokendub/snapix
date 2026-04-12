@@ -6,21 +6,61 @@
 #include <esp_wifi.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <vector>
 
 #define TAG "NETWORK"
 
 namespace papyrix {
 namespace drivers {
 
+namespace {
+bool isBlankSsid(const char* ssid) {
+  if (!ssid) return true;
+  while (*ssid) {
+    if (!isspace(static_cast<unsigned char>(*ssid))) {
+      return false;
+    }
+    ++ssid;
+  }
+  return true;
+}
+
+void configureCountryChannels() {
+  wifi_country_t country = {
+      .cc = "EU",
+      .schan = 1,
+      .nchan = 13,
+      .max_tx_power = 20,
+      .policy = WIFI_COUNTRY_POLICY_MANUAL,
+  };
+  esp_err_t err = esp_wifi_set_country(&country);
+  if (err != ESP_OK) {
+    LOG_ERR(TAG, "Failed to set WiFi country: 0x%x", err);
+  }
+}
+
+void resetStationForScan() {
+  WiFi.scanDelete();
+  WiFi.disconnect(true, false, 200);
+  WiFi.mode(WIFI_OFF);
+  delay(120);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  configureCountryChannels();
+  delay(180);
+}
+}  // namespace
+
 Result<void> Network::init() {
   if (initialized_) {
     return Ok();
   }
 
-  WiFi.mode(WIFI_STA);
-  delay(100);         // Allow WiFi task to fully start
-  WiFi.scanDelete();  // Clear stale scan state from prior session
+  WiFi.persistent(false);
+  resetStationForScan();
 
   initialized_ = true;
   connected_ = false;
@@ -119,8 +159,8 @@ Result<void> Network::startScan() {
   }
 
   LOG_INF(TAG, "Starting WiFi scan...");
-  WiFi.scanDelete();
-  int16_t result = WiFi.scanNetworks(true);  // Async scan
+  resetStationForScan();
+  int16_t result = WiFi.scanNetworks(true, true, false, 400);  // Async scan with hidden SSIDs enabled
   if (result == WIFI_SCAN_FAILED) {
     LOG_ERR(TAG, "Failed to start scan");
     return ErrVoid(Error::IOError);
@@ -155,19 +195,70 @@ int Network::getScanResults(WifiNetwork* out, int maxCount) {
     return 0;
   }
 
-  int count = std::min(static_cast<int>(result), maxCount);
+  if (result == 0) {
+    LOG_ERR(TAG, "Async scan returned 0 networks, retrying synchronously");
+    resetStationForScan();
+    result = WiFi.scanNetworks(false, true, false, 500);
+    if (result == WIFI_SCAN_FAILED || result < 0) {
+      LOG_ERR(TAG, "Synchronous scan fallback failed");
+      return 0;
+    }
+    if (result == 0) {
+      wifi_mode_t mode = WIFI_MODE_NULL;
+      esp_wifi_get_mode(&mode);
+      LOG_ERR(TAG, "Synchronous scan still returned 0 networks (status=%d mode=%d)", static_cast<int>(WiFi.status()),
+              static_cast<int>(mode));
+    }
+  }
 
-  for (int i = 0; i < count; i++) {
-    strncpy(out[i].ssid, WiFi.SSID(i).c_str(), sizeof(out[i].ssid) - 1);
-    out[i].ssid[sizeof(out[i].ssid) - 1] = '\0';
-    out[i].rssi = WiFi.RSSI(i);
-    out[i].secured = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+  const int rawCount = static_cast<int>(result);
+  std::vector<WifiNetwork> visibleNetworks;
+  visibleNetworks.reserve(rawCount);
+
+  for (int i = 0; i < rawCount; i++) {
+    String ssid = WiFi.SSID(i);
+    if (isBlankSsid(ssid.c_str())) {
+      continue;
+    }
+
+    const int rssi = WiFi.RSSI(i);
+    const bool secured = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+
+    int existing = -1;
+    for (size_t j = 0; j < visibleNetworks.size(); j++) {
+      if (strncmp(visibleNetworks[j].ssid, ssid.c_str(), sizeof(visibleNetworks[j].ssid)) == 0) {
+        existing = static_cast<int>(j);
+        break;
+      }
+    }
+
+    if (existing >= 0) {
+      if (rssi > visibleNetworks[existing].rssi) {
+        visibleNetworks[existing].rssi = rssi;
+        visibleNetworks[existing].secured = secured;
+      }
+      continue;
+    }
+
+    WifiNetwork network{};
+    strncpy(network.ssid, ssid.c_str(), sizeof(network.ssid) - 1);
+    network.ssid[sizeof(network.ssid) - 1] = '\0';
+    network.rssi = rssi;
+    network.secured = secured;
+    visibleNetworks.push_back(network);
   }
 
   // Sort by signal strength (strongest first)
-  std::sort(out, out + count, [](const WifiNetwork& a, const WifiNetwork& b) { return a.rssi > b.rssi; });
+  std::sort(visibleNetworks.begin(), visibleNetworks.end(),
+            [](const WifiNetwork& a, const WifiNetwork& b) { return a.rssi > b.rssi; });
 
-  LOG_INF(TAG, "Scan found %d networks", count);
+  const int count = std::min(static_cast<int>(visibleNetworks.size()), maxCount);
+  for (int i = 0; i < count; i++) {
+    out[i] = visibleNetworks[i];
+  }
+
+  LOG_INF(TAG, "Scan found %d visible networks (raw=%d unique=%d)", count, rawCount,
+          static_cast<int>(visibleNetworks.size()));
   WiFi.scanDelete();
   return count;
 }

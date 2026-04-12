@@ -40,6 +40,10 @@ struct Core {
   // === Pending operations ===
   SyncMode pendingSync = SyncMode::None;
   int8_t pendingAppId = -1;
+  bool pendingDirectReaderTransition = false;
+  StateId pendingReaderReturnState = StateId::Home;
+  bool pendingUiReturnFromReader = false;
+  bool wokeFromSleep = false;
 
   // === Lifecycle ===
   Result<void> init();

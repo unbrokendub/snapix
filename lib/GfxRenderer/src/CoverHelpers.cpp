@@ -32,7 +32,8 @@ bool renderCoverWithFallback(GfxRenderer& renderer, const std::string& coverPath
 
 bool renderCoverFromBmp(GfxRenderer& renderer, const std::string& bmpPath, int marginTop, int marginRight,
                         int marginBottom, int marginLeft, int& pagesUntilFullRefresh, int pagesPerRefreshValue,
-                        bool turnOffScreen) {
+                        bool turnOffScreen, bool forceHalfRefresh, bool allowFastRefreshWhileOff) {
+  (void)allowFastRefreshWhileOff;
   FsFile coverFile;
   if (!SdMan.openFileForRead("CVR", bmpPath, coverFile)) {
     LOG_ERR(TAG, "Failed to open cover BMP: %s", bmpPath.c_str());
@@ -57,7 +58,13 @@ bool renderCoverFromBmp(GfxRenderer& renderer, const std::string& bmpPath, int m
   renderer.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
 
   // Display with refresh logic
-  if (pagesUntilFullRefresh <= 1) {
+  if (forceHalfRefresh) {
+    renderer.displayBuffer(EInkDisplay::HALF_REFRESH, turnOffScreen);
+    pagesUntilFullRefresh = pagesPerRefreshValue;
+  } else if (pagesPerRefreshValue == 0) {
+    renderer.displayBuffer(EInkDisplay::FAST_REFRESH, turnOffScreen);
+    pagesUntilFullRefresh = 0;
+  } else if (pagesUntilFullRefresh <= 1) {
     renderer.displayBuffer(EInkDisplay::HALF_REFRESH, turnOffScreen);
     pagesUntilFullRefresh = pagesPerRefreshValue;
   } else {

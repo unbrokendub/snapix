@@ -9,7 +9,13 @@
 #define TAG "IMG_BLOCK"
 
 void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, const int y) const {
-  auto renderPlaceholder = [&]() {
+  auto safeField = [](const std::string& value) -> const char* { return value.empty() ? "-" : value.c_str(); };
+
+  auto renderPlaceholder = [&](const char* reason, const char* detail = nullptr) {
+    LOG_ERR(TAG,
+            "[EPUBDIAG] image fallback render node=%s src=%s resolved=%s cached=%s reason=%s%s%s render=placeholder",
+            safeField(sourceNodeId), safeField(sourcePath), safeField(resolvedPath), safeField(cachedBmpPath), reason,
+            detail ? " detail=" : "", detail ? detail : "");
     const char* placeholder = "[Image]";
     const int textWidth = renderer.getTextWidth(fontId, placeholder);
     int textX = x + (static_cast<int>(width) - textWidth) / 2;
@@ -19,14 +25,14 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
   };
 
   if (cachedBmpPath.empty()) {
-    renderPlaceholder();
+    renderPlaceholder("empty-cached-path");
     return;
   }
 
   FsFile bmpFile;
   if (!SdMan.openFileForRead("IMB", cachedBmpPath, bmpFile)) {
     LOG_ERR(TAG, "Failed to open cached BMP: %s", cachedBmpPath.c_str());
-    renderPlaceholder();
+    renderPlaceholder("open-failed");
     return;
   }
 
@@ -35,7 +41,7 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
   if (err != BmpReaderError::Ok) {
     LOG_ERR(TAG, "BMP parse error: %s", Bitmap::errorToString(err));
     bmpFile.close();
-    renderPlaceholder();
+    renderPlaceholder("bmp-parse-failed", Bitmap::errorToString(err));
     return;
   }
 
@@ -47,15 +53,22 @@ bool ImageBlock::serialize(FsFile& file) const {
   serialization::writeString(file, cachedBmpPath);
   serialization::writePod(file, width);
   serialization::writePod(file, height);
+  serialization::writeString(file, sourceNodeId);
+  serialization::writeString(file, sourcePath);
+  serialization::writeString(file, resolvedPath);
   return true;
 }
 
 std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile& file) {
   std::string path;
+  std::string nodeId;
+  std::string src;
+  std::string resolved;
   uint16_t w, h;
 
   if (!serialization::readString(file, path) || !serialization::readPodChecked(file, w) ||
-      !serialization::readPodChecked(file, h)) {
+      !serialization::readPodChecked(file, h) || !serialization::readString(file, nodeId) ||
+      !serialization::readString(file, src) || !serialization::readString(file, resolved)) {
     LOG_ERR(TAG, "Deserialization failed: couldn't read data");
     return nullptr;
   }
@@ -66,5 +79,6 @@ std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile& file) {
     return nullptr;
   }
 
-  return std::unique_ptr<ImageBlock>(new ImageBlock(std::move(path), w, h));
+  return std::unique_ptr<ImageBlock>(
+      new ImageBlock(std::move(path), w, h, std::move(nodeId), std::move(src), std::move(resolved)));
 }

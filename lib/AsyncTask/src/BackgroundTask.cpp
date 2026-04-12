@@ -50,17 +50,27 @@ bool BackgroundTask::start(const char* name, uint32_t stackSize, TaskFunction fu
   func_ = std::move(func);
   name_ = name ? name : "";  // Store copy to prevent use-after-free
   stopRequested_.store(false, std::memory_order_release);
+  handle_ = nullptr;
+
+  // Mark the task as running before FreeRTOS can schedule it. Otherwise a
+  // very short-lived worker may finish and store COMPLETE, only for start()
+  // to overwrite it back to RUNNING after xTaskCreate() returns.
+  state_.store(State::RUNNING, std::memory_order_release);
 
   BaseType_t result = xTaskCreate(&BackgroundTask::trampoline, name, stackSize, this, priority, &handle_);
 
   if (result != pdPASS || !handle_) {
     LOG_ERR(TAG, "%s: creation failed", name);
+    handle_ = nullptr;
     state_.store(State::ERROR, std::memory_order_release);
     return false;
   }
 
-  state_.store(State::RUNNING, std::memory_order_release);
   LOG_INF(TAG, "%s: started (handle=%p)", name, handle_);
+  if (name_ == "TocJump" || name_ == "PageFill" || name_ == "PageCache" || name_ == "ReaderAsync") {
+    LOG_ERR(TAG, "[ASYNC] %s started (handle=%p stack=%u prio=%d)", name_.c_str(), handle_,
+            static_cast<unsigned>(stackSize), priority);
+  }
   return true;
 }
 
@@ -99,6 +109,9 @@ bool BackgroundTask::stop(uint32_t maxWaitMs) {
   if (bits & EVENT_EXITED) {
     handle_ = nullptr;
     LOG_INF(TAG, "%s: stopped cleanly via self-delete", taskName);
+    if (name_ == "TocJump" || name_ == "PageFill" || name_ == "PageCache" || name_ == "ReaderAsync") {
+      LOG_ERR(TAG, "[ASYNC] %s stopped cleanly", taskName);
+    }
     return true;
   }
 
@@ -108,12 +121,28 @@ bool BackgroundTask::stop(uint32_t maxWaitMs) {
   return false;
 }
 
+void BackgroundTask::requestStop() {
+  State current = state_.load(std::memory_order_acquire);
+  if (current != State::RUNNING && current != State::STARTING) {
+    return;
+  }
+
+  state_.store(State::STOPPING, std::memory_order_release);
+  stopRequested_.store(true, std::memory_order_release);
+}
+
 void BackgroundTask::trampoline(void* param) { static_cast<BackgroundTask*>(param)->run(); }
 
 void BackgroundTask::run() {
   // Execute user function
   if (func_) {
     func_();
+  }
+
+  const UBaseType_t highWaterWords = uxTaskGetStackHighWaterMark(nullptr);
+  const uint32_t highWaterBytes = static_cast<uint32_t>(highWaterWords) * sizeof(StackType_t);
+  if (name_ == "TocJump" || name_ == "PageCache" || name_ == "PageFill") {
+    LOG_INF(TAG, "%s: stack high water %u bytes", name_.c_str(), static_cast<unsigned>(highWaterBytes));
   }
 
   // Update state BEFORE signaling (memory order matters)

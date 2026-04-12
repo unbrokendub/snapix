@@ -84,7 +84,8 @@ class MarkdownParser : public ContentParser {
   static bool tokenCallback(const md_token_t* token, void* userData);
 
   // Helpers
-  bool readLine(FsFile& file);
+  bool readLine(FsFile& file, int* lineLength = nullptr, bool* isBlank = nullptr);
+  void appendTextBytes(ParseContext& ctx, const char* data, int len);
   void flushWordBuffer(ParseContext& ctx);
   void flushTextBlock(ParseContext& ctx);
   bool addLineToPage(ParseContext& ctx, std::shared_ptr<TextBlock> line);

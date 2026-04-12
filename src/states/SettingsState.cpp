@@ -1,6 +1,7 @@
 #include "SettingsState.h"
 
 #include <Arduino.h>
+#include <EInkDisplay.h>
 #include <GfxRenderer.h>
 #include <LittleFS.h>  // Must be before SdFat includes to avoid FILE_READ/FILE_WRITE redefinition
 #include <Logging.h>
@@ -27,7 +28,9 @@ SettingsState::SettingsState(GfxRenderer& renderer)
       goHome_(false),
       goNetwork_(false),
       themeWasChanged_(false),
+      firstRender_(true),
       returnScreen_(SettingsScreen::Menu),
+      lastRenderedScreen_(SettingsScreen::ConfirmDialog),
       pendingAction_(0),
       menuView_{},
       readerView_{},
@@ -61,6 +64,8 @@ void SettingsState::enter(Core& core) {
   goHome_ = false;
   goNetwork_ = false;
   themeWasChanged_ = false;
+  firstRender_ = true;
+  lastRenderedScreen_ = SettingsScreen::ConfirmDialog;
   pendingAction_ = 0;
 }
 
@@ -226,35 +231,162 @@ void SettingsState::render(Core& core) {
     }
   }
 
+  Theme& theme = THEME_MANAGER.mutableCurrent();
+  const bool partialRefresh = !themeWasChanged_ && currentScreen_ == lastRenderedScreen_ &&
+                              (currentScreen_ == SettingsScreen::Menu || currentScreen_ == SettingsScreen::Reader ||
+                               currentScreen_ == SettingsScreen::Device || currentScreen_ == SettingsScreen::Cleanup);
+
   switch (currentScreen_) {
     case SettingsScreen::Menu:
-      ui::render(renderer_, THEME, menuView_);
+      renderMenuScreen(theme, partialRefresh);
       menuView_.needsRender = false;
       break;
     case SettingsScreen::Reader:
-      ui::render(renderer_, THEME, readerView_);
+      renderReaderScreen(theme, partialRefresh);
       readerView_.needsRender = false;
       break;
     case SettingsScreen::Device:
-      ui::render(renderer_, THEME, deviceView_);
+      renderDeviceScreen(theme, partialRefresh);
       deviceView_.needsRender = false;
       break;
     case SettingsScreen::Cleanup:
-      ui::render(renderer_, THEME, cleanupView_);
+      renderCleanupScreen(theme, partialRefresh);
       cleanupView_.needsRender = false;
       break;
     case SettingsScreen::SystemInfo:
-      ui::render(renderer_, THEME, infoView_);
+      ui::render(renderer_, theme, infoView_);
       infoView_.needsRender = false;
       break;
     case SettingsScreen::ConfirmDialog:
-      ui::render(renderer_, THEME, confirmView_);
+      ui::render(renderer_, theme, confirmView_);
       confirmView_.needsRender = false;
       break;
   }
 
+  lastRenderedScreen_ = currentScreen_;
+  themeWasChanged_ = false;
+  firstRender_ = false;
   needsRender_ = false;
   core.display.markDirty();
+}
+
+namespace {
+constexpr int kSettingsContentStartY = 60;
+constexpr int kSettingsBottomMargin = 50;
+
+inline int settingsContentHeight(const GfxRenderer& renderer) {
+  return renderer.getScreenHeight() - kSettingsContentStartY - kSettingsBottomMargin;
+}
+}  // namespace
+
+void SettingsState::renderMenuScreen(const Theme& theme, const bool partialRefresh) {
+  if (partialRefresh) {
+    renderer_.preparePartialUpdateFrame();
+    renderer_.clearArea(0, kSettingsContentStartY, renderer_.getScreenWidth(), settingsContentHeight(renderer_),
+                        theme.backgroundColor);
+  } else {
+    renderer_.clearScreen(theme.backgroundColor);
+    ui::title(renderer_, theme, theme.screenMarginTop, "Settings");
+    ui::buttonBar(renderer_, theme, menuView_.buttons);
+  }
+
+  for (int i = 0; i < ui::SettingsMenuView::ITEM_COUNT; i++) {
+    const int y = kSettingsContentStartY + i * (theme.itemHeight + theme.itemSpacing);
+    ui::menuItem(renderer_, theme, y, ui::SettingsMenuView::ITEMS[i], i == menuView_.selected);
+  }
+
+  if (partialRefresh) {
+    renderer_.displayBuffer();
+  } else {
+    if (firstRender_ && core_ && !core_->settings.transitionFullRefresh) {
+      renderer_.displayBuffer();
+    } else {
+      renderer_.displayBuffer(firstRender_ ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
+    }
+  }
+}
+
+void SettingsState::renderCleanupScreen(const Theme& theme, const bool partialRefresh) {
+  if (partialRefresh) {
+    renderer_.preparePartialUpdateFrame();
+    renderer_.clearArea(0, kSettingsContentStartY, renderer_.getScreenWidth(), settingsContentHeight(renderer_),
+                        theme.backgroundColor);
+  } else {
+    renderer_.clearScreen(theme.backgroundColor);
+    ui::title(renderer_, theme, theme.screenMarginTop, "Cleanup");
+    ui::buttonBar(renderer_, theme, cleanupView_.buttons);
+  }
+
+  for (int i = 0; i < ui::CleanupMenuView::ITEM_COUNT; i++) {
+    const int y = kSettingsContentStartY + i * (theme.itemHeight + theme.itemSpacing);
+    ui::menuItem(renderer_, theme, y, ui::CleanupMenuView::ITEMS[i], i == cleanupView_.selected);
+  }
+
+  if (partialRefresh) {
+    renderer_.displayBuffer();
+  } else {
+    if (firstRender_ && core_ && !core_->settings.transitionFullRefresh) {
+      renderer_.displayBuffer();
+    } else {
+      renderer_.displayBuffer(firstRender_ ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
+    }
+  }
+}
+
+void SettingsState::renderReaderScreen(const Theme& theme, const bool partialRefresh) {
+  if (partialRefresh) {
+    renderer_.preparePartialUpdateFrame();
+    renderer_.clearArea(0, kSettingsContentStartY, renderer_.getScreenWidth(), settingsContentHeight(renderer_),
+                        theme.backgroundColor);
+  } else {
+    renderer_.clearScreen(theme.backgroundColor);
+    ui::title(renderer_, theme, theme.screenMarginTop, "Reader Settings");
+    ui::buttonBar(renderer_, theme, readerView_.buttons);
+  }
+
+  for (int i = 0; i < ui::ReaderSettingsView::SETTING_COUNT; i++) {
+    const int y = kSettingsContentStartY + i * (theme.itemHeight + theme.itemSpacing);
+    const auto& def = ui::ReaderSettingsView::DEFS[i];
+    ui::enumValue(renderer_, theme, y, def.label, readerView_.getCurrentValueStr(i), i == readerView_.selected);
+  }
+
+  if (partialRefresh) {
+    renderer_.displayBuffer();
+  } else {
+    if (firstRender_ && core_ && !core_->settings.transitionFullRefresh) {
+      renderer_.displayBuffer();
+    } else {
+      renderer_.displayBuffer(firstRender_ ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
+    }
+  }
+}
+
+void SettingsState::renderDeviceScreen(const Theme& theme, const bool partialRefresh) {
+  if (partialRefresh) {
+    renderer_.preparePartialUpdateFrame();
+    renderer_.clearArea(0, kSettingsContentStartY, renderer_.getScreenWidth(), settingsContentHeight(renderer_),
+                        theme.backgroundColor);
+  } else {
+    renderer_.clearScreen(theme.backgroundColor);
+    ui::title(renderer_, theme, theme.screenMarginTop, "Device Settings");
+    ui::buttonBar(renderer_, theme, deviceView_.buttons);
+  }
+
+  for (int i = 0; i < ui::DeviceSettingsView::SETTING_COUNT; i++) {
+    const int y = kSettingsContentStartY + i * (theme.itemHeight + theme.itemSpacing);
+    ui::enumValue(renderer_, theme, y, ui::DeviceSettingsView::DEFS[i].label, deviceView_.getCurrentValueStr(i),
+                  i == deviceView_.selected);
+  }
+
+  if (partialRefresh) {
+    renderer_.displayBuffer();
+  } else {
+    if (firstRender_ && core_ && !core_->settings.transitionFullRefresh) {
+      renderer_.displayBuffer();
+    } else {
+      renderer_.displayBuffer(firstRender_ ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
+    }
+  }
 }
 
 void SettingsState::openSelected() {
@@ -295,8 +427,8 @@ void SettingsState::goBack(Core& core) {
     case SettingsScreen::Device:
       saveDeviceSettings();
       // Apply button layouts now that we're leaving the screen
-      core.settings.frontButtonLayout = std::min(deviceView_.values[6], uint8_t(Settings::FrontLRBC));
-      core.settings.sideButtonLayout = std::min(deviceView_.values[7], uint8_t(Settings::NextPrev));
+      core.settings.frontButtonLayout = std::min(deviceView_.values[7], uint8_t(Settings::FrontLRBC));
+      core.settings.sideButtonLayout = std::min(deviceView_.values[8], uint8_t(Settings::NextPrev));
       ui::setFrontButtonLayout(core.settings.frontButtonLayout);
       core.input.resyncState();
       currentScreen_ = SettingsScreen::Menu;
@@ -508,17 +640,20 @@ void SettingsState::loadDeviceSettings() {
   // Index 3: Short Power Button (Ignore=0, Sleep=1, Page Turn=2)
   deviceView_.values[3] = settings.shortPwrBtn;
 
-  // Index 4: Pages Per Refresh (1=0, 5=1, 10=2, 15=3, 30=4)
+  // Index 4: Pages Per Refresh (0=0, 1=1, 5=2, 10=3, 15=4, 30=5, 60=6, 100=7)
   deviceView_.values[4] = settings.pagesPerRefresh;
 
-  // Index 5: Sunlight Fading Fix (toggle)
-  deviceView_.values[5] = settings.sunlightFadingFix;
+  // Index 5: Transition Refresh (toggle)
+  deviceView_.values[5] = settings.transitionFullRefresh;
 
-  // Index 6: Front Buttons (B/C/L/R=0, L/R/B/C=1)
-  deviceView_.values[6] = settings.frontButtonLayout;
+  // Index 6: Sunlight Fading Fix (toggle)
+  deviceView_.values[6] = settings.sunlightFadingFix;
 
-  // Index 7: Side Buttons (Prev/Next=0, Next/Prev=1)
-  deviceView_.values[7] = settings.sideButtonLayout;
+  // Index 7: Front Buttons (B/C/L/R=0, L/R/B/C=1)
+  deviceView_.values[7] = settings.frontButtonLayout;
+
+  // Index 8: Side Buttons (Prev/Next=0, Next/Prev=1)
+  deviceView_.values[8] = settings.sideButtonLayout;
 }
 
 void SettingsState::saveDeviceSettings() {
@@ -539,14 +674,17 @@ void SettingsState::saveDeviceSettings() {
   // Index 4: Pages Per Refresh
   settings.pagesPerRefresh = deviceView_.values[4];
 
-  // Index 5: Sunlight Fading Fix
-  settings.sunlightFadingFix = deviceView_.values[5];
+  // Index 5: Transition Refresh
+  settings.transitionFullRefresh = deviceView_.values[5];
 
-  // Index 6: Front Buttons - deferred to goBack() on screen exit.
+  // Index 6: Sunlight Fading Fix
+  settings.sunlightFadingFix = deviceView_.values[6];
+
+  // Index 7: Front Buttons - deferred to goBack() on screen exit.
   // Changing layout while navigating causes ghost button events because the
   // MappedInputManager remaps physical buttons mid-press.
 
-  // Index 7: Side Buttons - deferred to goBack() on screen exit.
+  // Index 8: Side Buttons - deferred to goBack() on screen exit.
   // Same as front buttons: changing layout mid-navigation causes ghost events.
 }
 

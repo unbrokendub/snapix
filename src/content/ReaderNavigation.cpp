@@ -35,6 +35,19 @@ ReaderNavigation::NavResult ReaderNavigation::next(ContentType type, const Posit
       result.needsCacheReset = true;
       result.needsRender = true;
     }
+  } else if (type == ContentType::Fb2) {
+    if (pageCount > 0 && current.sectionPage < pageCount - 1) {
+      result.position.sectionPage = current.sectionPage + 1;
+      result.needsRender = true;
+    } else if (cache && cache->isPartial()) {
+      result.position.sectionPage = current.sectionPage + 1;
+      result.needsRender = true;
+    } else if (pageCount > 0 && current.sectionPage >= pageCount - 1 && current.spineIndex + 1 < totalPages) {
+      result.position.spineIndex = current.spineIndex + 1;
+      result.position.sectionPage = 0;
+      result.needsCacheReset = true;
+      result.needsRender = true;
+    }
   } else {
     if (pageCount > 0 && current.sectionPage < pageCount - 1) {
       result.position.sectionPage = current.sectionPage + 1;
@@ -66,6 +79,16 @@ ReaderNavigation::NavResult ReaderNavigation::prev(ContentType type, const Posit
     } else if (current.spineIndex > 0) {
       result.position.spineIndex = current.spineIndex - 1;
       result.position.sectionPage = INT16_MAX;  // Will be clamped to last page
+      result.needsCacheReset = true;
+      result.needsRender = true;
+    }
+  } else if (type == ContentType::Fb2) {
+    if (current.sectionPage > 0) {
+      result.position.sectionPage = current.sectionPage - 1;
+      result.needsRender = true;
+    } else if (current.spineIndex > 0) {
+      result.position.spineIndex = current.spineIndex - 1;
+      result.position.sectionPage = INT16_MAX;
       result.needsCacheReset = true;
       result.needsRender = true;
     }

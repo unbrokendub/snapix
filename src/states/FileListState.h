@@ -54,6 +54,8 @@ class FileListState : public State {
   bool goHome_;       // Return to Home state
   bool firstRender_;  // Use HALF_REFRESH on first render to clear ghosting
   Screen currentScreen_;
+  int lastRenderedPageStart_;
+  Screen lastRenderedScreen_;
   ui::ConfirmDialogView confirmView_;
 
   void loadFiles(Core& core);

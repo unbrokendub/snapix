@@ -35,6 +35,9 @@ BootMode detectBootMode();
 
 // Get the transition data (only valid if detectBootMode returned based on RTC)
 const ModeTransition& getTransition();
+bool hasTransitionNotification();
+const char* getTransitionNotificationMessage();
+void prepareTransitionNotificationFrame(const char* message);
 
 // Save transition data before ESP.restart()
 void saveTransition(BootMode mode, const char* bookPath = nullptr, ReturnTo returnTo = ReturnTo::HOME);

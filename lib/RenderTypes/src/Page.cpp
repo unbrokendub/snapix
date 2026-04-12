@@ -66,6 +66,14 @@ void Page::render(GfxRenderer& renderer, const int fontId, const int xOffset, co
   }
 }
 
+void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
+  for (const auto& element : elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto& line = static_cast<const PageLine&>(*element);
+    line.getTextBlock().warmGlyphs(renderer, fontId);
+  }
+}
+
 bool Page::serialize(FsFile& file) const {
   const uint16_t count = elements.size();
   serialization::writePod(file, count);
@@ -94,6 +102,8 @@ std::unique_ptr<Page> Page::deserialize(FsFile& file) {
     LOG_ERR(TAG, "Element count %u exceeds limit %u", count, MAX_PAGE_ELEMENTS);
     return nullptr;
   }
+
+  page->elements.reserve(count);
 
   for (uint16_t i = 0; i < count; i++) {
     uint8_t tag;

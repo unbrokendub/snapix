@@ -7,6 +7,7 @@
 #include <expat.h>
 
 #include <climits>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -25,6 +26,44 @@ class Print;
 constexpr int MAX_XML_DEPTH = 100;
 
 class ChapterHtmlSlimParser {
+ public:
+  enum class ReadItemStatus : uint8_t {
+    Success,
+    Aborted,
+    NotFound,
+    ArchiveError,
+    IoError,
+    WriteError,
+  };
+
+  enum class CachedImageStatus : uint8_t {
+    Success,
+    RetryableInterruption,
+    TerminalFailure,
+  };
+
+  enum class ImageFailureClass : uint8_t {
+    None,
+    AbortRequested,
+    Timeout,
+    LowMemory,
+    DataUri,
+    UnsupportedFormat,
+    CacheHit,
+    CachedOpenFailed,
+    CachedBmpInvalid,
+    TempOpenFailed,
+    ExtractAborted,
+    ExtractFailed,
+    ConvertAborted,
+    ConvertFailed,
+    GeneratedBmpInvalid,
+    MissingSrc,
+    ReadItemUnavailable,
+    ImageCacheDisabled,
+  };
+
+ private:
   const std::string filepath;
   GfxRenderer& renderer;
   std::function<bool(std::unique_ptr<Page>)> completePageFn;  // Returns false to stop parsing
@@ -43,11 +82,26 @@ class ChapterHtmlSlimParser {
   std::unique_ptr<Page> currentPage = nullptr;
   int16_t currentPageNextY = 0;
   RenderConfig config;
+  int effectiveLineHeight_ = 0;
 
   // Image support
   std::string chapterBasePath;
   std::string imageCachePath;
-  std::function<bool(const std::string&, Print&, size_t)> readItemFn;
+  std::function<ReadItemStatus(const std::string&, Print&, size_t, const std::function<bool()>&)> readItemFn;
+  bool quickImageDecode_ = false;
+  std::shared_ptr<ImageBlock> pendingPageImage_ = nullptr;
+  struct CachedImageResult {
+    std::string cachedBmpPath;
+    std::string resolvedPath;
+    std::string failureReason;
+    uint16_t width = 0;
+    uint16_t height = 0;
+    bool cacheHit = false;
+    bool success = false;
+    bool retryable = false;
+    CachedImageStatus status = CachedImageStatus::TerminalFailure;
+    ImageFailureClass failureClass = ImageFailureClass::None;
+  };
 
   // CSS support
   const CssParser* cssParser_ = nullptr;
@@ -57,6 +111,8 @@ class ChapterHtmlSlimParser {
   bool stopRequested_ = false;
   bool pendingEmergencySplit_ = false;
   bool pendingNewTextBlock_ = false;
+  bool pendingBlockLikelyCaption_ = false;
+  bool currentBlockLikelyCaption_ = false;
   TextBlock::BLOCK_STYLE pendingBlockStyle_ = TextBlock::LEFT_ALIGN;
   bool pendingRtl_ = false;
   int rtlUntilDepth_ = INT_MAX;
@@ -77,6 +133,8 @@ class ChapterHtmlSlimParser {
   char pendingListMarker_[12] = {};
 
   bool aborted_ = false;
+  bool cooperativeAbortRequested_ = false;
+  bool fatalAbortRequested_ = false;
 
   // External abort callback for cooperative cancellation
   std::function<bool()> externalAbortCallback_ = nullptr;
@@ -84,6 +142,8 @@ class ChapterHtmlSlimParser {
   // Image failure rate limiting - skip remaining images after consecutive failures
   uint8_t consecutiveImageFailures_ = 0;
   static constexpr uint8_t MAX_CONSECUTIVE_IMAGE_FAILURES = 3;
+  static constexpr uint32_t MAX_QUICK_IMAGE_PROCESS_TIME_MS = 8000;
+  static constexpr uint32_t MAX_FULL_IMAGE_PROCESS_TIME_MS = 12000;
 
   // Parser safety - timeout and memory checks
   uint32_t parseStartTime_ = 0;
@@ -95,6 +155,10 @@ class ChapterHtmlSlimParser {
   static constexpr uint16_t YIELD_CHECK_INTERVAL = 100;    // Check every 100 iterations
   static constexpr uint16_t CSS_HEAP_CHECK_INTERVAL = 64;  // Check heap for CSS every 64 elements
   static constexpr size_t MIN_FREE_HEAP = 8192;            // 8KB minimum free heap
+  // Layout needs a bit more headroom than the generic abort threshold, but the
+  // old 2x multiplier was too conservative on fragmented heaps and could block
+  // progress forever even when layout still had enough room to finish.
+  static constexpr size_t MIN_LAYOUT_FREE_HEAP = MIN_FREE_HEAP + 2048;
 
   // Pre-parse data URI stripper to prevent expat OOM on large embedded images
   DataUriStripper dataUriStripper_;
@@ -103,12 +167,25 @@ class ChapterHtmlSlimParser {
   std::vector<std::pair<std::string, uint16_t>> anchorMap_;
 
   // Check if parsing should abort due to timeout or memory pressure
-  bool shouldAbort() const;
+  bool shouldAbort();
+  void requestCooperativeSuspend();
 
-  void startNewTextBlock(TextBlock::BLOCK_STYLE style);
+  static bool asciiContainsInsensitive(const char* haystack, const char* needle);
+  static bool looksLikeCaptionTag(const char* name, const char* classAttr, const char* idAttr);
+  bool looksLikeCaptionText(const ParsedText& text) const;
+  bool measureTextBlockLineCount(const ParsedText& text, size_t& lineCount);
+  int paragraphSpacing() const;
+  void recomputeCurrentPageNextY();
+  bool completeCurrentPageAndStartFresh();
+  void maybeKeepTrailingImageWithCaption(bool likelyCaption);
+  void maybeDeferTrailingTallImageText(bool likelyCaption);
+  void startNewTextBlock(TextBlock::BLOCK_STYLE style, bool likelyCaption = false);
+  void appendPartWordBytes(const char* data, int len);
   void flushPartWordBuffer();
   void makePages();
-  std::string cacheImage(const std::string& src);
+  static bool validateCachedBmp(const std::string& cachedBmpPath, uint16_t& width, uint16_t& height,
+                                std::string& failureReason);
+  CachedImageResult cacheImage(const std::string& src);
   void addImageToPage(std::shared_ptr<ImageBlock> image);
   // XML callbacks
   static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char** atts);
@@ -127,13 +204,17 @@ class ChapterHtmlSlimParser {
   bool initParser();
   bool parseLoop();
   void cleanupParser();
+  bool placePendingImage();
 
  public:
   explicit ChapterHtmlSlimParser(const std::string& filepath, GfxRenderer& renderer, const RenderConfig& config,
                                  const std::function<bool(std::unique_ptr<Page>)>& completePageFn,
                                  const std::function<void(int)>& progressFn = nullptr,
                                  const std::string& chapterBasePath = "", const std::string& imageCachePath = "",
-                                 const std::function<bool(const std::string&, Print&, size_t)>& readItemFn = nullptr,
+                                 const std::function<ReadItemStatus(const std::string&, Print&, size_t,
+                                                                    const std::function<bool()>&)>& readItemFn =
+                                     nullptr,
+                                 bool quickImageDecode = false,
                                  const CssParser* cssParser = nullptr,
                                  const std::function<bool()>& externalAbortCallback = nullptr)
       : filepath(filepath),
@@ -144,6 +225,7 @@ class ChapterHtmlSlimParser {
         chapterBasePath(chapterBasePath),
         imageCachePath(imageCachePath),
         readItemFn(readItemFn),
+        quickImageDecode_(quickImageDecode),
         cssParser_(cssParser),
         externalAbortCallback_(externalAbortCallback) {}
   ~ChapterHtmlSlimParser();

@@ -18,7 +18,8 @@
 
 namespace {
 
-constexpr uint8_t CACHE_FILE_VERSION = 17;
+constexpr uint8_t CACHE_FILE_VERSION = 20;
+constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 // Header layout (must match PageCache.cpp):
 // - version (1 byte)
@@ -36,8 +37,9 @@ constexpr uint8_t CACHE_FILE_VERSION = 17;
 // - lutOffset (4 bytes)
 constexpr uint32_t HEADER_SIZE = 1 + 4 + 4 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 4;
 
-// Write a complete cache header to an FsFile buffer
-void writeCacheHeader(FsFile& file, uint16_t pageCount, bool isPartial, uint8_t version = CACHE_FILE_VERSION) {
+// Write a complete cache file that satisfies the current PageCache::loadRaw()
+// contract: header + LUT payload sized for pageCount entries.
+void writeCacheFile(FsFile& file, uint16_t pageCount, bool isPartial, uint8_t version = CACHE_FILE_VERSION) {
   serialization::writePod(file, version);
   uint32_t fontId = 1818981670;
   serialization::writePod(file, fontId);
@@ -62,6 +64,11 @@ void writeCacheHeader(FsFile& file, uint16_t pageCount, bool isPartial, uint8_t 
   serialization::writePod(file, partial);
   uint32_t lutOffset = HEADER_SIZE;
   serialization::writePod(file, lutOffset);
+
+  for (uint16_t i = 0; i < pageCount; ++i) {
+    uint32_t pagePos = HEADER_SIZE + static_cast<uint32_t>(pageCount) * sizeof(uint32_t) + i;
+    serialization::writePod(file, pagePos);
+  }
 }
 
 // Mirrors the loadRaw() logic from PageCache.cpp
@@ -79,6 +86,12 @@ LoadRawResult loadRaw(const std::string& path) {
     return result;
   }
 
+  const size_t fileSize = file.size();
+  if (fileSize < HEADER_SIZE) {
+    file.close();
+    return result;
+  }
+
   uint8_t version;
   serialization::readPod(file, version);
   if (version != CACHE_FILE_VERSION) {
@@ -89,9 +102,25 @@ LoadRawResult loadRaw(const std::string& path) {
   // Skip config fields, read pageCount and isPartial
   file.seek(HEADER_SIZE - 4 - 1 - 2);
   serialization::readPod(file, result.pageCount);
+  if (result.pageCount == 0 || result.pageCount > MAX_REASONABLE_PAGE_COUNT) {
+    file.close();
+    result.pageCount = 0;
+    return result;
+  }
   uint8_t partial;
   serialization::readPod(file, partial);
   result.isPartial = (partial != 0);
+
+  uint32_t lutOffset = 0;
+  serialization::readPod(file, lutOffset);
+  const uint64_t lutBytes = static_cast<uint64_t>(result.pageCount) * sizeof(uint32_t);
+  const uint64_t lutEnd = static_cast<uint64_t>(lutOffset) + lutBytes;
+  if (lutOffset < HEADER_SIZE || lutOffset >= fileSize || lutEnd > fileSize) {
+    file.close();
+    result.pageCount = 0;
+    result.isPartial = false;
+    return result;
+  }
 
   file.close();
   result.success = true;
@@ -107,7 +136,7 @@ int main() {
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 42, false);
+    writeCacheFile(writer, 42, false);
     SdMan.registerFile("/cache/complete.bin", writer.getBuffer());
 
     auto result = loadRaw("/cache/complete.bin");
@@ -120,7 +149,7 @@ int main() {
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 10, true);
+    writeCacheFile(writer, 10, true);
     SdMan.registerFile("/cache/partial.bin", writer.getBuffer());
 
     auto result = loadRaw("/cache/partial.bin");
@@ -133,7 +162,7 @@ int main() {
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 5, false, 99);  // Wrong version
+    writeCacheFile(writer, 5, false, 99);  // Wrong version
     SdMan.registerFile("/cache/bad_version.bin", writer.getBuffer());
 
     auto result = loadRaw("/cache/bad_version.bin");
@@ -150,20 +179,18 @@ int main() {
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 0, false);
+    writeCacheFile(writer, 0, false);
     SdMan.registerFile("/cache/zero_pages.bin", writer.getBuffer());
 
     auto result = loadRaw("/cache/zero_pages.bin");
-    runner.expectTrue(result.success, "zero_pages_success");
-    runner.expectEq(static_cast<uint16_t>(0), result.pageCount, "zero_pages_count");
-    runner.expectFalse(result.isPartial, "zero_pages_not_partial");
+    runner.expectFalse(result.success, "zero_pages_rejected");
   }
 
   // Test 6: Large page count
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 1000, true);
+    writeCacheFile(writer, 1000, true);
     SdMan.registerFile("/cache/large.bin", writer.getBuffer());
 
     auto result = loadRaw("/cache/large.bin");
@@ -176,21 +203,16 @@ int main() {
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 65535, false);
+    writeCacheFile(writer, 65535, false);
     SdMan.registerFile("/cache/max_pages.bin", writer.getBuffer());
 
     auto result = loadRaw("/cache/max_pages.bin");
-    runner.expectTrue(result.success, "max_pages_success");
-    runner.expectEq(static_cast<uint16_t>(65535), result.pageCount, "max_pages_count");
+    runner.expectFalse(result.success, "max_pages_rejected");
   }
 
-  // Test 8: Header size is exactly 25 bytes
+  // Test 8: Header layout size is exactly 25 bytes
   {
-    FsFile writer;
-    writer.setBuffer("");
-    writeCacheHeader(writer, 1, false);
-    runner.expectEq(static_cast<uint32_t>(25), static_cast<uint32_t>(writer.getBuffer().size()),
-                    "header_size_25_bytes");
+    runner.expectEq(static_cast<uint32_t>(25), HEADER_SIZE, "header_size_25_bytes");
   }
 
   // Test 9: Seek position is correct (HEADER_SIZE - 4 - 1 - 2 = 18)
@@ -198,7 +220,7 @@ int main() {
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 0x1234, true);
+    writeCacheFile(writer, 0x1234, true);
     std::string buf = writer.getBuffer();
 
     // Verify pageCount at offset 18 (little-endian)
@@ -212,7 +234,7 @@ int main() {
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 5, false, 16);
+    writeCacheFile(writer, 5, false, 16);
     SdMan.registerFile("/cache/old_version.bin", writer.getBuffer());
 
     auto result = loadRaw("/cache/old_version.bin");
@@ -223,7 +245,7 @@ int main() {
   {
     FsFile writer;
     writer.setBuffer("");
-    writeCacheHeader(writer, 5, false, 0);
+    writeCacheFile(writer, 5, false, 0);
     SdMan.registerFile("/cache/version_0.bin", writer.getBuffer());
 
     auto result = loadRaw("/cache/version_0.bin");
@@ -263,6 +285,10 @@ int main() {
     serialization::writePod(writer, partial);
     uint32_t lutOffset = HEADER_SIZE;
     serialization::writePod(writer, lutOffset);
+    for (uint16_t i = 0; i < pageCount; ++i) {
+      uint32_t pagePos = HEADER_SIZE + static_cast<uint32_t>(pageCount) * sizeof(uint32_t) + i;
+      serialization::writePod(writer, pagePos);
+    }
 
     SdMan.registerFile("/cache/diff_config.bin", writer.getBuffer());
 

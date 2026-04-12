@@ -29,6 +29,8 @@ class HomeState : public State {
   std::string coverBmpPath_;
   bool hasCoverImage_ = false;
   bool coverLoadFailed_ = false;
+  bool firstRender_ = true;
+  bool returningFromReader_ = false;
 
   // Compressed thumbnail caching (replaces 48KB full buffer with ~2-4KB compressed)
   static constexpr uint16_t COVER_CACHE_WIDTH = 120;

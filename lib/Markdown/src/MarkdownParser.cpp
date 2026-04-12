@@ -17,6 +17,8 @@
 #include <blocks/TextBlock.h>
 #include <esp_heap_caps.h>
 
+#include <algorithm>
+#include <cstring>
 #include <utility>
 
 #include "md_parser.h"
@@ -25,6 +27,32 @@
 
 namespace {
 bool isWhitespaceChar(const char c) { return c == ' ' || c == '\r' || c == '\n' || c == '\t'; }
+
+int utf8SafePrefixLength(const char* data, const int len, const int maxBytes) {
+  const int limit = std::min(len, maxBytes);
+  int consumed = 0;
+
+  while (consumed < limit) {
+    const unsigned char lead = static_cast<unsigned char>(data[consumed]);
+    int cpLen = 1;
+    if ((lead & 0x80U) == 0) {
+      cpLen = 1;
+    } else if ((lead & 0xE0U) == 0xC0U) {
+      cpLen = 2;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+      cpLen = 3;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+      cpLen = 4;
+    }
+
+    if (consumed + cpLen > limit) {
+      break;
+    }
+    consumed += cpLen;
+  }
+
+  return consumed > 0 ? consumed : limit;
+}
 }  // namespace
 
 MarkdownParser::MarkdownParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config)
@@ -139,24 +167,73 @@ bool MarkdownParser::addLineToPage(ParseContext& ctx, std::shared_ptr<TextBlock>
     }
   }
 
-  ctx.currentPage->elements.push_back(std::make_shared<PageLine>(line, 0, ctx.pageNextY));
+  ctx.currentPage->elements.push_back(std::make_unique<PageLine>(std::move(line), 0, ctx.pageNextY));
   ctx.pageNextY += lineHeight;
   return true;
 }
 
-bool MarkdownParser::readLine(FsFile& file) {
-  int i = 0;
-  bool readAnyChar = false;
-  while (i < LINE_BUFFER_SIZE - 1) {
-    int c = file.read();
-    if (c < 0) break;
-    readAnyChar = true;
-    if (c == '\n') break;
-    if (c == '\r') continue;
-    lineBuffer_[i++] = static_cast<char>(c);
+bool MarkdownParser::readLine(FsFile& file, int* lineLength, bool* isBlank) {
+  const int readLen = file.fgets(lineBuffer_, LINE_BUFFER_SIZE);
+  if (readLen <= 0) {
+    if (lineLength) *lineLength = 0;
+    if (isBlank) *isBlank = true;
+    return false;
   }
-  lineBuffer_[i] = '\0';
-  return readAnyChar;
+
+  int len = readLen;
+  while (len > 0 && (lineBuffer_[len - 1] == '\n' || lineBuffer_[len - 1] == '\r')) {
+    len--;
+  }
+  lineBuffer_[len] = '\0';
+
+  if (lineLength) {
+    *lineLength = len;
+  }
+  if (isBlank) {
+    bool blank = true;
+    for (int i = 0; i < len; i++) {
+      if (!isWhitespaceChar(lineBuffer_[i])) {
+        blank = false;
+        break;
+      }
+    }
+    *isBlank = blank;
+  }
+  return true;
+}
+
+void MarkdownParser::appendTextBytes(ParseContext& ctx, const char* data, int len) {
+  int offset = 0;
+  while (offset < len) {
+    while (offset < len && isWhitespaceChar(data[offset])) {
+      flushWordBuffer(ctx);
+      offset++;
+    }
+
+    const int runStart = offset;
+    while (offset < len && !isWhitespaceChar(data[offset])) {
+      offset++;
+    }
+
+    int remaining = offset - runStart;
+    const char* src = data + runStart;
+    while (remaining > 0) {
+      if (ctx.wordBufferIndex >= MAX_WORD_SIZE) {
+        flushWordBuffer(ctx);
+      }
+
+      const int spaceLeft = MAX_WORD_SIZE - ctx.wordBufferIndex;
+      const int chunkLen = utf8SafePrefixLength(src, remaining, spaceLeft);
+      memcpy(ctx.wordBuffer + ctx.wordBufferIndex, src, chunkLen);
+      ctx.wordBufferIndex += chunkLen;
+      src += chunkLen;
+      remaining -= chunkLen;
+
+      if (ctx.wordBufferIndex >= MAX_WORD_SIZE) {
+        flushWordBuffer(ctx);
+      }
+    }
+  }
 }
 
 bool MarkdownParser::tokenCallback(const md_token_t* token, void* userData) {
@@ -169,22 +246,7 @@ bool MarkdownParser::tokenCallback(const md_token_t* token, void* userData) {
 
   switch (token->type) {
     case MD_TEXT: {
-      // Process text character by character to split into words
-      for (uint16_t i = 0; i < token->length; i++) {
-        char c = token->text[i];
-        if (isWhitespaceChar(c)) {
-          self->flushWordBuffer(ctx);
-        } else {
-          if (ctx.wordBufferIndex >= MAX_WORD_SIZE) {
-            ctx.wordBuffer[ctx.wordBufferIndex] = '\0';
-            if (ctx.textBlock) {
-              ctx.textBlock->addWord(ctx.wordBuffer, static_cast<EpdFontFamily::Style>(self->getCurrentFontStyle(ctx)));
-            }
-            ctx.wordBufferIndex = 0;
-          }
-          ctx.wordBuffer[ctx.wordBufferIndex++] = c;
-        }
-      }
+      self->appendTextBytes(ctx, token->text, token->length);
       break;
     }
 
@@ -243,14 +305,7 @@ bool MarkdownParser::tokenCallback(const md_token_t* token, void* userData) {
       // Emit inline code in italic
       bool savedItalic = ctx.inItalic;
       ctx.inItalic = true;
-      for (uint16_t i = 0; i < token->length; i++) {
-        char c = token->text[i];
-        if (isWhitespaceChar(c)) {
-          self->flushWordBuffer(ctx);
-        } else if (ctx.wordBufferIndex < MAX_WORD_SIZE) {
-          ctx.wordBuffer[ctx.wordBufferIndex++] = c;
-        }
-      }
+      self->appendTextBytes(ctx, token->text, token->length);
       self->flushWordBuffer(ctx);
       ctx.inItalic = savedItalic;
       break;
@@ -349,7 +404,8 @@ bool MarkdownParser::parsePages(const std::function<void(std::unique_ptr<Page>)>
   file.seekSet(currentOffset_);
 
   if (currentOffset_ == 0 && !isRtl_) {
-    if (readLine(file)) {
+    int rtlLineLen = 0;
+    if (readLine(file, &rtlLineLen, nullptr)) {
       isRtl_ = ScriptDetector::containsArabic(lineBuffer_);
     }
     file.seekSet(currentOffset_);
@@ -407,21 +463,12 @@ bool MarkdownParser::parsePages(const std::function<void(std::unique_ptr<Page>)>
       break;
     }
 
-    if (!readLine(file)) {
+    int lineLen = 0;
+    bool isBlank = true;
+    if (!readLine(file, &lineLen, &isBlank)) {
       break;
     }
     bytesProcessed = file.position() - currentOffset_;
-
-    int lineLen = strlen(lineBuffer_);
-
-    // Check for blank lines - they separate blocks
-    bool isBlank = true;
-    for (int i = 0; i < lineLen; i++) {
-      if (!isWhitespaceChar(lineBuffer_[i])) {
-        isBlank = false;
-        break;
-      }
-    }
 
     if (isBlank) {
       if (!prevLineBlank && !ctx.inCodeBlock) {

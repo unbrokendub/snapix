@@ -30,6 +30,12 @@ static HWCDC& logSerial = Serial;
 void logPrintf(const char* level, const char* origin, const char* format, ...);
 
 #ifdef ENABLE_SERIAL_LOG
+#define PAPYRIX_SERIAL_LOG_ENABLED 1
+#else
+#define PAPYRIX_SERIAL_LOG_ENABLED 0
+#endif
+
+#ifdef ENABLE_SERIAL_LOG
 #if LOG_LEVEL >= 0
 #define LOG_ERR(origin, format, ...) logPrintf("[ERR]", origin, format "\n", ##__VA_ARGS__)
 #else
@@ -55,9 +61,21 @@ void logPrintf(const char* level, const char* origin, const char* format, ...);
 
 class MySerialImpl : public Print {
  public:
-  void begin(unsigned long baud) { logSerial.begin(baud); }
+  void begin(unsigned long baud) {
+#if PAPYRIX_SERIAL_LOG_ENABLED
+    logSerial.begin(baud);
+#else
+    (void)baud;
+#endif
+  }
 
-  operator bool() const { return logSerial; }
+  operator bool() const {
+#if PAPYRIX_SERIAL_LOG_ENABLED
+    return logSerial;
+#else
+    return false;
+#endif
+  }
 
   __attribute__((deprecated("Use LOG_* macro instead"))) size_t printf(const char* format, ...);
   size_t write(uint8_t b) override;

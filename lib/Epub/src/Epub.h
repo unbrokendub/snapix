@@ -2,6 +2,7 @@
 
 #include <Print.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -37,6 +38,16 @@ class Epub {
   bool parseTocNavFile() const;
 
  public:
+  enum class ItemReadResult : uint8_t {
+    Success,
+    Aborted,
+    NotFound,
+    ArchiveError,
+    IoError,
+    WriteError,
+    OpenFailed,
+  };
+
   explicit Epub(std::string filepath, const std::string& cacheDir) : filepath(std::move(filepath)) {
     // create a cache key based on the filepath
     cachePath = cacheDir + "/epub_" + std::to_string(std::hash<std::string>{}(this->filepath));
@@ -58,15 +69,21 @@ class Epub {
   std::string getThumbBmpPath() const;
   bool generateThumbBmp() const;
   std::string findCoverImage() const;
+  static const char* itemReadResultToString(ItemReadResult result);
   uint8_t* readItemContentsToBytes(const std::string& itemHref, size_t* size = nullptr,
                                    bool trailingNullByte = false) const;
+  ItemReadResult readItemContentsToStreamDetailed(const std::string& itemHref, Print& out, size_t chunkSize,
+                                                  uint8_t* dictBuffer = nullptr,
+                                                  const std::function<bool()>& shouldAbort = nullptr) const;
   bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize,
-                                uint8_t* dictBuffer = nullptr) const;
+                                uint8_t* dictBuffer = nullptr,
+                                const std::function<bool()>& shouldAbort = nullptr) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
   BookMetadataCache::SpineEntry getSpineItem(int spineIndex) const;
   BookMetadataCache::TocEntry getTocItem(int tocIndex) const;
   int getSpineItemsCount() const;
   int getTocItemsCount() const;
+  int resolveTocSpineIndex(int tocIndex) const;
   int getSpineIndexForTocIndex(int tocIndex) const;
   int getTocIndexForSpineIndex(int spineIndex) const;
   int getSpineIndexForTextReference() const;

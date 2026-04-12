@@ -1,5 +1,6 @@
 #include "Elements.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -391,20 +392,21 @@ void battery(const GfxRenderer& r, const Theme& t, int x, int y, int percent) {
 }
 
 void statusBar(const GfxRenderer& r, const Theme& t, int page, int total, int percent) {
-  const int y = r.getScreenHeight() - 25;
+  const int y = r.getScreenHeight() - 25 + t.statusBarOffsetY;
   const int x = t.screenMarginSide;
   const int screenW = r.getScreenWidth();
+  const int statusFontId = t.statusFontId;
 
   // Page numbers on left
   char pageStr[32];
   snprintf(pageStr, sizeof(pageStr), "%d / %d", page, total);
-  r.drawText(t.smallFontId, x + 5, y, pageStr, t.primaryTextBlack);
+  r.drawText(statusFontId, x + 5, y, pageStr, t.primaryTextBlack);
 
   // Percentage on right
   char percentStr[8];
   snprintf(percentStr, sizeof(percentStr), "%d%%", percent);
-  const int percentW = r.getTextWidth(t.smallFontId, percentStr);
-  r.drawText(t.smallFontId, screenW - x - percentW - 5, y, percentStr, t.primaryTextBlack);
+  const int percentW = r.getTextWidth(statusFontId, percentStr);
+  r.drawText(statusFontId, screenW - x - percentW - 5, y, percentStr, t.primaryTextBlack);
 }
 
 void bookCard(const GfxRenderer& r, const Theme& t, int y, const char* titleText, const char* author,
@@ -666,8 +668,19 @@ void readerStatusBar(const GfxRenderer& r, const Theme& t, int marginLeft, int m
 
   const auto screenHeight = r.getScreenHeight();
   const auto screenWidth = r.getScreenWidth();
-  const int textY = screenHeight - marginBottom - 2;
+  const int textY = screenHeight - marginBottom - 2 + t.statusBarOffsetY;
+  const int statusFontId = t.statusFontId;
+  const int statusLineHeight = std::max(r.getEffectiveLineHeight(statusFontId), 6);
   int percentageTextWidth = 0;
+
+  // Battery icon scales with the active status font so tiny fonts stay aligned.
+  const int batteryHeight = std::clamp(statusLineHeight + 1, 7, 10);
+  const int batteryBodyWidth = batteryHeight + 3;
+  const int batteryTerminalWidth = 3;
+  const int batteryWidth = batteryBodyWidth + batteryTerminalWidth;
+  const int batteryGap = 5;
+  const int batteryX = marginLeft;
+  const int batteryY = textY + std::max(0, (statusLineHeight - batteryHeight) / 2);
 
   // 1. Battery (left side)
   char percentageText[8];
@@ -678,46 +691,44 @@ void readerStatusBar(const GfxRenderer& r, const Theme& t, int marginLeft, int m
   } else {
     snprintf(percentageText, sizeof(percentageText), "%d%%", percentage);
   }
-  percentageTextWidth = r.getTextWidth(t.smallFontId, percentageText);
-  r.drawText(t.smallFontId, 20 + marginLeft, textY, percentageText, t.primaryTextBlack);
-
-  // Battery icon (15x10 px)
-  constexpr int batteryWidth = 15;
-  constexpr int batteryHeight = 10;
-  const int x = marginLeft;
-  const int y = textY + 5;
+  percentageTextWidth = r.getTextWidth(statusFontId, percentageText);
+  r.drawText(statusFontId, batteryX + batteryWidth + batteryGap, textY, percentageText, t.primaryTextBlack);
 
   // Draw battery outline
-  r.drawLine(x, y, x + batteryWidth - 4, y, t.primaryTextBlack);
-  r.drawLine(x, y + batteryHeight - 1, x + batteryWidth - 4, y + batteryHeight - 1, t.primaryTextBlack);
-  r.drawLine(x, y, x, y + batteryHeight - 1, t.primaryTextBlack);
-  r.drawLine(x + batteryWidth - 4, y, x + batteryWidth - 4, y + batteryHeight - 1, t.primaryTextBlack);
-  // Battery terminal
-  r.drawLine(x + batteryWidth - 3, y + 2, x + batteryWidth - 1, y + 2, t.primaryTextBlack);
-  r.drawLine(x + batteryWidth - 3, y + batteryHeight - 3, x + batteryWidth - 1, y + batteryHeight - 3,
+  r.drawLine(batteryX, batteryY, batteryX + batteryBodyWidth - 1, batteryY, t.primaryTextBlack);
+  r.drawLine(batteryX, batteryY + batteryHeight - 1, batteryX + batteryBodyWidth - 1, batteryY + batteryHeight - 1,
              t.primaryTextBlack);
-  r.drawLine(x + batteryWidth - 1, y + 2, x + batteryWidth - 1, y + batteryHeight - 3, t.primaryTextBlack);
+  r.drawLine(batteryX, batteryY, batteryX, batteryY + batteryHeight - 1, t.primaryTextBlack);
+  r.drawLine(batteryX + batteryBodyWidth - 1, batteryY, batteryX + batteryBodyWidth - 1,
+             batteryY + batteryHeight - 1, t.primaryTextBlack);
+  // Battery terminal
+  r.drawLine(batteryX + batteryBodyWidth, batteryY + 2, batteryX + batteryWidth - 1, batteryY + 2,
+             t.primaryTextBlack);
+  r.drawLine(batteryX + batteryBodyWidth, batteryY + batteryHeight - 3, batteryX + batteryWidth - 1,
+             batteryY + batteryHeight - 3, t.primaryTextBlack);
+  r.drawLine(batteryX + batteryWidth - 1, batteryY + 2, batteryX + batteryWidth - 1, batteryY + batteryHeight - 3,
+             t.primaryTextBlack);
 
   // Fill level
-  int filledWidth = percentage * (batteryWidth - 5) / 100 + 1;
-  if (filledWidth > batteryWidth - 5) filledWidth = batteryWidth - 5;
+  int filledWidth = percentage * (batteryBodyWidth - 2) / 100 + 1;
+  if (filledWidth > batteryBodyWidth - 2) filledWidth = batteryBodyWidth - 2;
   if (filledWidth > 0) {
-    r.fillRect(x + 1, y + 1, filledWidth, batteryHeight - 2, t.primaryTextBlack);
+    r.fillRect(batteryX + 1, batteryY + 1, filledWidth, batteryHeight - 2, t.primaryTextBlack);
   }
 
   // 2. Page numbers (right side)
   char pageStr[16];
-  if (data.isPartial || data.totalPages == 0) {
+  if (data.totalPages == 0) {
     snprintf(pageStr, sizeof(pageStr), "%d/-", data.currentPage);
   } else {
     snprintf(pageStr, sizeof(pageStr), "%d/%d", data.currentPage, data.totalPages);
   }
-  int pageTextWidth = r.getTextWidth(t.smallFontId, pageStr);
-  r.drawText(t.smallFontId, screenWidth - marginRight - pageTextWidth, textY, pageStr, t.primaryTextBlack);
+  int pageTextWidth = r.getTextWidth(statusFontId, pageStr);
+  r.drawText(statusFontId, screenWidth - marginRight - pageTextWidth, textY, pageStr, t.primaryTextBlack);
 
   // 3. Title (center)
   if (data.title && data.title[0] != '\0') {
-    const int batteryAreaWidth = 20 + percentageTextWidth;
+    const int batteryAreaWidth = batteryWidth + batteryGap + percentageTextWidth;
     const int titleMarginLeft = batteryAreaWidth + 30 + marginLeft;
     const int titleMarginRight = marginRight + pageTextWidth + 10;
     const int availableTextWidth = screenWidth - titleMarginLeft - titleMarginRight;
@@ -725,15 +736,15 @@ void readerStatusBar(const GfxRenderer& r, const Theme& t, int marginLeft, int m
     if (availableTextWidth <= 0) return;
 
     std::string titleStr = data.title;
-    int titleWidth = r.getTextWidth(t.smallFontId, titleStr.c_str());
+    int titleWidth = r.getTextWidth(statusFontId, titleStr.c_str());
 
     // Truncate title if too wide (using truncatedText for UTF-8 safety)
     if (titleWidth > availableTextWidth) {
-      titleStr = r.truncatedText(t.smallFontId, titleStr.c_str(), availableTextWidth);
-      titleWidth = r.getTextWidth(t.smallFontId, titleStr.c_str());
+      titleStr = r.truncatedText(statusFontId, titleStr.c_str(), availableTextWidth);
+      titleWidth = r.getTextWidth(statusFontId, titleStr.c_str());
     }
 
-    r.drawText(t.smallFontId, titleMarginLeft + (availableTextWidth - titleWidth) / 2, textY, titleStr.c_str(),
+    r.drawText(statusFontId, titleMarginLeft + (availableTextWidth - titleWidth) / 2, textY, titleStr.c_str(),
                t.primaryTextBlack);
   }
 }

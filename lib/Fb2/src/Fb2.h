@@ -24,6 +24,8 @@ class Fb2 {
   struct TocItem {
     std::string title;
     int sectionIndex = -1;  // Sequential section number (0-based)
+    uint32_t sourceOffset = 0;  // Byte offset of the section start in the FB2 source
+    uint8_t depth = 0;  // Nesting level in the FB2 section tree
   };
 
  private:
@@ -60,6 +62,8 @@ class Fb2 {
   std::vector<uint32_t> tocLut_;
   uint16_t tocItemCount_ = 0;
   int sectionCounter_ = 0;
+  int sectionDepth_ = 0;
+  uint32_t currentSectionOffset_ = 0;
   bool inSectionTitle_ = false;
   int sectionTitleDepth_ = 0;
   std::string currentSectionTitle_;

@@ -61,6 +61,11 @@ inline BaseType_t xTaskCreatePinnedToCore(TaskFunction_t pvTaskCode, const char*
   return pdPASS;
 }
 
+inline BaseType_t xTaskCreate(TaskFunction_t pvTaskCode, const char* const pcName, const uint32_t usStackDepth,
+                              void* const pvParameters, UBaseType_t uxPriority, TaskHandle_t* const pxCreatedTask) {
+  return xTaskCreatePinnedToCore(pvTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask, 0);
+}
+
 // vTaskDelete mock - tracks self-delete vs force-delete
 inline void vTaskDelete(TaskHandle_t xTaskToDelete) {
   if (xTaskToDelete == nullptr) {
@@ -88,6 +93,10 @@ inline void vTaskDelete(TaskHandle_t xTaskToDelete) {
 inline void vTaskDelay(const TickType_t xTicksToDelay) {
   std::this_thread::sleep_for(std::chrono::milliseconds(xTicksToDelay));
 }
+
+inline void vTaskPrioritySet(TaskHandle_t, UBaseType_t) {}
+
+inline UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t) { return 1024; }
 
 // Helper to clean up tasks after test
 inline void cleanupMockTasks() {

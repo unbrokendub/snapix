@@ -186,15 +186,15 @@ int ExternalFont::getLruSlot() {
 }
 
 bool ExternalFont::readGlyphFromSD(uint32_t codepoint, uint8_t* buffer) {
+  return readGlyphAtOffset(codepoint * _bytesPerChar, buffer);
+}
+
+bool ExternalFont::readGlyphAtOffset(uint32_t offset, uint8_t* buffer) {
   if (!_fontFile) {
     return false;
   }
 
-  // Calculate offset
-  uint32_t offset = codepoint * _bytesPerChar;
-
-  // Seek and read
-  if (!_fontFile.seek(offset)) {
+  if (_fontFile.position() != offset && !_fontFile.seek(offset)) {
     return false;
   }
 
@@ -205,6 +205,94 @@ bool ExternalFont::readGlyphFromSD(uint32_t codepoint, uint8_t* buffer) {
   }
 
   return true;
+}
+
+void ExternalFont::removeHashEntryForSlot(const int slot) {
+  if (_cache[slot].codepoint == 0xFFFFFFFF) {
+    return;
+  }
+
+  const int oldHash = hashCodepoint(_cache[slot].codepoint);
+  for (int i = 0; i < CACHE_SIZE; i++) {
+    const int idx = (oldHash + i) % CACHE_SIZE;
+    if (_hashTable[idx] == slot) {
+      _hashTable[idx] = HASH_TOMBSTONE;
+      return;
+    }
+  }
+}
+
+void ExternalFont::insertHashEntry(const uint32_t codepoint, const int slot) {
+  const int hash = hashCodepoint(codepoint);
+  for (int i = 0; i < CACHE_SIZE; i++) {
+    const int idx = (hash + i) % CACHE_SIZE;
+    if (_hashTable[idx] == HASH_EMPTY || _hashTable[idx] == HASH_TOMBSTONE) {
+      _hashTable[idx] = slot;
+      return;
+    }
+  }
+}
+
+void ExternalFont::finalizeCacheEntry(const uint32_t codepoint, const int slot, const bool readSuccess) {
+  // Calculate metrics and check if glyph is empty
+  uint8_t minX = _charWidth;
+  uint8_t maxX = 0;
+  bool isEmpty = true;
+
+  if (readSuccess && _bytesPerChar > 0) {
+    for (int y = 0; y < _charHeight; y++) {
+      for (int x = 0; x < _charWidth; x++) {
+        const int byteIndex = y * _bytesPerRow + (x / 8);
+        const int bitIndex = 7 - (x % 8);
+        if ((_cache[slot].bitmap[byteIndex] >> bitIndex) & 1) {
+          isEmpty = false;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+        }
+      }
+    }
+  }
+
+  _cache[slot].codepoint = codepoint;
+  _cache[slot].lastUsed = ++_accessCounter;
+
+  // Check if this is a whitespace character (U+2000-U+200F: various spaces, U+3000: ideographic space)
+  const bool isWhitespace = (codepoint >= 0x2000 && codepoint <= 0x200F) || codepoint == 0x3000;
+
+  // Mark as notFound only if read failed or (empty AND not whitespace)
+  // Whitespace characters are expected to be empty but should still be rendered
+  // Empty ASCII slots (from --cjk-only fonts) also marked notFound so they fall through to builtin
+  _cache[slot].notFound = !readSuccess || (isEmpty && !isWhitespace);
+
+  if (!isEmpty) {
+    _cache[slot].minX = minX;
+    _cache[slot].advanceX = (maxX - minX + 1) + 2;
+  } else {
+    _cache[slot].minX = 0;
+    if (isWhitespace) {
+      if (codepoint == 0x2003) {
+        _cache[slot].advanceX = _charWidth;
+      } else if (codepoint == 0x2002) {
+        _cache[slot].advanceX = _charWidth / 2;
+      } else if (codepoint == 0x3000) {
+        _cache[slot].advanceX = _charWidth;
+      } else {
+        _cache[slot].advanceX = _charWidth / 3;
+      }
+    } else {
+      _cache[slot].advanceX = _charWidth / 3;
+    }
+  }
+}
+
+const uint8_t* ExternalFont::loadGlyphIntoSlot(const uint32_t codepoint, const int slot) {
+  removeHashEntryForSlot(slot);
+
+  const bool readSuccess = readGlyphFromSD(codepoint, _cache[slot].bitmap);
+  finalizeCacheEntry(codepoint, slot, readSuccess);
+  insertHashEntry(codepoint, slot);
+
+  return _cache[slot].notFound ? nullptr : _cache[slot].bitmap;
 }
 
 const uint8_t* ExternalFont::getGlyph(uint32_t codepoint) {
@@ -224,100 +312,7 @@ const uint8_t* ExternalFont::getGlyph(uint32_t codepoint) {
   }
 
   // Cache miss, need to read from SD card
-  int slot = getLruSlot();
-
-  // If replacing an existing entry, mark it as tombstone in hash table
-  if (_cache[slot].codepoint != 0xFFFFFFFF) {
-    int oldHash = hashCodepoint(_cache[slot].codepoint);
-    for (int i = 0; i < CACHE_SIZE; i++) {
-      int idx = (oldHash + i) % CACHE_SIZE;
-      if (_hashTable[idx] == slot) {
-        _hashTable[idx] = HASH_TOMBSTONE;
-        break;
-      }
-    }
-  }
-
-  // Read glyph from SD card
-  bool readSuccess = readGlyphFromSD(codepoint, _cache[slot].bitmap);
-
-  // Calculate metrics and check if glyph is empty
-  uint8_t minX = _charWidth;
-  uint8_t maxX = 0;
-  bool isEmpty = true;
-
-  if (readSuccess && _bytesPerChar > 0) {
-    for (int y = 0; y < _charHeight; y++) {
-      for (int x = 0; x < _charWidth; x++) {
-        int byteIndex = y * _bytesPerRow + (x / 8);
-        int bitIndex = 7 - (x % 8);
-        if ((_cache[slot].bitmap[byteIndex] >> bitIndex) & 1) {
-          isEmpty = false;
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-        }
-      }
-    }
-  }
-
-  // Update cache entry
-  _cache[slot].codepoint = codepoint;
-  _cache[slot].lastUsed = ++_accessCounter;
-
-  // Check if this is a whitespace character (U+2000-U+200F: various spaces, U+3000: ideographic space)
-  bool isWhitespace = (codepoint >= 0x2000 && codepoint <= 0x200F) || codepoint == 0x3000;
-
-  // Mark as notFound only if read failed or (empty AND not whitespace)
-  // Whitespace characters are expected to be empty but should still be rendered
-  // Empty ASCII slots (from --cjk-only fonts) also marked notFound so they fall through to builtin
-  _cache[slot].notFound = !readSuccess || (isEmpty && !isWhitespace);
-
-  // Store metrics
-  if (!isEmpty) {
-    _cache[slot].minX = minX;
-    // Variable width: content width + 2px padding
-    _cache[slot].advanceX = (maxX - minX + 1) + 2;
-  } else {
-    _cache[slot].minX = 0;
-    // Special handling for whitespace characters
-    if (isWhitespace) {
-      // em-space (U+2003) and similar should be full-width (same as CJK char)
-      // en-space (U+2002) should be half-width
-      // Other spaces use appropriate widths
-      if (codepoint == 0x2003) {
-        // em-space: full CJK character width
-        _cache[slot].advanceX = _charWidth;
-      } else if (codepoint == 0x2002) {
-        // en-space: half CJK character width
-        _cache[slot].advanceX = _charWidth / 2;
-      } else if (codepoint == 0x3000) {
-        // Ideographic space (CJK full-width space): full width
-        _cache[slot].advanceX = _charWidth;
-      } else {
-        // Other spaces: use standard space width
-        _cache[slot].advanceX = _charWidth / 3;
-      }
-    } else {
-      // Fallback for other empty glyphs
-      _cache[slot].advanceX = _charWidth / 3;
-    }
-  }
-
-  // Add to hash table (reuse tombstones or empty slots)
-  int hash = hashCodepoint(codepoint);
-  for (int i = 0; i < CACHE_SIZE; i++) {
-    int idx = (hash + i) % CACHE_SIZE;
-    if (_hashTable[idx] == HASH_EMPTY || _hashTable[idx] == HASH_TOMBSTONE) {
-      _hashTable[idx] = slot;
-      break;
-    }
-  }
-
-  if (_cache[slot].notFound) {
-    return nullptr;
-  }
-
-  return _cache[slot].bitmap;
+  return loadGlyphIntoSlot(codepoint, getLruSlot());
 }
 
 bool ExternalFont::getGlyphMetrics(uint32_t codepoint, uint8_t* outMinX, uint8_t* outAdvanceX) {
@@ -335,16 +330,16 @@ void ExternalFont::preloadGlyphs(const uint32_t* codepoints, size_t count) {
     return;
   }
 
-  // Limit to cache size to avoid thrashing
-  const size_t maxLoad = std::min(count, static_cast<size_t>(CACHE_SIZE));
-
-  // Create a sorted copy for sequential SD card access
-  // Sequential reads are much faster than random seeks
-  std::vector<uint32_t> sorted(codepoints, codepoints + maxLoad);
+  // Create a sorted copy for sequential SD card access.
+  // Sorting first lets us dedupe before applying cache-size limits.
+  std::vector<uint32_t> sorted(codepoints, codepoints + count);
   std::sort(sorted.begin(), sorted.end());
 
   // Remove duplicates
   sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  if (sorted.size() > static_cast<size_t>(CACHE_SIZE)) {
+    sorted.resize(CACHE_SIZE);
+  }
 
   LOG_INF(TAG, "Preloading %zu unique glyphs", sorted.size());
   const unsigned long startTime = millis();
@@ -359,8 +354,8 @@ void ExternalFont::preloadGlyphs(const uint32_t* codepoints, size_t count) {
       continue;
     }
 
-    // Load into cache (getGlyph handles all the cache management)
-    getGlyph(cp);
+    const int slot = getLruSlot();
+    loadGlyphIntoSlot(cp, slot);
     loaded++;
   }
 

@@ -41,8 +41,17 @@ struct Settings {
   // Auto-sleep timeout (in minutes)
   enum AutoSleepTimeout : uint8_t { Sleep5Min = 0, Sleep10Min = 1, Sleep15Min = 2, Sleep30Min = 3, SleepNever = 4 };
 
-  // Pages per full refresh (to clear ghosting)
-  enum PagesPerRefresh : uint8_t { PPR1 = 0, PPR5 = 1, PPR10 = 2, PPR15 = 3, PPR30 = 4 };
+  // Pages per full refresh (to clear ghosting); 0 disables forced refreshes
+  enum PagesPerRefresh : uint8_t {
+    PPR0 = 0,
+    PPR1 = 1,
+    PPR5 = 2,
+    PPR10 = 3,
+    PPR15 = 4,
+    PPR30 = 5,
+    PPR60 = 6,
+    PPR100 = 7
+  };
 
   // Paragraph alignment (values match TextBlock::BLOCK_STYLE)
   enum ParagraphAlignment : uint8_t { AlignJustified = 0, AlignLeft = 1, AlignCenter = 2, AlignRight = 3 };
@@ -85,6 +94,8 @@ struct Settings {
   char fileListSelectedName[128] = "";  // FileListState: last selected filename
   uint16_t fileListSelectedIndex = 0;   // FileListState: last selected index
   uint8_t frontButtonLayout = FrontBCLR;
+  uint8_t transitionFullRefresh = 1;    // Use clean refresh on first render after major state transitions
+  uint8_t pendingSleepWake = 0;         // 1 when device intentionally entered deep sleep and next boot should resume
 
   // Persistence (using drivers::Storage wrapper)
   Result<void> load(drivers::Storage& storage);
@@ -116,7 +127,7 @@ struct Settings {
   bool hasExternalReaderFont(const Theme& theme) const;
 
   int getPagesPerRefreshValue() const {
-    constexpr int values[] = {1, 5, 10, 15, 30};
+    constexpr int values[] = {0, 1, 5, 10, 15, 30, 60, 100};
     return values[pagesPerRefresh];
   }
 

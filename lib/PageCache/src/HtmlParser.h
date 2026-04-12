@@ -39,7 +39,7 @@ class HtmlParser : public ContentParser {
   bool parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages = 0,
                   const AbortCallback& shouldAbort = nullptr) override;
   bool hasMoreContent() const override { return hasMore_; }
-  bool canResume() const override { return initialized_ && liveParser_ != nullptr; }
+  bool canResume() const override;
   void reset() override;
   const std::vector<std::pair<std::string, uint16_t>>& getAnchorMap() const override;
 };

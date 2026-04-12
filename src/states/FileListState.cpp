@@ -31,6 +31,8 @@ FileListState::FileListState(GfxRenderer& renderer)
       goHome_(false),
       firstRender_(true),
       currentScreen_(Screen::Browse),
+      lastRenderedPageStart_(-1),
+      lastRenderedScreen_(Screen::ConfirmDelete),
       confirmView_{} {
   strcpy(currentDir_, "/");
   selectedPath_[0] = '\0';
@@ -63,8 +65,13 @@ void FileListState::enter(Core& core) {
   needsRender_ = true;
   hasSelection_ = false;
   goHome_ = false;
+  if (core.pendingUiReturnFromReader && core.pendingReaderReturnState == StateId::FileList) {
+    core.pendingUiReturnFromReader = false;
+  }
   firstRender_ = true;
   currentScreen_ = Screen::Browse;
+  lastRenderedPageStart_ = -1;
+  lastRenderedScreen_ = Screen::ConfirmDelete;
   selectedPath_[0] = '\0';
 
   loadFiles(core);
@@ -96,6 +103,8 @@ void FileListState::exit(Core& core) { LOG_INF(TAG, "Exiting"); }
 void FileListState::loadFiles(Core& core) {
   files_.clear();
   files_.reserve(512);  // Pre-allocate for large libraries
+  lastRenderedPageStart_ = -1;
+  lastRenderedScreen_ = Screen::ConfirmDelete;
 
   FsFile dir;
   auto result = core.storage.openDir(currentDir_, dir);
@@ -328,37 +337,52 @@ void FileListState::render(Core& core) {
   if (currentScreen_ == Screen::ConfirmDelete) {
     ui::render(renderer_, theme, confirmView_);
     confirmView_.needsRender = false;
+    lastRenderedScreen_ = Screen::ConfirmDelete;
+    lastRenderedPageStart_ = -1;
     needsRender_ = false;
     core.display.markDirty();
     return;
   }
-
-  renderer_.clearScreen(theme.backgroundColor);
-
-  // Title with page indicator
-  char title[32];
-  if (getTotalPages() > 1) {
-    snprintf(title, sizeof(title), "Books (%d/%d)", getCurrentPage(), getTotalPages());
-  } else {
-    strcpy(title, "Books");
-  }
-  renderer_.drawCenteredText(theme.readerFontId, 10, title, theme.primaryTextBlack, BOLD);
 
   // Empty state
   if (files_.empty()) {
+    renderer_.clearScreen(theme.backgroundColor);
     renderer_.drawText(theme.uiFontId, 20, 60, "No books found", theme.primaryTextBlack);
     renderer_.displayBuffer();
+    lastRenderedScreen_ = Screen::Browse;
+    lastRenderedPageStart_ = -1;
     needsRender_ = false;
     core.display.markDirty();
     return;
   }
 
-  // Draw current page of items
   constexpr int listStartY = 60;
+  constexpr int bottomMargin = 70;
   const int itemHeight = theme.itemHeight + theme.itemSpacing;
   const int pageItems = getPageItems();
   const int pageStart = getPageStartIndex();
   const int pageEnd = std::min(pageStart + pageItems, static_cast<int>(files_.size()));
+  const int listHeight = renderer_.getScreenHeight() - listStartY - bottomMargin;
+  const bool partialRefresh =
+      !firstRender_ && lastRenderedScreen_ == Screen::Browse && pageStart == lastRenderedPageStart_;
+
+  if (partialRefresh) {
+    renderer_.preparePartialUpdateFrame();
+    renderer_.clearArea(0, listStartY, renderer_.getScreenWidth(), listHeight, theme.backgroundColor);
+  } else {
+    renderer_.clearScreen(theme.backgroundColor);
+
+    char title[32];
+    if (getTotalPages() > 1) {
+      snprintf(title, sizeof(title), "Books (%d/%d)", getCurrentPage(), getTotalPages());
+    } else {
+      strcpy(title, "Books");
+    }
+    renderer_.drawCenteredText(theme.readerFontId, 10, title, theme.primaryTextBlack, BOLD);
+
+    const char* backLabel = isAtRoot() ? "Home" : "Back";
+    ui::buttonBar(renderer_, theme, backLabel, "Open", "", "Delete");
+  }
 
   for (int i = pageStart; i < pageEnd; i++) {
     const int y = listStartY + (i - pageStart) * itemHeight;
@@ -366,16 +390,23 @@ void FileListState::render(Core& core) {
                   static_cast<size_t>(i) == selectedIndex_);
   }
 
-  // Button hints - "Home" if at root, "Back" if in subfolder
-  const char* backLabel = isAtRoot() ? "Home" : "Back";
-  ui::buttonBar(renderer_, theme, backLabel, "Open", "", "Delete");
-
-  if (firstRender_) {
-    renderer_.displayBuffer(EInkDisplay::HALF_REFRESH);
+  if (partialRefresh) {
+    renderer_.displayBuffer();
+  } else if (firstRender_) {
+    if (core.wokeFromSleep) {
+      renderer_.displayBuffer(EInkDisplay::FAST_REFRESH);
+      core.wokeFromSleep = false;
+    } else if (core.settings.transitionFullRefresh) {
+      renderer_.displayBuffer(EInkDisplay::HALF_REFRESH);
+    } else {
+      renderer_.displayBuffer(EInkDisplay::FAST_REFRESH);
+    }
     firstRender_ = false;
   } else {
     renderer_.displayBuffer();
   }
+  lastRenderedScreen_ = Screen::Browse;
+  lastRenderedPageStart_ = pageStart;
   needsRender_ = false;
   core.display.markDirty();
 }
@@ -438,8 +469,16 @@ void FileListState::openSelected(Core& core) {
     core.settings.fileListSelectedName[sizeof(core.settings.fileListSelectedName) - 1] = '\0';
     core.settings.fileListSelectedIndex = selectedIndex_;
 
-    // Select file - transition to Reader mode via restart
+    // Select file - transition directly in UI mode when transition cleanup is disabled.
     LOG_INF(TAG, "Selected: %s", selectedPath_);
+    if (!core.settings.transitionFullRefresh) {
+      strncpy(core.buf.path, selectedPath_, sizeof(core.buf.path) - 1);
+      core.buf.path[sizeof(core.buf.path) - 1] = '\0';
+      core.pendingDirectReaderTransition = true;
+      core.pendingReaderReturnState = StateId::FileList;
+      hasSelection_ = true;
+      return;
+    }
     showTransitionNotification("Opening book...");
     saveTransition(BootMode::READER, selectedPath_, ReturnTo::FILE_MANAGER);
     vTaskDelay(50 / portTICK_PERIOD_MS);

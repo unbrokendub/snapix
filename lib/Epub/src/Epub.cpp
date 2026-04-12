@@ -2,6 +2,7 @@
 
 #include <CoverHelpers.h>
 #include <FsHelpers.h>
+#include <GfxRenderer.h>
 #include <ImageConverter.h>
 #include <Logging.h>
 #include <SDCardManager.h>
@@ -14,6 +15,50 @@
 #include "Epub/parsers/ContentOpfParser.h"
 #include "Epub/parsers/TocNavParser.h"
 #include "Epub/parsers/TocNcxParser.h"
+
+extern GfxRenderer renderer;
+
+namespace {
+uint8_t* sharedZipDictBuffer() {
+  // Reuse the already-static display framebuffer as uzlib's history buffer
+  // during EPUB metadata extraction, instead of requesting a fresh 32KB heap
+  // block after a fragmented FB2 session.
+  return renderer.getFrameBuffer();
+}
+
+std::string directoryForItemPath(const std::string& itemPath) {
+  const size_t slashPos = itemPath.find_last_of('/');
+  if (slashPos == std::string::npos) {
+    return {};
+  }
+  return itemPath.substr(0, slashPos + 1);
+}
+
+std::string canonicalizeHref(const std::string& href) {
+  if (href.empty()) return {};
+
+  std::string normalized = FsHelpers::normalisePath(href);
+  while (!normalized.empty() && normalized.front() == '/') {
+    normalized.erase(normalized.begin());
+  }
+  return normalized;
+}
+
+bool hrefsEquivalent(const std::string& lhs, const std::string& rhs) {
+  if (lhs.empty() || rhs.empty()) return false;
+  if (lhs == rhs) return true;
+
+  if (lhs.size() > rhs.size() && lhs.compare(lhs.size() - rhs.size(), rhs.size(), rhs) == 0) {
+    return lhs[lhs.size() - rhs.size() - 1] == '/';
+  }
+
+  if (rhs.size() > lhs.size() && rhs.compare(rhs.size() - lhs.size(), lhs.size(), lhs) == 0) {
+    return rhs[rhs.size() - lhs.size() - 1] == '/';
+  }
+
+  return false;
+}
+}  // namespace
 
 bool Epub::findContentOpfFile(std::string* contentOpfFile) const {
   const auto containerPath = "META-INF/container.xml";
@@ -32,7 +77,7 @@ bool Epub::findContentOpfFile(std::string* contentOpfFile) const {
   }
 
   // Stream read (reusing your existing stream logic)
-  if (!readItemContentsToStream(containerPath, containerParser, 512)) {
+  if (!readItemContentsToStream(containerPath, containerParser, 512, sharedZipDictBuffer())) {
     LOG_ERR(TAG, "Could not read META-INF/container.xml");
     return false;
   }
@@ -70,7 +115,7 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata) {
     return false;
   }
 
-  if (!readItemContentsToStream(contentOpfFilePath, opfParser, 1024)) {
+  if (!readItemContentsToStream(contentOpfFilePath, opfParser, 1024, sharedZipDictBuffer())) {
     LOG_ERR(TAG, "Could not read content.opf");
     return false;
   }
@@ -112,7 +157,7 @@ bool Epub::parseTocNcxFile() const {
   if (!SdMan.openFileForWrite("EBP", tmpNcxPath, tempNcxFile)) {
     return false;
   }
-  if (!readItemContentsToStream(tocNcxItem, tempNcxFile, 1024)) {
+  if (!readItemContentsToStream(tocNcxItem, tempNcxFile, 1024, sharedZipDictBuffer())) {
     tempNcxFile.close();
     return false;
   }
@@ -122,7 +167,8 @@ bool Epub::parseTocNcxFile() const {
   }
   const auto ncxSize = tempNcxFile.size();
 
-  TocNcxParser ncxParser(contentBasePath, ncxSize, bookMetadataCache.get());
+  const std::string ncxContentBasePath = directoryForItemPath(tocNcxItem);
+  TocNcxParser ncxParser(ncxContentBasePath, ncxSize, bookMetadataCache.get());
 
   if (!ncxParser.setup()) {
     LOG_ERR(TAG, "Could not setup toc ncx parser");
@@ -171,7 +217,7 @@ bool Epub::parseTocNavFile() const {
   if (!SdMan.openFileForWrite("EBP", tmpNavPath, tempNavFile)) {
     return false;
   }
-  if (!readItemContentsToStream(tocNavItem, tempNavFile, 1024)) {
+  if (!readItemContentsToStream(tocNavItem, tempNavFile, 1024, sharedZipDictBuffer())) {
     tempNavFile.close();
     return false;
   }
@@ -237,7 +283,7 @@ bool Epub::parseCssFiles() {
       continue;
     }
 
-    if (!readItemContentsToStream(cssHref, tempCssFile, 1024)) {
+    if (!readItemContentsToStream(cssHref, tempCssFile, 1024, sharedZipDictBuffer())) {
       LOG_ERR(TAG, "Failed to extract CSS: %s", cssHref.c_str());
       tempCssFile.close();
       SdMan.remove(tmpCssPath.c_str());
@@ -390,6 +436,12 @@ void Epub::setupCacheDir() const {
   const auto sectionsDir = cachePath + "/sections";
   if (!SdMan.exists(sectionsDir.c_str())) {
     SdMan.mkdir(sectionsDir.c_str());
+  }
+
+  // Create chapters subdirectory for prepared chapter HTML
+  const auto chaptersDir = cachePath + "/chapters";
+  if (!SdMan.exists(chaptersDir.c_str())) {
+    SdMan.mkdir(chaptersDir.c_str());
   }
 
   // Create images subdirectory for cached images
@@ -838,15 +890,62 @@ uint8_t* Epub::readItemContentsToBytes(const std::string& itemHref, size_t* size
   return content;
 }
 
-bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, const size_t chunkSize,
-                                    uint8_t* dictBuffer) const {
+const char* Epub::itemReadResultToString(const ItemReadResult result) {
+  switch (result) {
+    case ItemReadResult::Success:
+      return "success";
+    case ItemReadResult::Aborted:
+      return "aborted";
+    case ItemReadResult::NotFound:
+      return "not-found";
+    case ItemReadResult::ArchiveError:
+      return "archive-error";
+    case ItemReadResult::IoError:
+      return "io-error";
+    case ItemReadResult::WriteError:
+      return "write-error";
+    case ItemReadResult::OpenFailed:
+      return "open-failed";
+  }
+  return "unknown";
+}
+
+Epub::ItemReadResult Epub::readItemContentsToStreamDetailed(const std::string& itemHref, Print& out,
+                                                            const size_t chunkSize, uint8_t* dictBuffer,
+                                                            const std::function<bool()>& shouldAbort) const {
   if (itemHref.empty()) {
     LOG_ERR(TAG, "Failed to read item, empty href");
-    return false;
+    return ItemReadResult::NotFound;
   }
 
   const std::string path = FsHelpers::normalisePath(itemHref);
-  return ZipFile(filepath).readFileToStream(path.c_str(), out, chunkSize, dictBuffer);
+  switch (ZipFile(filepath).readFileToStreamDetailed(path.c_str(), out, chunkSize, dictBuffer, shouldAbort)) {
+    case ZipFile::StreamReadResult::Success:
+      return ItemReadResult::Success;
+    case ZipFile::StreamReadResult::Aborted:
+      return ItemReadResult::Aborted;
+    case ZipFile::StreamReadResult::NotFound:
+      return ItemReadResult::NotFound;
+    case ZipFile::StreamReadResult::WriteError:
+      return ItemReadResult::WriteError;
+    case ZipFile::StreamReadResult::OpenFailed:
+      return ItemReadResult::OpenFailed;
+    case ZipFile::StreamReadResult::InvalidOffset:
+    case ZipFile::StreamReadResult::UnsupportedMethod:
+    case ZipFile::StreamReadResult::DecompressionError:
+    case ZipFile::StreamReadResult::SizeMismatch:
+      return ItemReadResult::ArchiveError;
+    case ZipFile::StreamReadResult::AllocFailed:
+    case ZipFile::StreamReadResult::ReadError:
+      return ItemReadResult::IoError;
+  }
+  return ItemReadResult::ArchiveError;
+}
+
+bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, const size_t chunkSize,
+                                    uint8_t* dictBuffer, const std::function<bool()>& shouldAbort) const {
+  return readItemContentsToStreamDetailed(itemHref, out, chunkSize, dictBuffer, shouldAbort) ==
+         ItemReadResult::Success;
 }
 
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {
@@ -897,24 +996,49 @@ int Epub::getTocItemsCount() const {
   return bookMetadataCache->getTocCount();
 }
 
-// work out the section index for a toc index
-int Epub::getSpineIndexForTocIndex(const int tocIndex) const {
+int Epub::resolveTocSpineIndex(const int tocIndex) const {
   if (!bookMetadataCache || !bookMetadataCache->isLoaded()) {
-    LOG_ERR(TAG, "getSpineIndexForTocIndex called but cache not loaded");
-    return 0;
+    LOG_ERR(TAG, "resolveTocSpineIndex called but cache not loaded");
+    return -1;
   }
 
   if (tocIndex < 0 || tocIndex >= bookMetadataCache->getTocCount()) {
-    LOG_ERR(TAG, "getSpineIndexForTocIndex: tocIndex %d out of range", tocIndex);
-    return 0;
+    LOG_ERR(TAG, "resolveTocSpineIndex: tocIndex %d out of range", tocIndex);
+    return -1;
   }
 
-  const int spineIndex = bookMetadataCache->getTocEntry(tocIndex).spineIndex;
+  const auto tocEntry = bookMetadataCache->getTocEntry(tocIndex);
+  if (tocEntry.spineIndex >= 0 && tocEntry.spineIndex < bookMetadataCache->getSpineCount()) {
+    return tocEntry.spineIndex;
+  }
+
+  const std::string canonicalHref = canonicalizeHref(tocEntry.href);
+  if (canonicalHref.empty()) {
+    LOG_ERR(TAG, "resolveTocSpineIndex: empty href for TOC index %d", tocIndex);
+    return -1;
+  }
+
+  for (int i = 0; i < bookMetadataCache->getSpineCount(); i++) {
+    const auto spineEntry = bookMetadataCache->getSpineEntry(i);
+    const std::string canonicalSpineHref = canonicalizeHref(spineEntry.href);
+    if (hrefsEquivalent(canonicalSpineHref, canonicalHref)) {
+      LOG_INF(TAG, "Recovered spine index %d for TOC index %d via href match: %s", i, tocIndex,
+              canonicalHref.c_str());
+      return i;
+    }
+  }
+
+  LOG_ERR(TAG, "resolveTocSpineIndex: no spine match for TOC index %d href %s", tocIndex, canonicalHref.c_str());
+  return -1;
+}
+
+// work out the section index for a toc index
+int Epub::getSpineIndexForTocIndex(const int tocIndex) const {
+  const int spineIndex = resolveTocSpineIndex(tocIndex);
   if (spineIndex < 0) {
     LOG_ERR(TAG, "Section not found for TOC index %d", tocIndex);
     return 0;
   }
-
   return spineIndex;
 }
 

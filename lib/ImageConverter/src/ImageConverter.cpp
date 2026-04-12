@@ -3,6 +3,7 @@
 #include <FsHelpers.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
+#include <SharedSpiLock.h>
 
 #define TAG "IMG_CONV"
 #include <PngToBmpConverter.h>
@@ -15,7 +16,8 @@ class JpegImageConverter : public ImageConverter {
   bool convert(FsFile& input, Print& output, const ImageConvertConfig& config) override {
     // Quick mode: simple threshold instead of dithering
     if (config.quickMode) {
-      return JpegToBmpConverter::jpegFileToBmpStreamQuick(input, output, config.maxWidth, config.maxHeight);
+      return JpegToBmpConverter::jpegFileToBmpStreamQuick(input, output, config.maxWidth, config.maxHeight,
+                                                          config.shouldAbort);
     }
     if (config.maxWidth == 450 && config.maxHeight == 750 && !config.shouldAbort) {
       return config.oneBit ? JpegToBmpConverter::jpegFileTo1BitBmpStream(input, output)
@@ -35,7 +37,8 @@ class PngImageConverter : public ImageConverter {
   bool convert(FsFile& input, Print& output, const ImageConvertConfig& config) override {
     // Quick mode: simple threshold instead of dithering
     if (config.quickMode) {
-      return PngToBmpConverter::pngFileToBmpStreamQuick(input, output, config.maxWidth, config.maxHeight);
+      return PngToBmpConverter::pngFileToBmpStreamQuick(input, output, config.maxWidth, config.maxHeight,
+                                                        config.shouldAbort);
     }
     // Note: PNG converter always produces 2-bit output. Unlike JPEG, PNG does not support
     // 1-bit dithering (oneBit flag is ignored). PNG thumbnails will be slightly larger but
@@ -85,6 +88,12 @@ ImageConverter* ImageConverterFactory::getConverter(const std::string& filePath)
 
 bool ImageConverterFactory::convertToBmp(const std::string& inputPath, const std::string& outputPath,
                                          const ImageConvertConfig& config) {
+  papyrix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    LOG_ERR(config.logTag, "Shared SPI lock unavailable for image conversion");
+    return false;
+  }
+
   ImageConverter* converter = getConverter(inputPath);
   if (!converter) {
     LOG_ERR(config.logTag, "Unsupported image format: %s", inputPath.c_str());

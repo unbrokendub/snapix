@@ -10,5 +10,6 @@ class PngToBmpConverter {
   static bool pngFileToBmpStreamWithSize(FsFile& pngFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight,
                                          const std::function<bool()>& shouldAbort = nullptr);
   // Quick preview mode: simple threshold instead of dithering (faster but lower quality)
-  static bool pngFileToBmpStreamQuick(FsFile& pngFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight);
+  static bool pngFileToBmpStreamQuick(FsFile& pngFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight,
+                                      const std::function<bool()>& shouldAbort = nullptr);
 };

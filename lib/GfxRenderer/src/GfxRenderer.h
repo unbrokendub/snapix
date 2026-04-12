@@ -37,7 +37,7 @@ class GfxRenderer {
   EInkDisplay& einkDisplay;
   RenderMode renderMode;
   Orientation orientation;
-  uint8_t* frameBuffer = nullptr;
+  mutable uint8_t* frameBuffer = nullptr;
   uint8_t* bwBufferChunks[BW_BUFFER_NUM_CHUNKS] = {nullptr};
   std::map<int, EpdFontFamily> fontMap;
   // Streaming fonts: [fontId] -> array of [REGULAR, BOLD] (external fonts have no italic)
@@ -182,6 +182,8 @@ class GfxRenderer {
   int getScreenHeight() const;
   void displayBuffer(EInkDisplay::RefreshMode refreshMode = EInkDisplay::FAST_REFRESH,
                      bool turnOffScreen = false) const;
+  void prepareCurrentFrameAsFastBaseline() const;
+  void preparePartialUpdateFrame() const;
   // EXPERIMENTAL: Windowed update - display only a rectangular region
   void displayWindow(int x, int y, int width, int height, bool turnOffScreen = false) const;
   void invertScreen() const;
@@ -198,14 +200,17 @@ class GfxRenderer {
 
   // Text
   int getTextWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  int getTextAdvanceWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   void drawCenteredText(int fontId, int y, const char* text, bool black = true,
                         EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   void drawText(int fontId, int x, int y, const char* text, bool black = true,
                 EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   int getSpaceWidth(int fontId) const;
+  int getSpaceWidth(int fontId, EpdFontFamily::Style style) const;
   int getFontAscenderSize(int fontId) const;
   int getLineHeight(int fontId) const;
   int getEffectiveLineHeight(int fontId) const;
+  void warmTextGlyphs(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   std::string truncatedText(const int fontId, const char* text, const int maxWidth,
                             const EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   // Breaks a single word into chunks that fit within maxWidth, adding "-" where needed

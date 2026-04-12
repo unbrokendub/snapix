@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <string>
 
 namespace html5 {
@@ -7,6 +8,7 @@ namespace html5 {
 // Converts <img src="x"> to <img src="x" />
 // Processes file in streaming mode for memory efficiency
 // Returns true on success
-bool normalizeVoidElements(const std::string& inputPath, const std::string& outputPath);
+bool normalizeVoidElements(const std::string& inputPath, const std::string& outputPath,
+                           const std::function<bool()>& shouldAbort = nullptr);
 
 }  // namespace html5

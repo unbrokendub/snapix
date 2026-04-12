@@ -7,12 +7,14 @@
 #include <Logging.h>
 #include <Page.h>
 #include <SDCardManager.h>
+#include <SharedSpiLock.h>
 #include <Utf8.h>
 #include <esp_heap_caps.h>
 #include <expat.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <algorithm>
 #define TAG "HTML_PARSER"
 
 #include "../htmlEntities.h"
@@ -39,6 +41,389 @@ const char* SKIP_TAGS[] = {"head"};
 constexpr int NUM_SKIP_TAGS = sizeof(SKIP_TAGS) / sizeof(SKIP_TAGS[0]);
 
 bool isWhitespace(const char c) { return c == ' ' || c == '\r' || c == '\n' || c == '\t'; }
+
+enum TagFlags : uint16_t {
+  TAG_None = 0,
+  TAG_Header = 1 << 0,
+  TAG_Block = 1 << 1,
+  TAG_Bold = 1 << 2,
+  TAG_Italic = 1 << 3,
+  TAG_Image = 1 << 4,
+  TAG_Skip = 1 << 5,
+  TAG_ListOrdered = 1 << 6,
+  TAG_ListUnordered = 1 << 7,
+  TAG_LineBreak = 1 << 8,
+  TAG_ListItem = 1 << 9,
+};
+
+inline TagFlags operator|(TagFlags lhs, TagFlags rhs) {
+  return static_cast<TagFlags>(static_cast<uint16_t>(lhs) | static_cast<uint16_t>(rhs));
+}
+
+inline bool hasTagFlag(TagFlags flags, TagFlags flag) {
+  return (static_cast<uint16_t>(flags) & static_cast<uint16_t>(flag)) != 0;
+}
+
+TagFlags classifyTag(const char* name) {
+  switch (name[0]) {
+    case 'a':
+      if (strcmp(name, "answer") == 0) return TAG_Block;
+      return TAG_None;
+    case 'b':
+      if (strcmp(name, "b") == 0) return TAG_Bold;
+      if (strcmp(name, "br") == 0) return TAG_Block | TAG_LineBreak;
+      if (strcmp(name, "blockquote") == 0) return TAG_Block;
+      return TAG_None;
+    case 'd':
+      if (strcmp(name, "div") == 0) return TAG_Block;
+      return TAG_None;
+    case 'e':
+      if (strcmp(name, "em") == 0) return TAG_Italic;
+      return TAG_None;
+    case 'f':
+      if (strcmp(name, "figcaption") == 0) return TAG_Block;
+      return TAG_None;
+    case 'h':
+      if (strcmp(name, "head") == 0) return TAG_Skip;
+      if (name[1] >= '1' && name[1] <= '6' && name[2] == '\0') return TAG_Header;
+      return TAG_None;
+    case 'i':
+      if (strcmp(name, "i") == 0) return TAG_Italic;
+      if (strcmp(name, "img") == 0) return TAG_Image;
+      return TAG_None;
+    case 'l':
+      if (strcmp(name, "li") == 0) return TAG_Block | TAG_ListItem;
+      return TAG_None;
+    case 'o':
+      if (strcmp(name, "ol") == 0) return TAG_ListOrdered;
+      return TAG_None;
+    case 'p':
+      if (strcmp(name, "p") == 0) return TAG_Block;
+      return TAG_None;
+    case 'q':
+      if (strcmp(name, "question") == 0 || strcmp(name, "quotation") == 0) return TAG_Block;
+      return TAG_None;
+    case 's':
+      if (strcmp(name, "strong") == 0) return TAG_Bold;
+      return TAG_None;
+    case 'u':
+      if (strcmp(name, "ul") == 0) return TAG_ListUnordered;
+      return TAG_None;
+    default:
+      return TAG_None;
+  }
+}
+
+bool ChapterHtmlSlimParser::asciiContainsInsensitive(const char* haystack, const char* needle) {
+  if (!haystack || !needle || needle[0] == '\0') {
+    return false;
+  }
+
+  for (const char* start = haystack; *start != '\0'; ++start) {
+    size_t index = 0;
+    while (needle[index] != '\0' && start[index] != '\0') {
+      char hay = start[index];
+      char nee = needle[index];
+      if (hay >= 'A' && hay <= 'Z') hay = static_cast<char>(hay + ('a' - 'A'));
+      if (nee >= 'A' && nee <= 'Z') nee = static_cast<char>(nee + ('a' - 'A'));
+      if (hay != nee) {
+        break;
+      }
+      ++index;
+    }
+    if (needle[index] == '\0') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool ChapterHtmlSlimParser::looksLikeCaptionTag(const char* name, const char* classAttr, const char* idAttr) {
+  if (name && strcmp(name, "figcaption") == 0) {
+    return true;
+  }
+
+  return asciiContainsInsensitive(classAttr, "caption") || asciiContainsInsensitive(classAttr, "figcaption") ||
+         asciiContainsInsensitive(classAttr, "legend") || asciiContainsInsensitive(idAttr, "caption") ||
+         asciiContainsInsensitive(idAttr, "figcaption") || asciiContainsInsensitive(idAttr, "legend");
+}
+
+bool ChapterHtmlSlimParser::looksLikeCaptionText(const ParsedText& text) const {
+  if (text.size() == 0 || text.size() > 24) {
+    return false;
+  }
+
+  const std::string preview = text.previewText(10, 128);
+  if (preview.empty()) {
+    return false;
+  }
+
+  static const char* kCaptionPrefixes[] = {
+      "Рисунок",    "рисунок",     "Рис.",       "рис.",       "Figure",
+      "figure",     "Fig.",        "fig.",       "Иллюстрация", "иллюстрация",
+      "Схема",      "схема",
+  };
+
+  for (const char* prefix : kCaptionPrefixes) {
+    const size_t prefixLen = strlen(prefix);
+    if (preview.size() >= prefixLen && preview.compare(0, prefixLen, prefix) == 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool ChapterHtmlSlimParser::measureTextBlockLineCount(const ParsedText& text, size_t& lineCount) {
+  lineCount = 0;
+  ParsedText previewBlock = text;
+  return previewBlock.layoutAndExtractLines(
+      renderer, config.fontId, config.viewportWidth,
+      [&lineCount](const std::shared_ptr<TextBlock>&) { ++lineCount; }, true,
+      [this]() -> bool { return stopRequested_ || shouldAbort(); });
+}
+
+int ChapterHtmlSlimParser::paragraphSpacing() const {
+  switch (config.spacingLevel) {
+    case 1:
+      return effectiveLineHeight_ / 4;
+    case 3:
+      return effectiveLineHeight_;
+    default:
+      return 0;
+  }
+}
+
+void ChapterHtmlSlimParser::recomputeCurrentPageNextY() {
+  if (!currentPage || currentPage->elements.empty()) {
+    currentPageNextY = 0;
+    return;
+  }
+
+  int16_t maxBottom = 0;
+  for (const auto& element : currentPage->elements) {
+    switch (element->getTag()) {
+      case TAG_PageLine:
+        maxBottom = std::max<int16_t>(maxBottom, element->yPos + effectiveLineHeight_);
+        break;
+      case TAG_PageImage: {
+        const auto& image = static_cast<const PageImage&>(*element);
+        maxBottom = std::max<int16_t>(maxBottom, element->yPos + image.getImageBlock().getHeight() + effectiveLineHeight_);
+        break;
+      }
+    }
+  }
+
+  currentPageNextY = maxBottom;
+}
+
+bool ChapterHtmlSlimParser::completeCurrentPageAndStartFresh() {
+  if (currentPage && !currentPage->elements.empty()) {
+    ++pagesCreated_;
+    if (!completePageFn(std::move(currentPage))) {
+      stopRequested_ = true;
+      if (xmlParser_) {
+        XML_StopParser(xmlParser_, XML_TRUE);
+      }
+      return false;
+    }
+    parseStartTime_ = millis();
+  }
+
+  currentPage.reset(new Page());
+  currentPageNextY = 0;
+  return true;
+}
+
+bool ChapterHtmlSlimParser::placePendingImage() {
+  if (!pendingPageImage_) {
+    return true;
+  }
+
+  auto image = pendingPageImage_;
+  pendingPageImage_.reset();
+  LOG_DBG(TAG, "Replaying deferred image node=%s src=%s", image->getSourceNodeId().empty() ? "-" : image->getSourceNodeId().c_str(),
+          image->getSourcePath().empty() ? "-" : image->getSourcePath().c_str());
+  addImageToPage(image);
+  if (stopRequested_ && !pendingPageImage_) {
+    pendingPageImage_ = std::move(image);
+  }
+  return !stopRequested_;
+}
+
+void ChapterHtmlSlimParser::maybeKeepTrailingImageWithCaption(const bool likelyCaption) {
+  if (stopRequested_ || !likelyCaption || !currentPage || !currentTextBlock || currentTextBlock->isEmpty() ||
+      currentPage->elements.empty()) {
+    return;
+  }
+
+  PageElement* lastElement = currentPage->elements.back().get();
+  if (!lastElement || lastElement->getTag() != TAG_PageImage) {
+    return;
+  }
+
+  size_t lineCount = 0;
+  if (!measureTextBlockLineCount(*currentTextBlock, lineCount) || stopRequested_ || lineCount == 0) {
+    return;
+  }
+
+  const auto& pageImage = static_cast<const PageImage&>(*lastElement);
+  const int captionHeight = static_cast<int>(lineCount) * effectiveLineHeight_ + paragraphSpacing();
+  if (currentPageNextY + captionHeight <= config.viewportHeight) {
+    return;
+  }
+
+  const int requiredHeight = pageImage.getImageBlock().getHeight() + effectiveLineHeight_ + captionHeight;
+  if (requiredHeight > config.viewportHeight) {
+    return;
+  }
+
+  const std::shared_ptr<ImageBlock> imageBlock = pageImage.getImageBlockShared();
+  const std::string& imageRef =
+      imageBlock->getSourceNodeId().empty() ? imageBlock->getSourcePath() : imageBlock->getSourceNodeId();
+  LOG_DBG(TAG, "Moving image to keep caption on same page: %s", imageRef.empty() ? "-" : imageRef.c_str());
+
+  currentPage->elements.pop_back();
+  recomputeCurrentPageNextY();
+
+  if (!currentPage->elements.empty() && !completeCurrentPageAndStartFresh()) {
+    pendingPageImage_ = imageBlock;
+    return;
+  }
+
+  if (!currentPage) {
+    currentPage.reset(new Page());
+    currentPageNextY = 0;
+  }
+
+  addImageToPage(imageBlock);
+}
+
+void ChapterHtmlSlimParser::maybeDeferTrailingTallImageText(const bool likelyCaption) {
+  if (stopRequested_ || likelyCaption || !currentPage || !currentTextBlock || currentTextBlock->isEmpty() ||
+      currentPage->elements.empty()) {
+    return;
+  }
+
+  PageElement* lastElement = currentPage->elements.back().get();
+  if (!lastElement || lastElement->getTag() != TAG_PageImage) {
+    return;
+  }
+
+  const auto& pageImage = static_cast<const PageImage&>(*lastElement);
+  if (pageImage.getImageBlock().getHeight() <= config.viewportHeight / 2) {
+    return;
+  }
+
+  LOG_DBG(TAG, "Deferring text after tall image to next page");
+  completeCurrentPageAndStartFresh();
+}
+
+enum class ImageInterruptReason : uint8_t {
+  None,
+  StopRequested,
+  Timeout,
+  LowMemory,
+};
+
+const char* readItemStatusToString(const ChapterHtmlSlimParser::ReadItemStatus status) {
+  switch (status) {
+    case ChapterHtmlSlimParser::ReadItemStatus::Success:
+      return "success";
+    case ChapterHtmlSlimParser::ReadItemStatus::Aborted:
+      return "aborted";
+    case ChapterHtmlSlimParser::ReadItemStatus::NotFound:
+      return "not-found";
+    case ChapterHtmlSlimParser::ReadItemStatus::ArchiveError:
+      return "archive-error";
+    case ChapterHtmlSlimParser::ReadItemStatus::IoError:
+      return "io-error";
+    case ChapterHtmlSlimParser::ReadItemStatus::WriteError:
+      return "write-error";
+  }
+  return "unknown";
+}
+
+const char* cachedImageStatusToString(const ChapterHtmlSlimParser::CachedImageStatus status) {
+  switch (status) {
+    case ChapterHtmlSlimParser::CachedImageStatus::Success:
+      return "success";
+    case ChapterHtmlSlimParser::CachedImageStatus::RetryableInterruption:
+      return "retryable-interruption";
+    case ChapterHtmlSlimParser::CachedImageStatus::TerminalFailure:
+      return "terminal-failure";
+  }
+  return "unknown";
+}
+
+const char* imageFailureClassToString(const ChapterHtmlSlimParser::ImageFailureClass failureClass) {
+  switch (failureClass) {
+    case ChapterHtmlSlimParser::ImageFailureClass::None:
+      return "none";
+    case ChapterHtmlSlimParser::ImageFailureClass::AbortRequested:
+      return "abort-requested";
+    case ChapterHtmlSlimParser::ImageFailureClass::Timeout:
+      return "timeout";
+    case ChapterHtmlSlimParser::ImageFailureClass::LowMemory:
+      return "low-memory";
+    case ChapterHtmlSlimParser::ImageFailureClass::DataUri:
+      return "data-uri";
+    case ChapterHtmlSlimParser::ImageFailureClass::UnsupportedFormat:
+      return "unsupported-format";
+    case ChapterHtmlSlimParser::ImageFailureClass::CacheHit:
+      return "cache-hit";
+    case ChapterHtmlSlimParser::ImageFailureClass::CachedOpenFailed:
+      return "cached-open-failed";
+    case ChapterHtmlSlimParser::ImageFailureClass::CachedBmpInvalid:
+      return "cached-bmp-invalid";
+    case ChapterHtmlSlimParser::ImageFailureClass::TempOpenFailed:
+      return "temp-open-failed";
+    case ChapterHtmlSlimParser::ImageFailureClass::ExtractAborted:
+      return "extract-aborted";
+    case ChapterHtmlSlimParser::ImageFailureClass::ExtractFailed:
+      return "extract-failed";
+    case ChapterHtmlSlimParser::ImageFailureClass::ConvertAborted:
+      return "convert-aborted";
+    case ChapterHtmlSlimParser::ImageFailureClass::ConvertFailed:
+      return "convert-failed";
+    case ChapterHtmlSlimParser::ImageFailureClass::GeneratedBmpInvalid:
+      return "generated-bmp-invalid";
+    case ChapterHtmlSlimParser::ImageFailureClass::MissingSrc:
+      return "missing-src";
+    case ChapterHtmlSlimParser::ImageFailureClass::ReadItemUnavailable:
+      return "read-item-unavailable";
+    case ChapterHtmlSlimParser::ImageFailureClass::ImageCacheDisabled:
+      return "image-cache-disabled";
+  }
+  return "unknown";
+}
+
+int utf8SafePrefixLength(const char* data, const int len, const int maxBytes) {
+  const int limit = std::min(len, maxBytes);
+  int consumed = 0;
+
+  while (consumed < limit) {
+    const unsigned char lead = static_cast<unsigned char>(data[consumed]);
+    int cpLen = 1;
+    if ((lead & 0x80U) == 0) {
+      cpLen = 1;
+    } else if ((lead & 0xE0U) == 0xC0U) {
+      cpLen = 2;
+    } else if ((lead & 0xF0U) == 0xE0U) {
+      cpLen = 3;
+    } else if ((lead & 0xF8U) == 0xF0U) {
+      cpLen = 4;
+    }
+
+    if (consumed + cpLen > limit) {
+      break;
+    }
+    consumed += cpLen;
+  }
+
+  return consumed > 0 ? consumed : limit;
+}
 
 // given the start and end of a tag, check to see if it matches a known tag
 bool matches(const char* tag_name, const char* possible_tags[], const int possible_tag_count) {
@@ -75,13 +460,36 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   partWordBufferIndex = 0;
 }
 
+void ChapterHtmlSlimParser::appendPartWordBytes(const char* data, int len) {
+  int remaining = len;
+  const char* src = data;
+
+  while (remaining > 0) {
+    if (partWordBufferIndex >= MAX_WORD_SIZE) {
+      flushPartWordBuffer();
+    }
+
+    const int spaceLeft = MAX_WORD_SIZE - partWordBufferIndex;
+    const int chunkLen = utf8SafePrefixLength(src, remaining, spaceLeft);
+    memcpy(partWordBuffer + partWordBufferIndex, src, chunkLen);
+    partWordBufferIndex += chunkLen;
+    src += chunkLen;
+    remaining -= chunkLen;
+
+    if (partWordBufferIndex >= MAX_WORD_SIZE) {
+      flushPartWordBuffer();
+    }
+  }
+}
+
 // start a new text block if needed
-void ChapterHtmlSlimParser::startNewTextBlock(const TextBlock::BLOCK_STYLE style) {
+void ChapterHtmlSlimParser::startNewTextBlock(const TextBlock::BLOCK_STYLE style, const bool likelyCaption) {
   if (currentTextBlock) {
     // already have a text block running and it is empty - just reuse it
     if (currentTextBlock->isEmpty()) {
       currentTextBlock->setStyle(style);
       currentTextBlock->setRtl(pendingRtl_);
+      currentBlockLikelyCaption_ = likelyCaption;
       return;
     }
 
@@ -94,15 +502,18 @@ void ChapterHtmlSlimParser::startNewTextBlock(const TextBlock::BLOCK_STYLE style
     if (stopRequested_) {
       pendingNewTextBlock_ = true;
       pendingBlockStyle_ = style;
+      pendingBlockLikelyCaption_ = likelyCaption;
       return;
     }
   }
+  currentBlockLikelyCaption_ = likelyCaption;
   currentTextBlock.reset(new ParsedText(style, config.indentLevel, config.hyphenation, true, pendingRtl_));
 }
 
 void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char* name, const XML_Char** atts) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
   (void)atts;
+  const TagFlags tagFlags = classifyTag(name);
 
   // Prevent stack overflow from deeply nested XML
   if (self->depth >= MAX_XML_DEPTH) {
@@ -116,82 +527,129 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     return;
   }
 
-  if (matches(name, IMAGE_TAGS, NUM_IMAGE_TAGS)) {
-    std::string srcAttr;
-    std::string altText;
+  if (hasTagFlag(tagFlags, TAG_Image)) {
+    const char* srcAttr = nullptr;
+    const char* altText = nullptr;
+    const char* imageIdAttr = nullptr;
+    const char* imageClassAttr = nullptr;
     if (atts != nullptr) {
       for (int i = 0; atts[i]; i += 2) {
         if (strcmp(atts[i], "src") == 0 && atts[i + 1][0] != '\0') {
           srcAttr = atts[i + 1];
         } else if (strcmp(atts[i], "alt") == 0 && atts[i + 1][0] != '\0') {
           altText = atts[i + 1];
+        } else if (strcmp(atts[i], "id") == 0 && atts[i + 1][0] != '\0') {
+          imageIdAttr = atts[i + 1];
+        } else if (strcmp(atts[i], "class") == 0 && atts[i + 1][0] != '\0') {
+          imageClassAttr = atts[i + 1];
         }
       }
     }
 
-    LOG_DBG(TAG, "Found image: src=%s", srcAttr.empty() ? "(empty)" : srcAttr.c_str());
+    const char* nodeId = imageIdAttr ? imageIdAttr : imageClassAttr;
+    LOG_DBG(TAG, "Found image: node=%s src=%s", nodeId ? nodeId : "-", srcAttr ? srcAttr : "(empty)");
 
     // Silently skip unsupported image formats (GIF, SVG, WebP, etc.)
-    if (!srcAttr.empty() && !ImageConverterFactory::isSupported(srcAttr)) {
-      LOG_DBG(TAG, "Skipping unsupported format: %s", srcAttr.c_str());
+    if (srcAttr && !ImageConverterFactory::isSupported(srcAttr)) {
+      LOG_DBG(TAG, "Skipping unsupported format: %s", srcAttr);
       self->depth += 1;
       return;
     }
 
-    // Try to cache and display the image if we have image support configured
-    if (!srcAttr.empty() && self->readItemFn && !self->imageCachePath.empty()) {
-      // Check abort before and after image caching (conversion can take 10+ seconds for large JPEGs)
-      if (self->externalAbortCallback_ && self->externalAbortCallback_()) {
+    // Image processing inside an Expat element callback must resolve to a
+    // committed layout decision for this pass. Terminal image failures can
+    // safely degrade to placeholder text, but retryable interruptions must not
+    // be serialized into the section cache: otherwise a transient abort while
+    // background parsing is in flight permanently turns the real image into
+    // "[Image]" for later page loads. For retryable interruptions we therefore
+    // stop before committing the current image-bearing pass and force a later
+    // restart from the last durable cache boundary.
+    std::string resolvedPath;
+    std::string cachedPath;
+    std::string fallbackReason = "image-pipeline-disabled";
+    auto fallbackClass = ImageFailureClass::ImageCacheDisabled;
+    bool cacheHit = false;
+    if (srcAttr && self->readItemFn && !self->imageCachePath.empty()) {
+      const std::string srcAttrStr(srcAttr);
+      LOG_ERR(TAG, "[CONTENT][IMAGE] node start node=%s src=%s resolved=%s quick=%u", nodeId ? nodeId : "-",
+              srcAttr, FsHelpers::normalisePath(self->chapterBasePath + srcAttrStr).c_str(),
+              static_cast<unsigned>(self->quickImageDecode_));
+      CachedImageResult cacheResult = self->cacheImage(srcAttrStr);
+      cachedPath = std::move(cacheResult.cachedBmpPath);
+      resolvedPath = std::move(cacheResult.resolvedPath);
+      fallbackReason = std::move(cacheResult.failureReason);
+      fallbackClass = cacheResult.failureClass;
+      cacheHit = cacheResult.cacheHit;
+      if (self->fatalAbortRequested_) {
         self->depth += 1;
         return;
       }
-      std::string cachedPath = self->cacheImage(srcAttr);
-      if (self->externalAbortCallback_ && self->externalAbortCallback_()) {
+      if (cacheResult.status == CachedImageStatus::RetryableInterruption) {
+        LOG_ERR(
+            TAG,
+            "[CONTENT][IMAGE] interrupted node=%s src=%s resolved=%s cached=%s cacheHit=%u status=%s class=%s "
+            "reason=%s retryable=%u action=suspend-restart",
+            nodeId ? nodeId : "-", srcAttr, resolvedPath.empty() ? "-" : resolvedPath.c_str(),
+            cachedPath.empty() ? "-" : cachedPath.c_str(), static_cast<unsigned>(cacheHit),
+            cachedImageStatusToString(cacheResult.status), imageFailureClassToString(cacheResult.failureClass),
+            fallbackReason.empty() ? "unknown" : fallbackReason.c_str(), static_cast<unsigned>(cacheResult.retryable));
+        self->aborted_ = true;
         self->depth += 1;
+        self->requestCooperativeSuspend();
         return;
       }
-      if (!cachedPath.empty()) {
-        // Read image dimensions from cached BMP
-        FsFile bmpFile;
-        if (SdMan.openFileForRead("EHP", cachedPath, bmpFile)) {
-          Bitmap bitmap(bmpFile, false);
-          if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-            // Skip tiny decorative images (e.g. 1px-tall line separators) - invisible on e-paper
-            if (bitmap.getWidth() < 20 || bitmap.getHeight() < 20) {
-              bmpFile.close();
-              self->depth += 1;
-              return;
-            }
-            LOG_DBG(TAG, "Image loaded: %dx%d", bitmap.getWidth(), bitmap.getHeight());
-            auto imageBlock = std::make_shared<ImageBlock>(cachedPath, bitmap.getWidth(), bitmap.getHeight());
-            bmpFile.close();
-
-            // Flush any pending text block before adding image
-            if (self->currentTextBlock && !self->currentTextBlock->isEmpty()) {
-              self->makePages();
-            }
-
-            self->addImageToPage(imageBlock);
-            self->depth += 1;
-            return;
-          } else {
-            LOG_ERR(TAG, "BMP parse failed for cached image");
-          }
-          bmpFile.close();
-        } else {
-          LOG_ERR(TAG, "Failed to open cached BMP: %s", cachedPath.c_str());
+      if (cacheResult.success) {
+        // Skip tiny decorative images (e.g. 1px-tall line separators) - invisible on e-paper
+        if (cacheResult.width < 20 || cacheResult.height < 20) {
+          LOG_ERR(TAG, "[CONTENT][IMAGE] skip tiny node=%s src=%s resolved=%s cached=%s size=%ux%u",
+                  nodeId ? nodeId : "-", srcAttr, resolvedPath.empty() ? "-" : resolvedPath.c_str(),
+                  cachedPath.empty() ? "-" : cachedPath.c_str(), static_cast<unsigned>(cacheResult.width),
+                  static_cast<unsigned>(cacheResult.height));
+          self->depth += 1;
+          return;
         }
+        LOG_DBG(TAG, "Image loaded: %dx%d", cacheResult.width, cacheResult.height);
+        auto imageBlock = std::make_shared<ImageBlock>(cachedPath, cacheResult.width, cacheResult.height,
+                                                       nodeId ? nodeId : "", srcAttrStr, resolvedPath);
+
+        // Flush any pending text block before adding image
+        if (self->currentTextBlock && !self->currentTextBlock->isEmpty()) {
+          self->makePages();
+        }
+
+        self->addImageToPage(imageBlock);
+        self->depth += 1;
+        return;
       }
     } else {
-      LOG_DBG(TAG, "Image skipped: src=%d, readItemFn=%d, imageCachePath=%d", !srcAttr.empty(),
+      if (!srcAttr) {
+        fallbackReason = "missing-src";
+        fallbackClass = ImageFailureClass::MissingSrc;
+      } else if (!self->readItemFn) {
+        fallbackReason = "read-item-unavailable";
+        fallbackClass = ImageFailureClass::ReadItemUnavailable;
+      } else if (self->imageCachePath.empty()) {
+        fallbackReason = "image-cache-disabled";
+        fallbackClass = ImageFailureClass::ImageCacheDisabled;
+      }
+      LOG_DBG(TAG, "Image skipped: src=%d, readItemFn=%d, imageCachePath=%d", srcAttr != nullptr,
               self->readItemFn != nullptr, !self->imageCachePath.empty());
     }
+
+    LOG_ERR(TAG,
+            "[CONTENT][IMAGE] fallback parser node=%s src=%s resolved=%s cached=%s cacheHit=%u status=%s class=%s "
+            "reason=%s retryable=0 terminal=1 stage=placeholder-text",
+            nodeId ? nodeId : "-", srcAttr ? srcAttr : "-", resolvedPath.empty() ? "-" : resolvedPath.c_str(),
+            cachedPath.empty() ? "-" : cachedPath.c_str(), static_cast<unsigned>(cacheHit),
+            cachedImageStatusToString(CachedImageStatus::TerminalFailure),
+            imageFailureClassToString(fallbackClass),
+            fallbackReason.empty() ? "unknown" : fallbackReason.c_str());
 
     // Fallback: show placeholder with alt text if image processing failed
     self->startNewTextBlock(TextBlock::CENTER_ALIGN);
     if (self->currentTextBlock) {
-      if (!altText.empty()) {
-        std::string placeholder = "[Image: " + altText + "]";
+      if (altText) {
+        std::string placeholder = std::string("[Image: ") + altText + "]";
         self->currentTextBlock->addWord(placeholder.c_str(), EpdFontFamily::ITALIC);
       } else {
         self->currentTextBlock->addWord("[Image]", EpdFontFamily::ITALIC);
@@ -218,7 +676,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     return;
   }
 
-  if (matches(name, SKIP_TAGS, NUM_SKIP_TAGS)) {
+  if (hasTagFlag(tagFlags, TAG_Skip)) {
     // start skip
     self->skipUntilDepth = self->depth;
     self->depth += 1;
@@ -250,10 +708,10 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
   }
 
   // Extract class, style, dir, and id attributes
-  std::string classAttr;
-  std::string styleAttr;
-  std::string dirAttr;
-  std::string idAttr;
+  const char* classAttr = nullptr;
+  const char* styleAttr = nullptr;
+  const char* dirAttr = nullptr;
+  const char* idAttr = nullptr;
   if (atts != nullptr) {
     for (int i = 0; atts[i]; i += 2) {
       if (strcmp(atts[i], "class") == 0) {
@@ -278,18 +736,18 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       }
     }
     if (self->cssHeapOk_) {
-      cssStyle = self->cssParser_->getCombinedStyle(name, classAttr);
+      cssStyle = self->cssParser_->getCombinedStyle(name, classAttr ? classAttr : "");
     }
   }
   // Inline styles override stylesheet rules (static method, no instance needed)
-  if (!styleAttr.empty()) {
+  if (styleAttr && styleAttr[0] != '\0') {
     cssStyle.merge(CssParser::parseInlineStyle(styleAttr));
   }
   // HTML dir attribute overrides CSS direction (case-insensitive per HTML spec)
-  if (!dirAttr.empty() && strcasecmp(dirAttr.c_str(), "rtl") == 0) {
+  if (dirAttr && strcasecmp(dirAttr, "rtl") == 0) {
     cssStyle.direction = TextDirection::Rtl;
     cssStyle.hasDirection = true;
-  } else if (!dirAttr.empty() && strcasecmp(dirAttr.c_str(), "ltr") == 0) {
+  } else if (dirAttr && strcasecmp(dirAttr, "ltr") == 0) {
     cssStyle.direction = TextDirection::Ltr;
     cssStyle.hasDirection = true;
   }
@@ -308,16 +766,16 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     self->rtlUntilDepth_ = min(self->rtlUntilDepth_, self->depth);
   }
 
-  if (matches(name, HEADER_TAGS, NUM_HEADER_TAGS)) {
+  if (hasTagFlag(tagFlags, TAG_Header)) {
     self->startNewTextBlock(TextBlock::CENTER_ALIGN);
     self->alignStack_.push_back({self->depth, TextBlock::CENTER_ALIGN});
     self->boldUntilDepth = min(self->boldUntilDepth, self->depth);
-  } else if (matches(name, BLOCK_TAGS, NUM_BLOCK_TAGS)) {
-    if (strcmp(name, "br") == 0) {
+  } else if (hasTagFlag(tagFlags, TAG_Block)) {
+    if (hasTagFlag(tagFlags, TAG_LineBreak)) {
       self->flushPartWordBuffer();
       const auto style = self->currentTextBlock ? self->currentTextBlock->getStyle()
                                                 : static_cast<TextBlock::BLOCK_STYLE>(self->config.paragraphAlignment);
-      self->startNewTextBlock(style);
+      self->startNewTextBlock(style, self->currentBlockLikelyCaption_);
     } else {
       // Determine block style: CSS text-align takes precedence, then inheritance, then default
       TextBlock::BLOCK_STYLE blockStyle = static_cast<TextBlock::BLOCK_STYLE>(self->config.paragraphAlignment);
@@ -350,9 +808,9 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       if (hasExplicitAlign) {
         self->alignStack_.push_back({self->depth, blockStyle});
       }
-      self->startNewTextBlock(blockStyle);
+      self->startNewTextBlock(blockStyle, self->looksLikeCaptionTag(name, classAttr, idAttr));
 
-      if (strcmp(name, "li") == 0 && !self->listStack_.empty()) {
+      if (hasTagFlag(tagFlags, TAG_ListItem) && !self->listStack_.empty()) {
         auto& listEntry = self->listStack_.back();
         listEntry.counter++;
         char marker[12] = {};
@@ -368,17 +826,17 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         }
       }
     }
-  } else if (matches(name, BOLD_TAGS, NUM_BOLD_TAGS)) {
+  } else if (hasTagFlag(tagFlags, TAG_Bold)) {
     self->boldUntilDepth = min(self->boldUntilDepth, self->depth);
-  } else if (matches(name, ITALIC_TAGS, NUM_ITALIC_TAGS)) {
+  } else if (hasTagFlag(tagFlags, TAG_Italic)) {
     self->italicUntilDepth = min(self->italicUntilDepth, self->depth);
-  } else if (strcmp(name, "ul") == 0 || strcmp(name, "ol") == 0) {
-    self->listStack_.push_back({self->depth, strcmp(name, "ol") == 0, 0});
+  } else if (hasTagFlag(tagFlags, TAG_ListUnordered) || hasTagFlag(tagFlags, TAG_ListOrdered)) {
+    self->listStack_.push_back({self->depth, hasTagFlag(tagFlags, TAG_ListOrdered), 0});
   }
 
   // Record anchor-to-page mapping (after block handling so pagesCreated_ reflects current page)
-  if (!idAttr.empty()) {
-    self->anchorMap_.emplace_back(std::move(idAttr), self->pagesCreated_);
+  if (idAttr && idAttr[0] != '\0') {
+    self->anchorMap_.emplace_back(idAttr, self->pagesCreated_);
   }
 
   self->depth += 1;
@@ -397,55 +855,35 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
   const XML_Char FEFF_BYTE_2 = static_cast<XML_Char>(0xBB);
   const XML_Char FEFF_BYTE_3 = static_cast<XML_Char>(0xBF);
 
-  for (int i = 0; i < len; i++) {
-    if (isWhitespace(s[i])) {
-      // Currently looking at whitespace, if there's anything in the partWordBuffer, flush it
+  int offset = 0;
+  while (offset < len) {
+    while (offset < len && isWhitespace(s[offset])) {
       if (self->partWordBufferIndex > 0) {
         self->flushPartWordBuffer();
       }
-      // Skip the whitespace char
+      offset++;
+    }
+
+    if (offset + 2 < len && s[offset] == FEFF_BYTE_1 && s[offset + 1] == FEFF_BYTE_2 && s[offset + 2] == FEFF_BYTE_3) {
+      offset += 3;
       continue;
     }
 
-    // Skip BOM character (sometimes appears before em-dashes in EPUBs)
-    if (s[i] == FEFF_BYTE_1) {
-      // Check if the next two bytes complete the 3-byte sequence
-      if ((i + 2 < len) && (s[i + 1] == FEFF_BYTE_2) && (s[i + 2] == FEFF_BYTE_3)) {
-        // Sequence 0xEF 0xBB 0xBF found!
-        i += 2;    // Skip the next two bytes
-        continue;  // Move to the next iteration
+    const int runStart = offset;
+    while (offset < len && !isWhitespace(s[offset])) {
+      if (offset + 2 < len && s[offset] == FEFF_BYTE_1 && s[offset + 1] == FEFF_BYTE_2 && s[offset + 2] == FEFF_BYTE_3) {
+        break;
       }
+      offset++;
     }
 
-    // If we're about to run out of space, then cut the word off and start a new one
-    if (self->partWordBufferIndex >= MAX_WORD_SIZE) {
-      // Back up to last valid UTF-8 codepoint boundary to avoid splitting multi-byte chars
-      int safeIdx = self->partWordBufferIndex;
-      while (safeIdx > 0 && (static_cast<unsigned char>(self->partWordBuffer[safeIdx - 1]) & 0xC0) == 0x80) {
-        safeIdx--;
-      }
-      if (safeIdx > 0 && static_cast<unsigned char>(self->partWordBuffer[safeIdx - 1]) >= 0xC0) {
-        safeIdx--;
-      }
-
-      if (safeIdx > 0) {
-        int overflowLen = self->partWordBufferIndex - safeIdx;
-        char overflow[4];
-        if (overflowLen > 0) {
-          memcpy(overflow, &self->partWordBuffer[safeIdx], overflowLen);
-        }
-        self->partWordBufferIndex = safeIdx;
-        self->flushPartWordBuffer();
-        if (overflowLen > 0) {
-          memcpy(self->partWordBuffer, overflow, overflowLen);
-          self->partWordBufferIndex = overflowLen;
-        }
-      } else {
-        self->flushPartWordBuffer();
-      }
+    if (offset > runStart) {
+      self->appendPartWordBytes(s + runStart, offset - runStart);
     }
 
-    self->partWordBuffer[self->partWordBufferIndex++] = s[i];
+    if (offset + 2 < len && s[offset] == FEFF_BYTE_1 && s[offset + 1] == FEFF_BYTE_2 && s[offset + 2] == FEFF_BYTE_3) {
+      offset += 3;
+    }
   }
 
   // Flag for deferred split - handled outside XML callback to avoid stack overflow
@@ -456,16 +894,16 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
 void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* name) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
-  (void)name;
+  const TagFlags tagFlags = classifyTag(name);
 
   if (self->partWordBufferIndex > 0) {
     // Only flush out part word buffer if we're closing a block tag or are at the top of the HTML file.
     // We don't want to flush out content when closing inline tags like <span>.
     // Currently this also flushes out on closing <b> and <i> tags, but they are line tags so that shouldn't happen,
     // text styling needs to be overhauled to fix it.
-    const bool shouldBreakText =
-        matches(name, BLOCK_TAGS, NUM_BLOCK_TAGS) || matches(name, HEADER_TAGS, NUM_HEADER_TAGS) ||
-        matches(name, BOLD_TAGS, NUM_BOLD_TAGS) || matches(name, ITALIC_TAGS, NUM_ITALIC_TAGS) || self->depth == 1;
+    const bool shouldBreakText = hasTagFlag(tagFlags, TAG_Block) || hasTagFlag(tagFlags, TAG_Header) ||
+                                 hasTagFlag(tagFlags, TAG_Bold) || hasTagFlag(tagFlags, TAG_Italic) ||
+                                 self->depth == 1;
 
     if (shouldBreakText) {
       self->flushPartWordBuffer();
@@ -474,8 +912,7 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
 
   self->depth -= 1;
 
-  const bool headerOrBlockTag =
-      matches(name, HEADER_TAGS, NUM_HEADER_TAGS) || matches(name, BLOCK_TAGS, NUM_BLOCK_TAGS);
+  const bool headerOrBlockTag = hasTagFlag(tagFlags, TAG_Header) || hasTagFlag(tagFlags, TAG_Block);
 
   if (headerOrBlockTag && self->currentTextBlock && self->currentTextBlock->isEmpty()) {
     self->currentTextBlock->setStyle(static_cast<TextBlock::BLOCK_STYLE>(self->config.paragraphAlignment));
@@ -525,15 +962,21 @@ void XMLCALL ChapterHtmlSlimParser::defaultHandler(void* userData, const XML_Cha
   // comments, and processing instructions which must not become visible text.
 }
 
-bool ChapterHtmlSlimParser::shouldAbort() const {
+bool ChapterHtmlSlimParser::shouldAbort() {
+  if (cooperativeAbortRequested_ || fatalAbortRequested_) {
+    return true;
+  }
+
   // Check external abort callback first (cooperative cancellation)
   if (externalAbortCallback_ && externalAbortCallback_()) {
+    cooperativeAbortRequested_ = true;
     LOG_DBG(TAG, "External abort requested");
     return true;
   }
 
   // Check timeout
   if (millis() - parseStartTime_ > MAX_PARSE_TIME_MS) {
+    fatalAbortRequested_ = true;
     LOG_ERR(TAG, "Parse timeout exceeded (%u ms)", MAX_PARSE_TIME_MS);
     return true;
   }
@@ -541,11 +984,19 @@ bool ChapterHtmlSlimParser::shouldAbort() const {
   // Check memory pressure
   const size_t freeHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   if (freeHeap < MIN_FREE_HEAP) {
+    fatalAbortRequested_ = true;
     LOG_ERR(TAG, "Low memory (%zu bytes free)", freeHeap);
     return true;
   }
 
   return false;
+}
+
+void ChapterHtmlSlimParser::requestCooperativeSuspend() {
+  stopRequested_ = true;
+  if (xmlParser_) {
+    XML_StopParser(xmlParser_, XML_TRUE);
+  }
 }
 
 ChapterHtmlSlimParser::~ChapterHtmlSlimParser() { cleanupParser(); }
@@ -563,6 +1014,9 @@ void ChapterHtmlSlimParser::cleanupParser() {
   }
   currentPage.reset();
   currentTextBlock.reset();
+  pendingPageImage_.reset();
+  cooperativeAbortRequested_ = false;
+  fatalAbortRequested_ = false;
   suspended_ = false;
   xmlDone_ = false;
 }
@@ -571,16 +1025,25 @@ bool ChapterHtmlSlimParser::initParser() {
   parseStartTime_ = millis();
   loopCounter_ = 0;
   elementCounter_ = 0;
+  effectiveLineHeight_ = static_cast<int>(renderer.getEffectiveLineHeight(config.fontId) * config.lineCompression);
   cssHeapOk_ = true;
   pendingEmergencySplit_ = false;
   pendingNewTextBlock_ = false;
+  pendingBlockLikelyCaption_ = false;
+  currentBlockLikelyCaption_ = false;
   aborted_ = false;
+  cooperativeAbortRequested_ = false;
+  fatalAbortRequested_ = false;
   stopRequested_ = false;
   suspended_ = false;
   xmlDone_ = false;
   alignStack_.clear();
+  alignStack_.reserve(8);
   listStack_.clear();
+  listStack_.reserve(4);
+  anchorMap_.clear();
   pendingListMarker_[0] = '\0';
+  pendingPageImage_.reset();
   dataUriStripper_.reset();
   startNewTextBlock(static_cast<TextBlock::BLOCK_STYLE>(config.paragraphAlignment));
 
@@ -624,13 +1087,19 @@ bool ChapterHtmlSlimParser::parseLoop() {
     if (++loopCounter_ % YIELD_CHECK_INTERVAL == 0) {
       if (shouldAbort()) {
         LOG_DBG(TAG, "Aborting parse, pages created: %u", pagesCreated_);
-        aborted_ = true;
-        break;
+        if (fatalAbortRequested_) {
+          aborted_ = true;
+          break;
+        }
+        stopRequested_ = true;
+        suspended_ = true;
+        file_.close();
+        return true;
       }
       vTaskDelay(1);  // Yield to prevent watchdog reset
     }
 
-    constexpr size_t kReadChunkSize = 1024;
+    constexpr size_t kReadChunkSize = 2048;
     constexpr size_t kDataUriPrefixSize = 10;  // max partial saved by DataUriStripper: "src=\"data:"
     void* const buf = XML_GetBuffer(xmlParser_, kReadChunkSize + kDataUriPrefixSize);
     if (!buf) {
@@ -688,7 +1157,7 @@ bool ChapterHtmlSlimParser::parseLoop() {
     if (pendingEmergencySplit_ && currentTextBlock && !currentTextBlock->isEmpty()) {
       pendingEmergencySplit_ = false;
       const size_t freeHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-      if (freeHeap < MIN_FREE_HEAP * 2) {
+      if (freeHeap < MIN_LAYOUT_FREE_HEAP) {
         LOG_ERR(TAG, "Low memory (%zu), aborting parse", freeHeap);
         aborted_ = true;
         break;
@@ -704,7 +1173,7 @@ bool ChapterHtmlSlimParser::parseLoop() {
 
   // Reached end of file or aborted — finalize
   // Process last page if there is still text
-  if (currentTextBlock && !stopRequested_) {
+  if (currentTextBlock && !stopRequested_ && !aborted_) {
     makePages();
     if (stopRequested_) {
       // Batch limit hit while flushing final content — stay suspended
@@ -738,9 +1207,16 @@ bool ChapterHtmlSlimParser::resumeParsing() {
 
   // XML parser already finished — just flush remaining content from finalization
   if (xmlDone_) {
+    cooperativeAbortRequested_ = false;
+    fatalAbortRequested_ = false;
     stopRequested_ = false;
     suspended_ = false;
     parseStartTime_ = millis();
+
+    if (!placePendingImage()) {
+      suspended_ = true;
+      return true;
+    }
 
     if (currentTextBlock && !currentTextBlock->isEmpty()) {
       makePages();
@@ -770,8 +1246,16 @@ bool ChapterHtmlSlimParser::resumeParsing() {
   parseStartTime_ = millis();
   loopCounter_ = 0;
   elementCounter_ = 0;
+  cooperativeAbortRequested_ = false;
+  fatalAbortRequested_ = false;
   stopRequested_ = false;
   suspended_ = false;
+
+  if (!placePendingImage()) {
+    suspended_ = true;
+    file_.close();
+    return true;
+  }
 
   // Lay out remaining words from the text block that was interrupted when the
   // previous batch hit its page limit. Without this, words after the page-break
@@ -792,6 +1276,7 @@ bool ChapterHtmlSlimParser::resumeParsing() {
   // would be appended to the old (now empty) text block with wrong style/no break.
   if (pendingNewTextBlock_) {
     pendingNewTextBlock_ = false;
+    currentBlockLikelyCaption_ = pendingBlockLikelyCaption_;
     currentTextBlock.reset(
         new ParsedText(pendingBlockStyle_, config.indentLevel, config.hyphenation, true, pendingRtl_));
     if (pendingListMarker_[0] != '\0') {
@@ -819,7 +1304,7 @@ bool ChapterHtmlSlimParser::resumeParsing() {
   // parseLoop iteration), the parser has now finished processing all buffered data.
   // Skip parseLoop() — calling XML_GetBuffer on a finalized parser returns NULL.
   if (file_.available() == 0) {
-    if (currentTextBlock && !stopRequested_) {
+    if (currentTextBlock && !stopRequested_ && !aborted_) {
       makePages();
       if (stopRequested_) {
         suspended_ = true;
@@ -844,17 +1329,15 @@ bool ChapterHtmlSlimParser::resumeParsing() {
 void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line) {
   if (stopRequested_) return;
 
-  const int lineHeight = renderer.getEffectiveLineHeight(config.fontId) * config.lineCompression;
-
-  if (currentPageNextY + lineHeight > config.viewportHeight) {
+  if (currentPageNextY + effectiveLineHeight_ > config.viewportHeight) {
     ++pagesCreated_;
     if (!completePageFn(std::move(currentPage))) {
       // Preserve this line for the next batch — it's already been
       // extracted from the text block and would be lost otherwise
       currentPage.reset(new Page());
       currentPageNextY = 0;
-      currentPage->elements.push_back(std::make_shared<PageLine>(line, 0, currentPageNextY));
-      currentPageNextY += lineHeight;
+      currentPage->elements.push_back(std::make_unique<PageLine>(std::move(line), 0, currentPageNextY));
+      currentPageNextY += effectiveLineHeight_;
       stopRequested_ = true;
       if (xmlParser_) {
         XML_StopParser(xmlParser_, XML_TRUE);  // Resumable suspend
@@ -866,8 +1349,8 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line) {
     currentPageNextY = 0;
   }
 
-  currentPage->elements.push_back(std::make_shared<PageLine>(line, 0, currentPageNextY));
-  currentPageNextY += lineHeight;
+  currentPage->elements.push_back(std::make_unique<PageLine>(std::move(line), 0, currentPageNextY));
+  currentPageNextY += effectiveLineHeight_;
 }
 
 void ChapterHtmlSlimParser::makePages() {
@@ -880,7 +1363,7 @@ void ChapterHtmlSlimParser::makePages() {
 
   // Check memory before expensive layout operation
   const size_t freeHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (freeHeap < MIN_FREE_HEAP * 2) {
+  if (freeHeap < MIN_LAYOUT_FREE_HEAP) {
     LOG_ERR(TAG, "Insufficient memory for layout (%zu bytes)", freeHeap);
     currentTextBlock.reset();
     aborted_ = true;
@@ -892,62 +1375,224 @@ void ChapterHtmlSlimParser::makePages() {
     currentPageNextY = 0;
   }
 
-  const int lineHeight = renderer.getEffectiveLineHeight(config.fontId) * config.lineCompression;
-  currentTextBlock->layoutAndExtractLines(
+  const bool likelyCaption = currentBlockLikelyCaption_ || looksLikeCaptionText(*currentTextBlock);
+  maybeKeepTrailingImageWithCaption(likelyCaption);
+  if (stopRequested_) {
+    return;
+  }
+  maybeDeferTrailingTallImageText(likelyCaption);
+  if (stopRequested_) {
+    return;
+  }
+
+  uint16_t layoutCheckCounter = 0;
+  const bool layoutCompleted = currentTextBlock->layoutAndExtractLines(
       renderer, config.fontId, config.viewportWidth,
       [this](const std::shared_ptr<TextBlock>& textBlock) { addLineToPage(textBlock); }, true,
-      [this]() -> bool { return stopRequested_; });
+      [this, &layoutCheckCounter]() -> bool {
+        if (stopRequested_) {
+          return true;
+        }
+
+        if ((++layoutCheckCounter % 16) == 0) {
+          vTaskDelay(1);  // Keep the watchdog happy during huge paragraph layout.
+        }
+
+        if (shouldAbort()) {
+          stopRequested_ = true;
+          if (fatalAbortRequested_) {
+            aborted_ = true;
+          }
+          if (xmlParser_) {
+            XML_StopParser(xmlParser_, XML_TRUE);  // Resumable suspend / cooperative abort.
+          }
+          return true;
+        }
+        return false;
+      });
+
+  if (!layoutCompleted) {
+    return;
+  }
+
   // Extra paragraph spacing based on spacingLevel (0=none, 1=small, 3=large)
   // Skip if aborted mid-block — spacing between paragraphs, not mid-paragraph
   if (!stopRequested_) {
     switch (config.spacingLevel) {
       case 1:
-        currentPageNextY += lineHeight / 4;  // Small (1/4 line)
+        currentPageNextY += effectiveLineHeight_ / 4;  // Small (1/4 line)
         break;
       case 3:
-        currentPageNextY += lineHeight;  // Large (full line)
+        currentPageNextY += effectiveLineHeight_;  // Large (full line)
         break;
     }
   }
 }
 
-std::string ChapterHtmlSlimParser::cacheImage(const std::string& src) {
+bool ChapterHtmlSlimParser::validateCachedBmp(const std::string& cachedBmpPath, uint16_t& width, uint16_t& height,
+                                              std::string& failureReason) {
+  papyrix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    failureReason = "shared-bus-lock-unavailable";
+    return false;
+  }
+
+  FsFile bmpFile;
+  if (!SdMan.openFileForRead("EHP", cachedBmpPath, bmpFile)) {
+    failureReason = "cached-open-failed";
+    return false;
+  }
+
+  Bitmap bitmap(bmpFile, false);
+  const BmpReaderError err = bitmap.parseHeaders();
+  if (err != BmpReaderError::Ok) {
+    failureReason = std::string("cached-bmp-parse-failed:") + Bitmap::errorToString(err);
+    bmpFile.close();
+    return false;
+  }
+
+  width = static_cast<uint16_t>(bitmap.getWidth());
+  height = static_cast<uint16_t>(bitmap.getHeight());
+  bmpFile.close();
+  failureReason.clear();
+  return true;
+}
+
+ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const std::string& src) {
+  CachedImageResult result;
+  result.resolvedPath = FsHelpers::normalisePath(chapterBasePath + src);
+  result.status = CachedImageStatus::TerminalFailure;
+  LOG_ERR(TAG, "[CONTENT][IMAGE] start src=%s resolved=%s quick=%u", src.c_str(), result.resolvedPath.c_str(),
+          static_cast<unsigned>(quickImageDecode_));
+  const uint32_t imageStartedMs = millis();
+  const uint32_t imageTimeoutMs =
+      quickImageDecode_ ? MAX_QUICK_IMAGE_PROCESS_TIME_MS : MAX_FULL_IMAGE_PROCESS_TIME_MS;
+  auto classifyImageInterrupt = [this, imageStartedMs, imageTimeoutMs]() -> ImageInterruptReason {
+    if (stopRequested_ || cooperativeAbortRequested_) {
+      return ImageInterruptReason::StopRequested;
+    }
+    if (externalAbortCallback_ && externalAbortCallback_()) {
+      return ImageInterruptReason::StopRequested;
+    }
+    if (millis() - imageStartedMs > imageTimeoutMs) {
+      LOG_ERR(TAG, "Image processing timeout after %lu ms", static_cast<unsigned long>(imageTimeoutMs));
+      return ImageInterruptReason::Timeout;
+    }
+    const size_t freeHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (freeHeap < MIN_FREE_HEAP) {
+      LOG_ERR(TAG, "Low memory during image processing (%zu bytes free)", freeHeap);
+      return ImageInterruptReason::LowMemory;
+    }
+    return ImageInterruptReason::None;
+  };
+  auto setRetryable = [&](const char* reason, const ImageFailureClass failureClass) {
+    result.failureReason = reason;
+    result.failureClass = failureClass;
+    result.retryable = true;
+    result.status = CachedImageStatus::RetryableInterruption;
+    result.success = false;
+  };
+  auto setTerminal = [&](const char* reason, const ImageFailureClass failureClass) {
+    result.failureReason = reason;
+    result.failureClass = failureClass;
+    result.retryable = false;
+    result.status = CachedImageStatus::TerminalFailure;
+    result.success = false;
+  };
+  auto interruptToFailureClass = [](const ImageInterruptReason reason,
+                                    const ImageFailureClass stopClass) -> ImageFailureClass {
+    switch (reason) {
+      case ImageInterruptReason::StopRequested:
+        return stopClass;
+      case ImageInterruptReason::Timeout:
+        return ImageFailureClass::Timeout;
+      case ImageInterruptReason::LowMemory:
+        return ImageFailureClass::LowMemory;
+      case ImageInterruptReason::None:
+        break;
+    }
+    return stopClass;
+  };
+  auto interruptToReason = [](const ImageInterruptReason reason, const char* stopReason) -> const char* {
+    switch (reason) {
+      case ImageInterruptReason::StopRequested:
+        return stopReason;
+      case ImageInterruptReason::Timeout:
+        return "timeout";
+      case ImageInterruptReason::LowMemory:
+        return "low-memory";
+      case ImageInterruptReason::None:
+        break;
+    }
+    return stopReason;
+  };
+  auto shouldAbortImage = [&]() -> bool {
+    return classifyImageInterrupt() != ImageInterruptReason::None;
+  };
+
   // Check abort before starting image processing
-  if (externalAbortCallback_ && externalAbortCallback_()) {
-    LOG_DBG(TAG, "Abort requested, skipping image");
-    return "";
+  if (const ImageInterruptReason interrupt = classifyImageInterrupt(); interrupt != ImageInterruptReason::None) {
+    LOG_DBG(TAG, "Retryable image interruption before start");
+    setRetryable(interruptToReason(interrupt, "abort-before-start"),
+                 interruptToFailureClass(interrupt, ImageFailureClass::AbortRequested));
+    return result;
   }
 
   // Skip data URIs - embedded base64 images can't be extracted and waste memory
   if (src.length() >= 5 && strncasecmp(src.c_str(), "data:", 5) == 0) {
     LOG_DBG(TAG, "Skipping embedded data URI image");
-    return "";
+    setTerminal("data-uri", ImageFailureClass::DataUri);
+    return result;
   }
 
-  // Skip remaining images after too many consecutive failures
-  if (consecutiveImageFailures_ >= MAX_CONSECUTIVE_IMAGE_FAILURES) {
-    LOG_DBG(TAG, "Skipping image - too many failures");
-    return "";
+  papyrix::spi::SharedBusLock imageBusLock;
+  if (!imageBusLock) {
+    setRetryable("shared-bus-lock-unavailable", ImageFailureClass::AbortRequested);
+    return result;
   }
-
-  // Resolve relative path from chapter base
-  std::string resolvedPath = FsHelpers::normalisePath(chapterBasePath + src);
 
   // Generate cache filename from hash
-  size_t srcHash = std::hash<std::string>{}(resolvedPath);
-  std::string cachedBmpPath = imageCachePath + "/" + std::to_string(srcHash) + ".bmp";
+  size_t srcHash = std::hash<std::string>{}(result.resolvedPath);
+  result.cachedBmpPath = imageCachePath + "/" + std::to_string(srcHash) + ".bmp";
 
-  // Check if already cached
-  if (SdMan.exists(cachedBmpPath.c_str())) {
-    consecutiveImageFailures_ = 0;  // Reset on success
-    return cachedBmpPath;
+  std::string failedMarker = imageCachePath + "/" + std::to_string(srcHash) + ".failed";
+  uint16_t cachedWidth = 0;
+  uint16_t cachedHeight = 0;
+  std::string cacheFailure;
+
+  // Check if already cached and validate the cached BMP before trusting it.
+  if (SdMan.exists(result.cachedBmpPath.c_str())) {
+    result.cacheHit = true;
+    if (validateCachedBmp(result.cachedBmpPath, cachedWidth, cachedHeight, cacheFailure)) {
+      consecutiveImageFailures_ = 0;
+      result.width = cachedWidth;
+      result.height = cachedHeight;
+      result.success = true;
+      result.retryable = false;
+      result.status = CachedImageStatus::Success;
+      result.failureClass = ImageFailureClass::CacheHit;
+      result.failureReason = "cache-hit";
+      LOG_ERR(TAG, "[CONTENT][IMAGE] cache hit src=%s resolved=%s cached=%s size=%ux%u", src.c_str(),
+              result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), static_cast<unsigned>(result.width),
+              static_cast<unsigned>(result.height));
+      return result;
+    }
+
+    LOG_ERR(TAG, "[CONTENT][IMAGE] cache invalid src=%s resolved=%s cached=%s reason=%s action=rebuild", src.c_str(),
+            result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), cacheFailure.c_str());
+    SdMan.remove(result.cachedBmpPath.c_str());
+    SdMan.remove(failedMarker.c_str());
   }
 
-  // Check for failed marker
-  std::string failedMarker = imageCachePath + "/" + std::to_string(srcHash) + ".failed";
+  // Failed markers are only trusted for extraction/format failures. Conversion
+  // can still succeed later in quick mode, so allow supported images to retry.
   if (SdMan.exists(failedMarker.c_str())) {
-    consecutiveImageFailures_++;
-    return "";
+    if (!ImageConverterFactory::isSupported(src)) {
+      consecutiveImageFailures_++;
+      setTerminal("failed-marker-unsupported-format", ImageFailureClass::UnsupportedFormat);
+      return result;
+    }
+    SdMan.remove(failedMarker.c_str());
   }
 
   // Check if format is supported
@@ -958,7 +1603,8 @@ std::string ChapterHtmlSlimParser::cacheImage(const std::string& src) {
       marker.close();
     }
     consecutiveImageFailures_++;
-    return "";
+    setTerminal("unsupported-format", ImageFailureClass::UnsupportedFormat);
+    return result;
   }
 
   // Extract image to temp file (include hash in name for uniqueness)
@@ -967,53 +1613,119 @@ std::string ChapterHtmlSlimParser::cacheImage(const std::string& src) {
   FsFile tempFile;
   if (!SdMan.openFileForWrite("EHP", tempPath, tempFile)) {
     LOG_ERR(TAG, "Failed to create temp file for image");
-    return "";
+    setRetryable("temp-open-failed", ImageFailureClass::TempOpenFailed);
+    return result;
   }
 
-  if (!readItemFn(resolvedPath, tempFile, 1024)) {
-    LOG_ERR(TAG, "Failed to extract image: %s", resolvedPath.c_str());
+  const ReadItemStatus readStatus = readItemFn(result.resolvedPath, tempFile, 1024, shouldAbortImage);
+  if (readStatus != ReadItemStatus::Success) {
+    LOG_ERR(TAG, "[CONTENT][IMAGE] extract result src=%s resolved=%s result=%s", src.c_str(),
+            result.resolvedPath.c_str(), readItemStatusToString(readStatus));
     tempFile.close();
     SdMan.remove(tempPath.c_str());
-    FsFile marker;
-    if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
-      marker.close();
+    if (readStatus == ReadItemStatus::Aborted) {
+      setRetryable("extract-aborted", ImageFailureClass::ExtractAborted);
+      return result;
     }
-    consecutiveImageFailures_++;
-    return "";
+    if (readStatus == ReadItemStatus::NotFound) {
+      FsFile marker;
+      if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
+        marker.close();
+      }
+      consecutiveImageFailures_++;
+      setTerminal("extract-not-found", ImageFailureClass::ExtractFailed);
+      return result;
+    }
+    if (readStatus == ReadItemStatus::ArchiveError) {
+      FsFile marker;
+      if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
+        marker.close();
+      }
+      consecutiveImageFailures_++;
+      setTerminal("extract-archive-error", ImageFailureClass::ExtractFailed);
+      return result;
+    }
+    setRetryable(readStatus == ReadItemStatus::WriteError ? "extract-write-error" : "extract-io-error",
+                 ImageFailureClass::ExtractFailed);
+    return result;
   }
   tempFile.close();
 
   const int maxImageHeight = config.viewportHeight;
-  ImageConvertConfig convertConfig;
-  convertConfig.maxWidth = static_cast<int>(config.viewportWidth);
-  convertConfig.maxHeight = maxImageHeight;
-  convertConfig.logTag = "EHP";
-  convertConfig.shouldAbort = externalAbortCallback_;
+  const int maxImageWidth = static_cast<int>(config.viewportWidth);
+  auto tryConvert = [&](int maxWidth, int maxHeight, bool quickMode) -> bool {
+    ImageConvertConfig convertConfig;
+    convertConfig.maxWidth = maxWidth;
+    convertConfig.maxHeight = maxHeight;
+    convertConfig.quickMode = quickMode;
+    convertConfig.logTag = "EHP";
+    convertConfig.shouldAbort = shouldAbortImage;
+    return ImageConverterFactory::convertToBmp(tempPath, result.cachedBmpPath, convertConfig);
+  };
 
-  const bool success = ImageConverterFactory::convertToBmp(tempPath, cachedBmpPath, convertConfig);
+  bool success = tryConvert(maxImageWidth, maxImageHeight, quickImageDecode_);
+  if (!success && !shouldAbortImage() && !quickImageDecode_) {
+    LOG_ERR(TAG, "[CONTENT][IMAGE] retry quick src=%s", result.resolvedPath.c_str());
+    SdMan.remove(result.cachedBmpPath.c_str());
+    success = tryConvert(maxImageWidth, maxImageHeight, true);
+  }
+  if (!success && !shouldAbortImage()) {
+    const int fallbackWidth = std::max(64, (maxImageWidth * 3) / 4);
+    const int fallbackHeight = std::max(64, (maxImageHeight * 3) / 4);
+    if (fallbackWidth != maxImageWidth || fallbackHeight != maxImageHeight) {
+      LOG_ERR(TAG, "[CONTENT][IMAGE] retry reduced src=%s size=%dx%d", result.resolvedPath.c_str(), fallbackWidth,
+              fallbackHeight);
+      SdMan.remove(result.cachedBmpPath.c_str());
+      success = tryConvert(fallbackWidth, fallbackHeight, true);
+    }
+  }
   SdMan.remove(tempPath.c_str());
 
   if (!success) {
-    LOG_ERR(TAG, "Failed to convert image to BMP: %s", resolvedPath.c_str());
-    SdMan.remove(cachedBmpPath.c_str());
-    FsFile marker;
-    if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
-      marker.close();
+    const ImageInterruptReason interrupt = classifyImageInterrupt();
+    LOG_ERR(TAG, "[CONTENT][IMAGE] convert failed: %s interrupt=%s", result.resolvedPath.c_str(),
+            interruptToReason(interrupt, "none"));
+    SdMan.remove(result.cachedBmpPath.c_str());
+    if (interrupt != ImageInterruptReason::None) {
+      setRetryable(interruptToReason(interrupt, "convert-aborted"),
+                   interruptToFailureClass(interrupt, ImageFailureClass::ConvertAborted));
+      return result;
     }
     consecutiveImageFailures_++;
-    return "";
+    setTerminal("convert-failed", ImageFailureClass::ConvertFailed);
+    return result;
   }
 
-  consecutiveImageFailures_ = 0;  // Reset on success
-  LOG_DBG(TAG, "Cached image: %s", cachedBmpPath.c_str());
-  return cachedBmpPath;
+  std::string generatedFailure;
+  if (!validateCachedBmp(result.cachedBmpPath, cachedWidth, cachedHeight, generatedFailure)) {
+    LOG_ERR(TAG, "[CONTENT][IMAGE] generated invalid bmp src=%s resolved=%s cached=%s reason=%s", src.c_str(),
+            result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), generatedFailure.c_str());
+    SdMan.remove(result.cachedBmpPath.c_str());
+    consecutiveImageFailures_++;
+    setTerminal("generated-bmp-invalid", ImageFailureClass::GeneratedBmpInvalid);
+    return result;
+  }
+
+  SdMan.remove(failedMarker.c_str());
+  consecutiveImageFailures_ = 0;
+  result.width = cachedWidth;
+  result.height = cachedHeight;
+  result.success = true;
+  result.retryable = false;
+  result.status = CachedImageStatus::Success;
+  result.failureClass = ImageFailureClass::None;
+  result.failureReason = "generated";
+  LOG_ERR(TAG, "[CONTENT][IMAGE] done src=%s resolved=%s cached=%s elapsed=%lu size=%ux%u", src.c_str(),
+          result.resolvedPath.c_str(), result.cachedBmpPath.c_str(),
+          static_cast<unsigned long>(millis() - imageStartedMs), static_cast<unsigned>(result.width),
+          static_cast<unsigned>(result.height));
+  return result;
 }
 
 void ChapterHtmlSlimParser::addImageToPage(std::shared_ptr<ImageBlock> image) {
   if (stopRequested_) return;
 
   const int imageHeight = image->getHeight();
-  const int lineHeight = renderer.getEffectiveLineHeight(config.fontId) * config.lineCompression;
   const bool isTallImage = imageHeight > config.viewportHeight / 2;
 
   if (!currentPage) {
@@ -1023,7 +1735,9 @@ void ChapterHtmlSlimParser::addImageToPage(std::shared_ptr<ImageBlock> image) {
 
   // Tall images get a dedicated page: flush current page if it has content
   if (isTallImage && currentPageNextY > 0) {
+    ++pagesCreated_;
     if (!completePageFn(std::move(currentPage))) {
+      pendingPageImage_ = image;
       stopRequested_ = true;
       if (xmlParser_) {
         XML_StopParser(xmlParser_, XML_TRUE);  // Resumable suspend
@@ -1037,7 +1751,9 @@ void ChapterHtmlSlimParser::addImageToPage(std::shared_ptr<ImageBlock> image) {
 
   // Check if image fits on current page
   if (currentPageNextY + imageHeight > config.viewportHeight) {
+    ++pagesCreated_;
     if (!completePageFn(std::move(currentPage))) {
+      pendingPageImage_ = image;
       stopRequested_ = true;
       if (xmlParser_) {
         XML_StopParser(xmlParser_, XML_TRUE);  // Resumable suspend
@@ -1053,26 +1769,8 @@ void ChapterHtmlSlimParser::addImageToPage(std::shared_ptr<ImageBlock> image) {
   int xPos = (static_cast<int>(config.viewportWidth) - static_cast<int>(image->getWidth())) / 2;
   if (xPos < 0) xPos = 0;
 
-  // Center tall images vertically on their dedicated page
   int yPos = currentPageNextY;
-  if (isTallImage && currentPageNextY == 0 && imageHeight < config.viewportHeight) {
-    yPos = (config.viewportHeight - imageHeight) / 2;
-  }
 
-  currentPage->elements.push_back(std::make_shared<PageImage>(image, xPos, yPos));
-  currentPageNextY = yPos + imageHeight + lineHeight;
-
-  // Complete the page after a tall image so text continues on the next page
-  if (isTallImage) {
-    if (!completePageFn(std::move(currentPage))) {
-      stopRequested_ = true;
-      if (xmlParser_) {
-        XML_StopParser(xmlParser_, XML_TRUE);  // Resumable suspend
-      }
-      return;
-    }
-    parseStartTime_ = millis();
-    currentPage.reset(new Page());
-    currentPageNextY = 0;
-  }
+  currentPage->elements.push_back(std::make_unique<PageImage>(std::move(image), xPos, yPos));
+  currentPageNextY = yPos + imageHeight + effectiveLineHeight_;
 }
