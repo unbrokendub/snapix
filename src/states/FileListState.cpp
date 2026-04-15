@@ -472,6 +472,28 @@ void FileListState::openSelected(Core& core) {
     // Select file - transition directly in UI mode when transition cleanup is disabled.
     LOG_INF(TAG, "Selected: %s", selectedPath_);
     if (!core.settings.transitionFullRefresh) {
+      // If the cursor moved in this same event batch (Down then Center in
+      // a single update() loop), the framebuffer still has the OLD cursor
+      // position because render() hasn't run yet.  Redraw the list items
+      // so that the drive-all refresh in ReaderState::enter() shows the
+      // correct selection behind the "Loading..." banner overlay.
+      if (needsRender_) {
+        const Theme& theme = THEME_MANAGER.current();
+        constexpr int listStartY = 60;
+        constexpr int bottomMargin = 70;
+        const int itemHeight = theme.itemHeight + theme.itemSpacing;
+        const int pageStart = getPageStartIndex();
+        const int pageEnd = std::min(pageStart + getPageItems(), static_cast<int>(files_.size()));
+        const int listHeight = renderer_.getScreenHeight() - listStartY - bottomMargin;
+        renderer_.clearArea(0, listStartY, renderer_.getScreenWidth(), listHeight, theme.backgroundColor);
+        for (int i = pageStart; i < pageEnd; i++) {
+          const int y = listStartY + (i - pageStart) * itemHeight;
+          ui::fileEntry(renderer_, theme, y, files_[i].name.c_str(), files_[i].isDir,
+                        static_cast<size_t>(i) == selectedIndex_);
+        }
+        needsRender_ = false;
+      }
+
       strncpy(core.buf.path, selectedPath_, sizeof(core.buf.path) - 1);
       core.buf.path[sizeof(core.buf.path) - 1] = '\0';
       core.pendingDirectReaderTransition = true;

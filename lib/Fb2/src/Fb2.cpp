@@ -13,6 +13,7 @@
 #define TAG "FB2"
 #include <SDCardManager.h>
 #include <Serialization.h>
+#include <SharedSpiLock.h>
 
 #include <cstring>
 
@@ -319,11 +320,11 @@ bool Fb2::parseXmlStream() {
   bool success = true;
 
   while (file.available() > 0) {
-    const size_t bytesRead = file.read(buffer, kChunkSize);
-    if (bytesRead == 0) break;
+    const int bytesRead = file.read(buffer, kChunkSize);
+    if (bytesRead <= 0) break;
 
     const int done = (file.available() == 0) ? 1 : 0;
-    if (XML_Parse(xmlParser_, reinterpret_cast<const char*>(buffer), static_cast<int>(bytesRead), done) ==
+    if (XML_Parse(xmlParser_, reinterpret_cast<const char*>(buffer), bytesRead, done) ==
         XML_STATUS_ERROR) {
       LOG_ERR(TAG, "XML parse error: %s", XML_ErrorString(XML_GetErrorCode(xmlParser_)));
       success = false;
@@ -377,18 +378,25 @@ bool Fb2::clearCache() const {
 }
 
 void Fb2::setupCacheDir() const {
-  if (SdMan.exists(cachePath.c_str())) {
-    return;
-  }
-
-  // Create directories recursively
-  for (size_t i = 1; i < cachePath.length(); i++) {
-    if (cachePath[i] == '/') {
-      SdMan.mkdir(cachePath.substr(0, i).c_str());
+  if (!SdMan.exists(cachePath.c_str())) {
+    // Create directories recursively
+    for (size_t i = 1; i < cachePath.length(); i++) {
+      if (cachePath[i] == '/') {
+        SdMan.mkdir(cachePath.substr(0, i).c_str());
+      }
+    }
+    if (!SdMan.mkdir(cachePath.c_str())) {
+      LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
     }
   }
-  SdMan.mkdir(cachePath.c_str());
-  SdMan.mkdir((cachePath + "/sections").c_str());
+
+  // Always verify sections/ exists — partial cache clear may have removed it
+  const auto sectionsDir = cachePath + "/sections";
+  if (!SdMan.exists(sectionsDir.c_str())) {
+    if (!SdMan.mkdir(sectionsDir.c_str())) {
+      LOG_ERR(TAG, "Failed to create sections dir: %s", sectionsDir.c_str());
+    }
+  }
 }
 
 std::string Fb2::getCoverBmpPath() const { return cachePath + "/cover.bmp"; }
@@ -488,6 +496,8 @@ bool Fb2::loadMetaCache() {
     return false;
   }
 
+  papyrix::spi::SharedBusLock lk;
+
   uint8_t version;
   if (!serialization::readPodChecked(file, version) || version != kMetaCacheVersion) {
     LOG_ERR(TAG, "Meta cache version mismatch");
@@ -554,6 +564,8 @@ bool Fb2::saveMetaCache() const {
     return false;
   }
 
+  papyrix::spi::SharedBusLock lk;
+
   serialization::writePod(file, kMetaCacheVersion);
   serialization::writeString(file, title);
   serialization::writeString(file, author);
@@ -588,6 +600,7 @@ Fb2::TocItem Fb2::getTocItem(uint16_t index) const {
   FsFile file;
   if (!SdMan.openFileForRead("FB2", metaCachePath(), file)) return item;
 
+  papyrix::spi::SharedBusLock lk;
   file.seek(tocLut_[index]);
   if (!serialization::readString(file, item.title)) {
     file.close();

@@ -5,6 +5,7 @@
 #include <Page.h>
 #include <ParsedText.h>
 #include <SDCardManager.h>
+#include <SharedSpiLock.h>
 #include <Utf8.h>
 
 #define TAG "FB2_PARSE"
@@ -14,7 +15,7 @@
 #include <utility>
 
 namespace {
-constexpr size_t READ_CHUNK_SIZE = 4096;
+constexpr size_t READ_CHUNK_SIZE = 2048;
 
 bool isWhitespace(char c) { return c == ' ' || c == '\r' || c == '\n' || c == '\t'; }
 
@@ -67,10 +68,12 @@ void Fb2Parser::releaseStreamingState() {
     xmlParser_ = nullptr;
   }
   if (file_) {
+    papyrix::spi::SharedBusLock lk;
     file_.close();
   }
   initialized_ = false;
   suspended_ = false;
+  xmlParserSuspended_ = false;
 }
 
 void Fb2Parser::reset() {
@@ -92,6 +95,9 @@ void Fb2Parser::reset() {
   targetSectionStarted_ = false;
   targetSectionDepth_ = 0;
   fragmentComplete_ = false;
+  xmlParserSuspended_ = false;
+  delete[] partWordBuffer_;
+  partWordBuffer_ = nullptr;
   partWordBufferIndex_ = 0;
   rtlArabicWords_ = 0;
   rtlLtrWords_ = 0;
@@ -122,11 +128,14 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       return false;
     }
 
-    fileSize_ = file_.size();
-    lastParsedOffset_ = startOffset_;
+    {
+      papyrix::spi::SharedBusLock lk;
+      fileSize_ = file_.size();
+      lastParsedOffset_ = startOffset_;
 
-    if (startOffset_ > 0) {
-      file_.seek(startOffset_);
+      if (startOffset_ > 0) {
+        file_.seek(startOffset_);
+      }
     }
 
     xmlParser_ = XML_ParserCreate("UTF-8");
@@ -153,51 +162,97 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
     initialized_ = true;
   } else {
     suspended_ = false;
+
+    // The Expat parser may have been suspended mid-buffer via
+    // XML_StopParser(resumable) when hitMaxPages fired.  Finish
+    // processing the remainder of that buffer before reading new data.
+    if (xmlParserSuspended_) {
+      xmlParserSuspended_ = false;
+      const XML_Status rs = XML_ResumeParser(xmlParser_);
+      if (rs == XML_STATUS_ERROR) {
+        const XML_Error ec = XML_GetErrorCode(xmlParser_);
+        if (!(fragmentComplete_ && ec == XML_ERROR_ABORTED)) {
+          LOG_ERR(TAG, "Resume parse error at line %lu: %s",
+                  XML_GetCurrentLineNumber(xmlParser_), XML_ErrorString(ec));
+          releaseStreamingState();
+          currentTextBlock_.reset();
+          currentPage_.reset();
+          partWordBufferIndex_ = 0;
+          return false;
+        }
+        // fragmentComplete_ during resume — fall through to flush below
+      } else if (stopRequested_) {
+        // hitMaxPages fired again during resumed processing
+        suspended_ = true;
+        hasMore_ = true;
+        return true;
+      }
+    }
   }
 
-  // Single buffer reused for parsing (saves stack)
-  uint8_t buffer[READ_CHUNK_SIZE + 1];
-  uint16_t abortCheckCounter = 0;
+  // If the section was fully parsed during the resumed buffer,
+  // skip the main read loop and go straight to flush/finalize.
+  if (!fragmentComplete_) {
+    // Single buffer reused for parsing (saves stack)
+    uint8_t buffer[READ_CHUNK_SIZE + 1];
+    uint16_t abortCheckCounter = 0;
 
-  while (file_.available() > 0) {
-    if (shouldAbort_ && (++abortCheckCounter % 10 == 0) && shouldAbort_()) {
-      LOG_INF(TAG, "Aborted by external request");
-      releaseStreamingState();
-      currentTextBlock_.reset();
-      currentPage_.reset();
-      partWordBufferIndex_ = 0;
-      hasMore_ = true;
-      return false;
-    }
+    while (true) {
+      // --- SPI-locked section: read a chunk from SD card ---
+      int bytesRead;
+      int done;
+      {
+        papyrix::spi::SharedBusLock lk;
+        if (file_.available() <= 0) break;
+        bytesRead = file_.read(buffer, READ_CHUNK_SIZE);
+        if (bytesRead <= 0) {
+          if (bytesRead < 0) {
+            LOG_ERR(TAG, "SD read error at offset %lu", static_cast<unsigned long>(file_.position()));
+          }
+          break;
+        }
+        done = (file_.available() == 0) ? 1 : 0;
+      }
+      // --- SPI released: display driver can use the bus while we process XML ---
 
-    size_t bytesRead = file_.read(buffer, READ_CHUNK_SIZE);
-    if (bytesRead == 0) break;
-
-    int done = (file_.available() == 0) ? 1 : 0;
-    if (XML_Parse(xmlParser_, reinterpret_cast<const char*>(buffer), static_cast<int>(bytesRead), done) ==
-        XML_STATUS_ERROR) {
-      if (!(fragmentComplete_ && XML_GetErrorCode(xmlParser_) == XML_ERROR_ABORTED)) {
-        LOG_ERR(TAG, "Parse error at line %lu: %s", XML_GetCurrentLineNumber(xmlParser_),
-                XML_ErrorString(XML_GetErrorCode(xmlParser_)));
+      if (shouldAbort_ && (++abortCheckCounter % 10 == 0) && shouldAbort_()) {
+        LOG_INF(TAG, "Aborted by external request");
         releaseStreamingState();
         currentTextBlock_.reset();
         currentPage_.reset();
         partWordBufferIndex_ = 0;
+        hasMore_ = true;
         return false;
       }
-      break;
-    }
 
-    lastParsedOffset_ = static_cast<uint32_t>(std::min<size_t>(file_.position(), fileSize_));
+      if (XML_Parse(xmlParser_, reinterpret_cast<const char*>(buffer), bytesRead, done) ==
+          XML_STATUS_ERROR) {
+        if (!(fragmentComplete_ && XML_GetErrorCode(xmlParser_) == XML_ERROR_ABORTED)) {
+          LOG_ERR(TAG, "Parse error at line %lu: %s", XML_GetCurrentLineNumber(xmlParser_),
+                  XML_ErrorString(XML_GetErrorCode(xmlParser_)));
+          releaseStreamingState();
+          currentTextBlock_.reset();
+          currentPage_.reset();
+          partWordBufferIndex_ = 0;
+          return false;
+        }
+        break;
+      }
 
-    if (stopRequested_) {
-      suspended_ = true;
-      hasMore_ = true;
-      return true;
-    }
+      {
+        papyrix::spi::SharedBusLock lk;
+        lastParsedOffset_ = static_cast<uint32_t>(std::min<size_t>(file_.position(), fileSize_));
+      }
 
-    if (fragmentComplete_) {
-      break;
+      if (stopRequested_) {
+        suspended_ = true;
+        hasMore_ = true;
+        return true;
+      }
+
+      if (fragmentComplete_) {
+        break;
+      }
     }
   }
 
@@ -279,6 +334,10 @@ void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const
         if (self->maxPages_ > 0 && self->pagesCreated_ >= self->maxPages_) {
           self->hitMaxPages_ = true;
           self->stopRequested_ = true;
+          if (self->xmlParser_) {
+            XML_StopParser(self->xmlParser_, XML_TRUE);
+            self->xmlParserSuspended_ = true;
+          }
           self->depth_++;
           return;
         }
@@ -418,6 +477,10 @@ void XMLCALL Fb2Parser::characterData(void* userData, const XML_Char* s, int len
 }
 
 void Fb2Parser::appendPartWordBytes(const char* data, int len) {
+  if (!partWordBuffer_) {
+    partWordBuffer_ = new char[MAX_WORD_SIZE + 1];
+    partWordBufferIndex_ = 0;
+  }
   int remaining = len;
   const char* src = data;
 
@@ -551,6 +614,18 @@ void Fb2Parser::addLineToPage(std::shared_ptr<TextBlock> line) {
     if (maxPages_ > 0 && pagesCreated_ >= maxPages_) {
       hitMaxPages_ = true;
       stopRequested_ = true;
+      // Suspend Expat immediately so that no further callbacks fire.
+      // Without this, characterData/endElement callbacks for subsequent
+      // paragraphs in the same 4 KB buffer keep running, merging words
+      // from multiple paragraphs into the same currentTextBlock_.  Those
+      // merged pages differ from a fresh parse (cold extend), and when
+      // the cache is later rebuilt the page boundaries shift — the user
+      // then sees a paragraph at the end of one page repeated at the
+      // start of the next.
+      if (xmlParser_) {
+        XML_StopParser(xmlParser_, XML_TRUE);
+        xmlParserSuspended_ = true;
+      }
     }
   }
 

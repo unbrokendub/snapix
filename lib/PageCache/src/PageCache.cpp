@@ -7,15 +7,18 @@
 #include <Page.h>
 #include <SDCardManager.h>
 #include <Serialization.h>
+#include <SharedSpiLock.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 
 #include <cstdarg>
 #include <cstdio>
+#include <new>
 
 #include "ContentParser.h"
 
 namespace {
-constexpr uint8_t CACHE_FILE_VERSION = 20;  // v20: serialize image provenance for EPUB fallback tracing
+constexpr uint8_t CACHE_FILE_VERSION = 22;  // v22: add fakeBold to config header
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 #ifndef PAPYRIX_PERF_LOG
@@ -51,12 +54,14 @@ inline void perfLog(const char* phase, uint32_t startedMs, const char* fmt = nul
 // - paragraphAlignment (1 byte)
 // - hyphenation (1 byte)
 // - showImages (1 byte)
+// - bionicReading (1 byte)
+// - fakeBold (1 byte)
 // - viewportWidth (2 bytes)
 // - viewportHeight (2 bytes)
 // - pageCount (2 bytes)
 // - isPartial (1 byte)
 // - lutOffset (4 bytes)
-constexpr uint32_t HEADER_SIZE = 1 + 4 + 4 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 4;
+constexpr uint32_t HEADER_SIZE = 1 + 4 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 4;
 
 bool validateCacheIndexBounds(const char* cachePath, const size_t fileSize, const uint16_t pageCount,
                               const uint32_t lutOffset) {
@@ -92,7 +97,7 @@ bool evictCacheFile(const std::string& cachePath, const char* reason) {
   }
 
   if (SdMan.remove(cachePath.c_str())) {
-    LOG_ERR(TAG, "Removed stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());
+    LOG_INF(TAG, "Removed stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());
     return true;
   }
 
@@ -102,7 +107,7 @@ bool evictCacheFile(const std::string& cachePath, const char* reason) {
   }
 
   if (SdMan.rename(cachePath.c_str(), quarantinePath.c_str())) {
-    LOG_ERR(TAG, "Quarantined stale cache file reason=%s path=%s quarantine=%s", reason ? reason : "unknown",
+    LOG_INF(TAG, "Quarantined stale cache file reason=%s path=%s quarantine=%s", reason ? reason : "unknown",
             cachePath.c_str(), quarantinePath.c_str());
     return true;
   }
@@ -110,12 +115,22 @@ bool evictCacheFile(const std::string& cachePath, const char* reason) {
   LOG_ERR(TAG, "Failed to evict stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());
   return false;
 }
+// Close an FsFile under SharedBusLock.  SdFat close() flushes the write
+// buffer, updates the FAT, and writes the directory entry — all SPI
+// transactions that must not overlap with e-ink display SPI traffic.
+void closeFileProtected(FsFile& f) {
+  if (f) {
+    papyrix::spi::SharedBusLock lk;
+    f.close();
+  }
+}
 }  // namespace
 
 PageCache::PageCache(std::string cachePath) : cachePath_(std::move(cachePath)) {}
 
 bool PageCache::ensureReadHandle() {
   if (readFile_) return true;
+  papyrix::spi::SharedBusLock lk;
   if (!SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
     return false;
   }
@@ -125,6 +140,7 @@ bool PageCache::ensureReadHandle() {
 
 void PageCache::closeReadHandle() {
   if (readFile_) {
+    papyrix::spi::SharedBusLock lk;
     readFile_.close();
   }
   readFileSize_ = 0;
@@ -193,6 +209,7 @@ void PageCache::trimResidentPages(uint16_t centerPage, uint8_t keepBehind, uint8
 }
 
 bool PageCache::writeHeader(bool isPartial) {
+  papyrix::spi::SharedBusLock lk;
   file_.seek(0);
   serialization::writePod(file_, CACHE_FILE_VERSION);
   serialization::writePod(file_, config_.fontId);
@@ -202,6 +219,8 @@ bool PageCache::writeHeader(bool isPartial) {
   serialization::writePod(file_, config_.paragraphAlignment);
   serialization::writePod(file_, config_.hyphenation);
   serialization::writePod(file_, config_.showImages);
+  serialization::writePod(file_, config_.bionicReading);
+  serialization::writePod(file_, config_.fakeBold);
   serialization::writePod(file_, config_.viewportWidth);
   serialization::writePod(file_, config_.viewportHeight);
   serialization::writePod(file_, pageCount_);
@@ -211,6 +230,7 @@ bool PageCache::writeHeader(bool isPartial) {
 }
 
 bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
+  papyrix::spi::SharedBusLock lk;
   const uint32_t lutOffset = file_.position();
 
   for (const uint32_t pos : lut) {
@@ -228,12 +248,16 @@ bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
   serialization::writePod(file_, lutOffset);
   lutOffset_ = lutOffset;
   pageLut_ = lut;
-  clearResidentPages();
+  // Don't clear resident pages here — hot extend only appends pages,
+  // existing offsets stay valid.  Callers that rebuild the file (cold
+  // extend) already call clearResidentPages() explicitly.
+  closeReadHandle();
 
   return true;
 }
 
 bool PageCache::loadLut(std::vector<uint32_t>& lut) {
+  papyrix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -280,6 +304,7 @@ bool PageCache::loadLut(std::vector<uint32_t>& lut) {
 }
 
 bool PageCache::loadRaw() {
+  papyrix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -321,6 +346,7 @@ bool PageCache::loadRaw() {
 
 PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const RenderConfig& config, bool cleanupInvalid) {
   ProbeResult result;
+  papyrix::spi::SharedBusLock lk;
   if (!SdMan.exists(cachePath.c_str())) {
     return result;
   }
@@ -359,6 +385,7 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
   serialization::readPod(readFile, fileConfig.paragraphAlignment);
   serialization::readPod(readFile, fileConfig.hyphenation);
   serialization::readPod(readFile, fileConfig.showImages);
+  serialization::readPod(readFile, fileConfig.bionicReading);
   serialization::readPod(readFile, fileConfig.viewportWidth);
   serialization::readPod(readFile, fileConfig.viewportHeight);
   if (config != fileConfig) {
@@ -392,6 +419,7 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
 }
 
 bool PageCache::load(const RenderConfig& config) {
+  papyrix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -417,12 +445,20 @@ bool PageCache::load(const RenderConfig& config) {
   serialization::readPod(readFile_, fileConfig.paragraphAlignment);
   serialization::readPod(readFile_, fileConfig.hyphenation);
   serialization::readPod(readFile_, fileConfig.showImages);
+  serialization::readPod(readFile_, fileConfig.bionicReading);
+  serialization::readPod(readFile_, fileConfig.fakeBold);
   serialization::readPod(readFile_, fileConfig.viewportWidth);
   serialization::readPod(readFile_, fileConfig.viewportHeight);
 
   if (config != fileConfig) {
     closeReadHandle();
-    LOG_INF(TAG, "Config mismatch, invalidating cache");
+    LOG_INF(TAG, "Config mismatch, invalidating cache — font:%d/%d lc:%d/%d il:%d/%d sl:%d/%d pa:%d/%d hy:%d/%d si:%d/%d br:%d/%d fb:%d/%d vw:%d/%d vh:%d/%d",
+            config.fontId, fileConfig.fontId, config.lineCompression, fileConfig.lineCompression,
+            config.indentLevel, fileConfig.indentLevel, config.spacingLevel, fileConfig.spacingLevel,
+            config.paragraphAlignment, fileConfig.paragraphAlignment, config.hyphenation, fileConfig.hyphenation,
+            config.showImages, fileConfig.showImages, config.bionicReading, fileConfig.bionicReading,
+            config.fakeBold, fileConfig.fakeBold, config.viewportWidth, fileConfig.viewportWidth,
+            config.viewportHeight, fileConfig.viewportHeight);
     clear();
     pageLut_.clear();
     clearResidentPages();
@@ -454,7 +490,7 @@ bool PageCache::load(const RenderConfig& config) {
 
 bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16_t maxPages, uint16_t skipPages,
                        const AbortCallback& shouldAbort) {
-  LOG_ERR(TAG, "[CACHE] create start path=%s maxPages=%u skipPages=%u", cachePath_.c_str(),
+  LOG_INF(TAG, "[CACHE] create start path=%s maxPages=%u skipPages=%u", cachePath_.c_str(),
           static_cast<unsigned>(maxPages), static_cast<unsigned>(skipPages));
   const uint32_t startMs = perfMsNow();
 
@@ -472,17 +508,34 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
 
     // Append new pages AFTER old LUT (crash-safe: old LUT remains valid until header update)
     closeReadHandle();
-    if (!file_.open(cachePath_.c_str(), O_RDWR)) {
-      LOG_ERR(TAG, "Failed to open cache file for append");
-      return false;
+    {
+      papyrix::spi::SharedBusLock lk;
+      if (!file_.open(cachePath_.c_str(), O_RDWR)) {
+        LOG_ERR(TAG, "Failed to open cache file for append");
+        return false;
+      }
+      file_.seekEnd();  // Append after old LUT
     }
-    file_.seekEnd();  // Append after old LUT
   } else {
     // Fresh create
     closeReadHandle();
-    if (file_) {
-      file_.close();
+    closeFileProtected(file_);
+
+    // Ensure parent directory exists — setupCacheDir() may have failed silently
+    // after a cache-clear, or this path may be used before it was called.
+    {
+      const auto slash = cachePath_.rfind('/');
+      if (slash != std::string::npos) {
+        const std::string parentDir = cachePath_.substr(0, slash);
+        if (!SdMan.exists(parentDir.c_str())) {
+          LOG_INF(TAG, "Creating missing parent dir: %s", parentDir.c_str());
+          if (!SdMan.mkdir(parentDir.c_str())) {
+            LOG_ERR(TAG, "Failed to create parent dir: %s", parentDir.c_str());
+          }
+        }
+      }
     }
+
     if (!SdMan.openFileForWrite("CACHE", cachePath_, file_)) {
       if (SdMan.exists(cachePath_.c_str())) {
         LOG_ERR(TAG, "Retrying cache create after removing stale file: %s", cachePath_.c_str());
@@ -510,7 +563,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
 
   // Check for abort before starting expensive parsing
   if (shouldAbort && shouldAbort()) {
-    file_.close();
+    closeFileProtected(file_);
     // Fresh create writes a placeholder header before parsing starts. If we abort
     // here and keep that file, later probes see a zero-page cache and spin on
     // "Rejecting empty/incomplete cache file" for the same section.
@@ -525,33 +578,43 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
   bool hitMaxPages = false;
   bool aborted = false;
 
-  bool success = parser.parsePages(
-      [this, &lut, &hitMaxPages, &parsedPages, maxPages, skipPages](std::unique_ptr<Page> page) {
-        if (hitMaxPages) return;
+  bool success = false;
+  try {
+    success = parser.parsePages(
+        [this, &lut, &hitMaxPages, &parsedPages, maxPages, skipPages](std::unique_ptr<Page> page) {
+          if (hitMaxPages) return;
 
-        parsedPages++;
+          parsedPages++;
 
-        // Skip pages we already have cached
-        if (parsedPages <= skipPages) {
-          return;
-        }
+          // Skip pages we already have cached
+          if (parsedPages <= skipPages) {
+            return;
+          }
 
-        // Serialize new page
-        const uint32_t position = file_.position();
-        if (!page->serialize(file_)) {
-          LOG_ERR(TAG, "Failed to serialize page %d", pageCount_);
-          return;
-        }
+          // Serialize new page — lock SPI bus for position read + write
+          papyrix::spi::SharedBusLock lk;
+          const uint32_t position = file_.position();
+          if (!page->serialize(file_)) {
+            LOG_ERR(TAG, "Failed to serialize page %d", pageCount_);
+            return;
+          }
 
-        lut.push_back(position);
-        pageCount_++;
-        LOG_DBG(TAG, "Page %d cached", pageCount_ - 1);
+          lut.push_back(position);
+          pageCount_++;
+          LOG_DBG(TAG, "Page %d cached", pageCount_ - 1);
 
-        if (maxPages > 0 && pageCount_ >= maxPages) {
-          hitMaxPages = true;
-        }
-      },
-      maxPages, shouldAbort);
+          if (maxPages > 0 && pageCount_ >= maxPages) {
+            hitMaxPages = true;
+          }
+        },
+        maxPages, shouldAbort);
+  } catch (const std::bad_alloc&) {
+    LOG_ERR(TAG, "OOM during create (pages=%u)", static_cast<unsigned>(pageCount_));
+    // Treat like an abort — continue with whatever pages were serialized.
+    // Mark partial so the next extend attempt can pick up where we left off.
+    aborted = true;
+    parser.reset();
+  }
 
   // Check if we were aborted
   if (shouldAbort && shouldAbort()) {
@@ -562,7 +625,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
   const bool madeForwardProgress = pageCount_ > initialPageCount;
 
   if (!success && pageCount_ == 0) {
-    file_.close();
+    closeFileProtected(file_);
     // Remove file to prevent corrupt/incomplete cache
     evictCacheFile(cachePath_, "create-empty-failure");
     LOG_ERR(TAG, "[CACHE] create failed/aborted path=%s pages=%u success=%u aborted=%u", cachePath_.c_str(),
@@ -572,7 +635,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
 
   if (aborted || !success) {
     if (!madeForwardProgress) {
-      file_.close();
+      closeFileProtected(file_);
 
       // During extend/rebuild passes the old header/LUT still points at the last
       // known-good cache contents. Keep that file instead of deleting the whole
@@ -582,7 +645,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
         isPartial_ = true;
         pageLut_ = lut;
         clearResidentPages();
-        LOG_ERR(TAG,
+        LOG_INF(TAG,
                 "[CACHE] create kept previous cache path=%s pages=%u success=%u aborted=%u",
                 cachePath_.c_str(), static_cast<unsigned>(pageCount_), static_cast<unsigned>(success),
                 static_cast<unsigned>(aborted));
@@ -600,15 +663,19 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     // reader can keep using the progress made so far instead of throwing it away.
     isPartial_ = true;
     if (!writeLut(lut)) {
-      file_.close();
+      closeFileProtected(file_);
       if (!isExtendPass) {
         evictCacheFile(cachePath_, "create-partial-write-lut-failed");
       }
       return false;
     }
 
-    file_.close();
-    LOG_ERR(TAG, "[CACHE] create partial path=%s pages=%u success=%u aborted=%u", cachePath_.c_str(),
+    {
+      papyrix::spi::SharedBusLock lk;
+      file_.sync();
+    }
+    closeFileProtected(file_);
+    LOG_INF(TAG, "[CACHE] create partial path=%s pages=%u success=%u aborted=%u", cachePath_.c_str(),
             static_cast<unsigned>(pageCount_), static_cast<unsigned>(success), static_cast<unsigned>(aborted));
     perfLog("cache-create", startMs, "(pages=%u partial=%u)", pageCount_, static_cast<unsigned>(isPartial_));
     return true;
@@ -616,12 +683,12 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
 
   isPartial_ = parser.hasMoreContent();
   if (!madeForwardProgress && isPartial_) {
-    file_.close();
+    closeFileProtected(file_);
     if (isExtendPass && initialPageCount > 0) {
       pageCount_ = initialPageCount;
       pageLut_ = lut;
       clearResidentPages();
-      LOG_ERR(TAG, "[CACHE] create kept previous cache path=%s pages=%u reason=no-progress-partial",
+      LOG_INF(TAG, "[CACHE] create kept previous cache path=%s pages=%u reason=no-progress-partial",
               cachePath_.c_str(), static_cast<unsigned>(pageCount_));
       return true;
     }
@@ -633,20 +700,24 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
   }
 
   if (!writeLut(lut)) {
-    file_.close();
+    closeFileProtected(file_);
     evictCacheFile(cachePath_, "create-write-lut-failed");
     return false;
   }
 
-  file_.close();
-  LOG_ERR(TAG, "[CACHE] create done path=%s pages=%u partial=%u", cachePath_.c_str(),
+  {
+    papyrix::spi::SharedBusLock lk;
+    file_.sync();
+  }
+  closeFileProtected(file_);
+  LOG_INF(TAG, "[CACHE] create done path=%s pages=%u partial=%u", cachePath_.c_str(),
           static_cast<unsigned>(pageCount_), static_cast<unsigned>(isPartial_));
   perfLog("cache-create", startMs, "(pages=%u partial=%u)", pageCount_, static_cast<unsigned>(isPartial_));
   return true;
 }
 
 bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const AbortCallback& shouldAbort) {
-  LOG_ERR(TAG, "[CACHE] extend start path=%s current=%u add=%u partial=%u canResume=%u", cachePath_.c_str(),
+  LOG_INF(TAG, "[CACHE] extend start path=%s current=%u add=%u partial=%u canResume=%u", cachePath_.c_str(),
           static_cast<unsigned>(pageCount_), static_cast<unsigned>(additionalPages), static_cast<unsigned>(isPartial_),
           static_cast<unsigned>(parser.canResume()));
   if (!isPartial_) {
@@ -675,7 +746,9 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     bool opened = false;
     for (int attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) delay(50);
+      papyrix::spi::SharedBusLock lk;
       if (file_.open(cachePath_.c_str(), O_RDWR)) {
+        file_.seekEnd();
         opened = true;
         break;
       }
@@ -684,37 +757,84 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
       LOG_ERR(TAG, "Failed to open cache file for hot extend");
       return false;
     }
-    file_.seekEnd();
 
     const uint16_t pagesBefore = pageCount_;
-    bool parseOk = parser.parsePages(
-        [this, &lut](std::unique_ptr<Page> page) {
-          const uint32_t position = file_.position();
-          if (!page->serialize(file_)) return;
-          lut.push_back(position);
-          pageCount_++;
-        },
-        chunk, shouldAbort);
+    bool parseOk = false;
+    try {
+      parseOk = parser.parsePages(
+          [this, &lut](std::unique_ptr<Page> page) {
+            papyrix::spi::SharedBusLock lk;
+            const uint32_t position = file_.position();
+            if (!page->serialize(file_)) return;
+            lut.push_back(position);
+            pageCount_++;
+          },
+          chunk, shouldAbort);
+    } catch (const std::bad_alloc&) {
+      LOG_ERR(TAG, "OOM during hot extend (pages %u→%u)", static_cast<unsigned>(pagesBefore),
+              static_cast<unsigned>(pageCount_));
+      // Align pageCount with lut — only entries present in both are addressable.
+      pageCount_ = static_cast<uint16_t>(lut.size());
+      // Parser state is undefined after an exception; mark partial and
+      // invalidate the parser so the next attempt uses cold extend.
+      isPartial_ = true;
+      parser.reset();
+      // Save whatever progress was made.
+      if (pageCount_ > pagesBefore) {
+        writeLut(lut);
+      }
+      closeFileProtected(file_);
+      return pageCount_ > pagesBefore;
+    }
 
     isPartial_ = parser.hasMoreContent();
 
     if (!parseOk && pageCount_ == pagesBefore) {
-      file_.close();
+      closeFileProtected(file_);
       LOG_ERR(TAG, "[CACHE] hot extend failed path=%s pagesBefore=%u", cachePath_.c_str(),
               static_cast<unsigned>(pagesBefore));
       return false;
     }
 
     if (!writeLut(lut)) {
-      file_.close();
+      closeFileProtected(file_);
       SdMan.remove(cachePath_.c_str());
       return false;
     }
 
-    file_.close();
-    LOG_ERR(TAG, "[CACHE] hot extend done path=%s pages=%u partial=%u", cachePath_.c_str(),
+    // Flush all data and directory metadata to SD before closing. Without an
+    // explicit sync, SdFat may keep the updated directory entry in its
+    // single-sector cache; if the next file operation (e.g. creating the next
+    // section) evicts that cached sector, the entry is lost and the file
+    // appears to vanish.
+    {
+      papyrix::spi::SharedBusLock lk;
+      file_.sync();
+    }
+
+    closeFileProtected(file_);
+    LOG_INF(TAG, "[CACHE] hot extend done path=%s pages=%u partial=%u", cachePath_.c_str(),
             static_cast<unsigned>(pageCount_), static_cast<unsigned>(isPartial_));
     LOG_INF(TAG, "Hot extend done: %d pages, partial=%d", pageCount_, isPartial_);
+
+    // Repeated hot extends keep the parser's XML state (and its internal
+    // allocations) pinned in the middle of the heap.  Transient page/layout
+    // objects allocated and freed around it fragment the heap over time.
+    // When the largest contiguous block drops below a safe threshold, reset
+    // the parser so the *next* extend uses the cold path, which re-parses
+    // from scratch in a fresh allocation context and allows the allocator
+    // to coalesce freed blocks.  The cost is one cold rebuild (~0.5-1 s)
+    // every 8-12 hot extends — far better than an OOM crash.
+    if (isPartial_) {
+      const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (largestBlock < 15 * 1024) {
+        LOG_INF(TAG, "Resetting parser to defragment heap (largest=%u free=%u)",
+                static_cast<unsigned>(largestBlock),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
+        parser.reset();
+      }
+    }
+
     return true;
   }
 
@@ -733,8 +853,11 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
 
   parser.reset();
   const std::string rebuildPath = cachePath_ + ".rebuild";
-  if (SdMan.exists(rebuildPath.c_str())) {
-    SdMan.remove(rebuildPath.c_str());
+  {
+    papyrix::spi::SharedBusLock lk;
+    if (SdMan.exists(rebuildPath.c_str())) {
+      SdMan.remove(rebuildPath.c_str());
+    }
   }
 
   PageCache rebuiltCache(rebuildPath);
@@ -747,69 +870,92 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     // hot-extend to append pages from an incompatible parser position onto the
     // old cache, corrupting section pagination.
     parser.reset();
-    if (SdMan.exists(rebuildPath.c_str())) {
-      SdMan.remove(rebuildPath.c_str());
-    }
-    LOG_ERR(TAG, "[CACHE] cold extend kept previous path=%s rebuilt=%u rebuiltPages=%u current=%u",
-            cachePath_.c_str(), static_cast<unsigned>(rebuildResult), static_cast<unsigned>(rebuiltCache.pageCount()),
-            static_cast<unsigned>(currentPages));
-    return true;
-  }
-
-  closeReadHandle();
-  if (file_) {
-    file_.close();
-  }
-  clearResidentPages();
-  pageLut_.clear();
-
-  const std::string backupPath = cachePath_ + ".bak";
-  if (SdMan.exists(backupPath.c_str())) {
-    SdMan.remove(backupPath.c_str());
-  }
-
-  const bool hadOldCache = SdMan.exists(cachePath_.c_str());
-  if (hadOldCache && !SdMan.rename(cachePath_.c_str(), backupPath.c_str())) {
-    LOG_ERR(TAG, "Failed to back up old cache before cold promote: %s", cachePath_.c_str());
-    SdMan.remove(rebuildPath.c_str());
-    return false;
-  }
-
-  if (!SdMan.rename(rebuildPath.c_str(), cachePath_.c_str())) {
-    LOG_ERR(TAG, "Failed to promote rebuilt cache: %s", cachePath_.c_str());
-    SdMan.remove(rebuildPath.c_str());
-    if (hadOldCache) {
-      SdMan.rename(backupPath.c_str(), cachePath_.c_str());
-    }
-    return false;
-  }
-
-  const bool result = load(config_);
-  if (!result) {
-    LOG_ERR(TAG, "Failed to reload promoted cache: %s", cachePath_.c_str());
-    SdMan.remove(cachePath_.c_str());
-    if (hadOldCache) {
-      SdMan.rename(backupPath.c_str(), cachePath_.c_str());
-      if (load(config_)) {
-        return true;
+    {
+      papyrix::spi::SharedBusLock lk;
+      if (SdMan.exists(rebuildPath.c_str())) {
+        SdMan.remove(rebuildPath.c_str());
       }
     }
+    LOG_INF(TAG, "[CACHE] cold extend kept previous path=%s rebuilt=%u rebuiltPages=%u current=%u",
+            cachePath_.c_str(), static_cast<unsigned>(rebuildResult), static_cast<unsigned>(rebuiltCache.pageCount()),
+            static_cast<unsigned>(currentPages));
+    // Return false to break the caller's retry loop — the rebuild couldn't
+    // produce enough pages and retrying with the same memory won't help.
+    // The outer retry mechanism (with its own retry limit) will handle
+    // transient failures.
     return false;
   }
 
-  if (hadOldCache && SdMan.exists(backupPath.c_str())) {
-    SdMan.remove(backupPath.c_str());
+  // ── Promote the rebuild file to replace the original ──────────────
+  // All SD-card operations below must be guarded by SharedBusLock so
+  // that the SPI bus is never accessed without arbitration while the
+  // display driver (or any other SPI user) might be active.
+  bool result = false;
+  {
+    papyrix::spi::SharedBusLock lk;
+
+    closeReadHandle();
+    closeFileProtected(file_);
+    clearResidentPages();
+    pageLut_.clear();
+
+    const std::string backupPath = cachePath_ + ".bak";
+    if (SdMan.exists(backupPath.c_str())) {
+      SdMan.remove(backupPath.c_str());
+    }
+
+    const bool hadOldCache = SdMan.exists(cachePath_.c_str());
+    if (hadOldCache && !SdMan.rename(cachePath_.c_str(), backupPath.c_str())) {
+      LOG_ERR(TAG, "Failed to back up old cache before cold promote: %s", cachePath_.c_str());
+      SdMan.remove(rebuildPath.c_str());
+      return false;
+    }
+
+    if (!SdMan.rename(rebuildPath.c_str(), cachePath_.c_str())) {
+      LOG_ERR(TAG, "Failed to promote rebuilt cache: %s", cachePath_.c_str());
+      SdMan.remove(rebuildPath.c_str());
+      if (hadOldCache) {
+        SdMan.rename(backupPath.c_str(), cachePath_.c_str());
+      }
+      return false;
+    }
+
+    result = load(config_);
+    if (!result) {
+      LOG_ERR(TAG, "Failed to reload promoted cache: %s", cachePath_.c_str());
+      SdMan.remove(cachePath_.c_str());
+      if (hadOldCache) {
+        SdMan.rename(backupPath.c_str(), cachePath_.c_str());
+        if (load(config_)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    if (hadOldCache && SdMan.exists(backupPath.c_str())) {
+      SdMan.remove(backupPath.c_str());
+    }
+  }  // SharedBusLock released
+
+  // No forward progress — either content is truly finished or OOM/abort
+  // prevented creating more pages.
+  if (result && pageCount_ <= currentPages) {
+    if (!parser.hasMoreContent()) {
+      // Parser has no more content → section is truly complete.
+      LOG_INF(TAG, "No progress during extend (%d pages), marking complete", pageCount_);
+      isPartial_ = false;
+    } else {
+      // Parser has more content but OOM/abort prevented creating pages.
+      // Return false to break the caller's retry loop — retrying won't help
+      // since memory conditions haven't changed.
+      LOG_INF(TAG, "[CACHE] cold extend stalled at %u pages (OOM/abort), signaling no progress",
+              static_cast<unsigned>(pageCount_));
+      return false;
+    }
   }
 
-  // No forward progress AND parser has no more content → content is truly finished.
-  // Without the hasMoreContent() check, an aborted extend (timeout/memory pressure)
-  // would permanently mark the chapter as complete, truncating it.
-  if (result && pageCount_ <= currentPages && !parser.hasMoreContent()) {
-    LOG_INF(TAG, "No progress during extend (%d pages), marking complete", pageCount_);
-    isPartial_ = false;
-  }
-
-  LOG_ERR(TAG, "[CACHE] cold extend done path=%s result=%u pages=%u partial=%u", cachePath_.c_str(),
+  LOG_INF(TAG, "[CACHE] cold extend done path=%s result=%u pages=%u partial=%u", cachePath_.c_str(),
           static_cast<unsigned>(result), static_cast<unsigned>(pageCount_), static_cast<unsigned>(isPartial_));
   return result;
 }
@@ -837,6 +983,7 @@ std::shared_ptr<Page> PageCache::loadPage(uint16_t pageNum) {
   for (int attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) delay(50);
 
+    papyrix::spi::SharedBusLock lk;
     if (!ensureReadHandle()) {
       continue;
     }
@@ -899,20 +1046,23 @@ void PageCache::prefetchWindow(uint16_t centerPage, int direction, uint8_t span)
   if (!hasMiss) return;
 
   const uint32_t startMs = perfMsNow();
-  if (!ensureReadHandle()) return;
+  {
+    papyrix::spi::SharedBusLock lk;
+    if (!ensureReadHandle()) return;
 
-  const size_t fileSize = readFileSize_;
-  for (uint16_t pageNum : wanted) {
-    if (getResidentPage(pageNum)) continue;
-    if (pageNum >= pageLut_.size()) continue;
+    const size_t fileSize = readFileSize_;
+    for (uint16_t pageNum : wanted) {
+      if (getResidentPage(pageNum)) continue;
+      if (pageNum >= pageLut_.size()) continue;
 
-    const uint32_t pagePos = pageLut_[pageNum];
-    if (pagePos < HEADER_SIZE || pagePos >= fileSize) continue;
+      const uint32_t pagePos = pageLut_[pageNum];
+      if (pagePos < HEADER_SIZE || pagePos >= fileSize) continue;
 
-    readFile_.seek(pagePos);
-    auto page = Page::deserialize(readFile_);
-    if (page) {
-      putResidentPage(pageNum, std::shared_ptr<Page>(std::move(page)));
+      readFile_.seek(pagePos);
+      auto page = Page::deserialize(readFile_);
+      if (page) {
+        putResidentPage(pageNum, std::shared_ptr<Page>(std::move(page)));
+      }
     }
   }
   perfLog("page-prefetch", startMs, "(center=%u dir=%d resident=%zu)", centerPage, direction, residentPages_.size());
@@ -922,9 +1072,7 @@ bool PageCache::clear() {
   clearResidentPages();
   pageLut_.clear();
   closeReadHandle();
-  if (file_) {
-    file_.close();
-  }
+  closeFileProtected(file_);
   pageCount_ = 0;
   isPartial_ = false;
   lutOffset_ = 0;

@@ -85,7 +85,7 @@ bool evictPreparedHtmlFile(const std::string& path, const char* label, const cha
 
   const char* why = reason ? reason : "unknown";
   if (SdMan.remove(path.c_str())) {
-    LOG_ERR(TAG, "[CONTENT][EPUB] dropped stale %s cache reason=%s path=%s", label, why, path.c_str());
+    LOG_INF(TAG, "[CONTENT][EPUB] dropped stale %s cache reason=%s path=%s", label, why, path.c_str());
     return true;
   }
 
@@ -95,7 +95,7 @@ bool evictPreparedHtmlFile(const std::string& path, const char* label, const cha
   }
 
   if (SdMan.rename(path.c_str(), quarantinePath.c_str())) {
-    LOG_ERR(TAG, "[CONTENT][EPUB] quarantined stale %s cache reason=%s path=%s quarantine=%s", label, why,
+    LOG_INF(TAG, "[CONTENT][EPUB] quarantined stale %s cache reason=%s path=%s quarantine=%s", label, why,
             path.c_str(), quarantinePath.c_str());
     return true;
   }
@@ -175,7 +175,7 @@ const std::vector<std::pair<std::string, uint16_t>>& EpubChapterParser::getAncho
 }
 
 bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
-  LOG_ERR(TAG, "[CONTENT][EPUB] prepare start spine=%d", spineIndex_);
+  LOG_INF(TAG, "[CONTENT][EPUB] prepare start spine=%d", spineIndex_);
   const auto localPath = epub_->getSpineItem(spineIndex_).href;
   const std::string canonicalSourcePath = epubPreparedSourcePath(epub_->getCachePath(), spineIndex_);
   const std::string canonicalNormalizedPath = epubPreparedNormalizedPath(epub_->getCachePath(), spineIndex_);
@@ -187,28 +187,28 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
 
   if (isReadableNonEmptyFile(normalizedPath_) && looksLikePreparedHtmlFile(normalizedPath_)) {
     parseHtmlPath_ = normalizedPath_;
-    LOG_ERR(TAG, "[CONTENT][EPUB] prepare normalized cache hit spine=%d", spineIndex_);
+    LOG_INF(TAG, "[CONTENT][EPUB] prepare normalized cache hit spine=%d", spineIndex_);
     return true;
   } else if (SdMan.exists(normalizedPath_.c_str())) {
-    LOG_ERR(TAG, "[CONTENT][EPUB] prepare drop invalid normalized cache spine=%d path=%s", spineIndex_,
+    LOG_INF(TAG, "[CONTENT][EPUB] prepare drop invalid normalized cache spine=%d path=%s", spineIndex_,
             normalizedPath_.c_str());
     if (!evictPreparedHtmlFile(normalizedPath_, "normalized", "prepare-invalid-normalized")) {
       normalizedPath_ = epubPreparedWorkPath(canonicalNormalizedPath);
       evictPreparedHtmlFile(normalizedPath_, "normalized-work", "prepare-reset-work-normalized");
-      LOG_ERR(TAG, "[CONTENT][EPUB] prepare switched normalized cache path spine=%d path=%s", spineIndex_,
+      LOG_INF(TAG, "[CONTENT][EPUB] prepare switched normalized cache path spine=%d path=%s", spineIndex_,
               normalizedPath_.c_str());
     }
   }
 
   if (SdMan.exists(sourceHtmlPath_.c_str()) && !looksLikePreparedHtmlFile(sourceHtmlPath_)) {
-    LOG_ERR(TAG, "[CONTENT][EPUB] prepare drop invalid source cache spine=%d path=%s", spineIndex_,
+    LOG_INF(TAG, "[CONTENT][EPUB] prepare drop invalid source cache spine=%d path=%s", spineIndex_,
             sourceHtmlPath_.c_str());
     if (!evictPreparedHtmlFile(sourceHtmlPath_, "source", "prepare-invalid-source")) {
       sourceHtmlPath_ = epubPreparedWorkPath(canonicalSourcePath);
       normalizedPath_ = epubPreparedWorkPath(canonicalNormalizedPath);
       evictPreparedHtmlFile(sourceHtmlPath_, "source-work", "prepare-reset-work-source");
       evictPreparedHtmlFile(normalizedPath_, "normalized-work", "prepare-reset-work-normalized");
-      LOG_ERR(TAG, "[CONTENT][EPUB] prepare switched source cache path spine=%d path=%s", spineIndex_,
+      LOG_INF(TAG, "[CONTENT][EPUB] prepare switched source cache path spine=%d path=%s", spineIndex_,
               sourceHtmlPath_.c_str());
     }
   }
@@ -217,7 +217,7 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
     bool success = false;
     for (int attempt = 0; attempt < 3 && !success; attempt++) {
       if (attempt > 0) {
-        LOG_ERR(TAG, "Retrying chapter extraction (attempt %d)...", attempt + 1);
+        LOG_INF(TAG, "Retrying chapter extraction (attempt %d)...", attempt + 1);
         delay(50);
       }
 
@@ -247,28 +247,28 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
       return false;
     }
   } else {
-    LOG_ERR(TAG, "[CONTENT][EPUB] prepare source cache hit spine=%d", spineIndex_);
+    LOG_INF(TAG, "[CONTENT][EPUB] prepare source cache hit spine=%d", spineIndex_);
   }
 
   parseHtmlPath_ = sourceHtmlPath_;
   papyrix::crashdebug::mark(papyrix::crashdebug::CrashPhase::EpubTocNormalize, static_cast<int16_t>(spineIndex_));
   if (html5::normalizeVoidElements(sourceHtmlPath_, normalizedPath_, shouldAbortPrepare)) {
     parseHtmlPath_ = normalizedPath_;
-    LOG_ERR(TAG, "[CONTENT][EPUB] prepare normalized spine=%d", spineIndex_);
+    LOG_INF(TAG, "[CONTENT][EPUB] prepare normalized spine=%d", spineIndex_);
   } else if (isReadableNonEmptyFile(normalizedPath_)) {
     parseHtmlPath_ = normalizedPath_;
-    LOG_ERR(TAG, "[CONTENT][EPUB] prepare normalized fallback hit spine=%d", spineIndex_);
+    LOG_INF(TAG, "[CONTENT][EPUB] prepare normalized fallback hit spine=%d", spineIndex_);
   } else {
-    LOG_ERR(TAG, "[CONTENT][EPUB] prepare parse source without normalization spine=%d", spineIndex_);
+    LOG_INF(TAG, "[CONTENT][EPUB] prepare parse source without normalization spine=%d", spineIndex_);
   }
 
-  LOG_ERR(TAG, "[CONTENT][EPUB] prepare done spine=%d path=%s", spineIndex_, parseHtmlPath_.c_str());
+  LOG_INF(TAG, "[CONTENT][EPUB] prepare done spine=%d path=%s", spineIndex_, parseHtmlPath_.c_str());
   return !parseHtmlPath_.empty();
 }
 
 bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages,
                                    const AbortCallback& shouldAbort) {
-  LOG_ERR(TAG, "[CONTENT][EPUB] parsePages start spine=%d initialized=%u suspended=%u aborted=%u resumable=%u maxPages=%u",
+  LOG_INF(TAG, "[CONTENT][EPUB] parsePages start spine=%d initialized=%u suspended=%u aborted=%u resumable=%u maxPages=%u",
           spineIndex_, static_cast<unsigned>(initialized_),
           static_cast<unsigned>(liveParser_ ? liveParser_->isSuspended() : 0),
           static_cast<unsigned>(liveParser_ ? liveParser_->wasAborted() : 0), static_cast<unsigned>(canResume()),
@@ -293,12 +293,12 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
 
     hasMore_ = parserSuspended || parserAborted || (!success && pagesCreated_ > 0);
 
-    LOG_ERR(TAG, "[CONTENT][EPUB] parsePages resume done spine=%d success=%u pagesCreated=%u hasMore=%u suspended=%u aborted=%u",
+    LOG_INF(TAG, "[CONTENT][EPUB] parsePages resume done spine=%d success=%u pagesCreated=%u hasMore=%u suspended=%u aborted=%u",
             spineIndex_, static_cast<unsigned>(success), static_cast<unsigned>(pagesCreated_),
             static_cast<unsigned>(hasMore_), static_cast<unsigned>(parserSuspended),
             static_cast<unsigned>(parserAborted));
     if (noProgressRetryable) {
-      LOG_ERR(TAG, "[CONTENT][EPUB] parsePages resume retryable no-progress spine=%d", spineIndex_);
+      LOG_INF(TAG, "[CONTENT][EPUB] parsePages resume retryable no-progress spine=%d", spineIndex_);
     }
 
     if (!parserSuspended) {
@@ -382,7 +382,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   };
 
   auto progressLogger = [this](int progress) {
-    LOG_ERR(TAG, "[CONTENT][EPUB] parse progress spine=%d progress=%d", spineIndex_, progress);
+    LOG_DBG(TAG, "[CONTENT][EPUB] parse progress spine=%d progress=%d", spineIndex_, progress);
   };
 
   liveParser_.reset(new ChapterHtmlSlimParser(parseHtmlPath_, renderer_, config_, wrappedCallback, progressLogger,
@@ -401,12 +401,12 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     success = false;
   }
   hasMore_ = parserSuspended || parserAborted || (!success && pagesCreated_ > 0);
-  LOG_ERR(TAG, "[CONTENT][EPUB] parsePages init done spine=%d success=%u pagesCreated=%u hasMore=%u suspended=%u aborted=%u",
+  LOG_INF(TAG, "[CONTENT][EPUB] parsePages init done spine=%d success=%u pagesCreated=%u hasMore=%u suspended=%u aborted=%u",
           spineIndex_, static_cast<unsigned>(success), static_cast<unsigned>(pagesCreated_),
           static_cast<unsigned>(hasMore_), static_cast<unsigned>(parserSuspended),
           static_cast<unsigned>(parserAborted));
   if (noProgressRetryable) {
-    LOG_ERR(TAG, "[CONTENT][EPUB] parsePages init retryable no-progress spine=%d", spineIndex_);
+    LOG_INF(TAG, "[CONTENT][EPUB] parsePages init retryable no-progress spine=%d", spineIndex_);
   }
 
   const bool hardInitFailure = !success && pagesCreated_ == 0 && !parserSuspended && !parserAborted;

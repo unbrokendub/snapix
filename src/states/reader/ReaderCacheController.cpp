@@ -390,7 +390,7 @@ void ReaderCacheController::createOrExtendCacheImpl(ContentParser& parser, const
     if (!cacheLoaded) {
       cacheLoaded = state.pageCache->load(config);
       if (!cacheLoaded) {
-        LOG_ERR(TAG, "[CACHE] foreground cache miss path=%s reason=load-failed", cachePath.c_str());
+        LOG_INF(TAG, "[CACHE] foreground cache miss path=%s reason=load-failed", cachePath.c_str());
         state.pageCache.reset();
       }
     }
@@ -412,7 +412,7 @@ void ReaderCacheController::createOrExtendCacheImpl(ContentParser& parser, const
         saveAnchorMap(parser, cachePath);
         return;
       }
-      LOG_ERR(TAG, "[CACHE] foreground extend failed path=%s targetPage=%u lastPage=%u", cachePath.c_str(),
+      LOG_INF(TAG, "[CACHE] foreground extend failed path=%s targetPage=%u lastPage=%u", cachePath.c_str(),
               static_cast<unsigned>(targetPage), static_cast<unsigned>(needLastPage));
       state.pageCache.reset();
     } else if (pageAlreadyAvailable || needLastPage) {
@@ -446,7 +446,7 @@ void ReaderCacheController::backgroundCacheImpl(ContentParser& parser, const std
   if (reuseCurrentCache && state.pageCache) {
     loaded = state.pageCache->pageCount() > 0;
     if (!loaded) {
-      LOG_ERR(TAG, "[CACHE] background same-cache skipped path=%s reason=active-cache-empty", cachePath.c_str());
+      LOG_INF(TAG, "[CACHE] background same-cache skipped path=%s reason=active-cache-empty", cachePath.c_str());
       return;
     }
   } else if (state.pageCache) {
@@ -565,7 +565,7 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
         backgroundPrefetchBlockedLargestBlock_ = heap.largestBlock;
         backgroundPrefetchCursorSpine_ = spine;
         backgroundPrefetchSweepComplete_ = false;
-        LOG_ERR(TAG, "[CACHE] background prefetch blocked spine=%d farSweep=%u free=%u largest=%u cursor=%d active=%d",
+        LOG_INF(TAG, "[CACHE] background prefetch blocked spine=%d farSweep=%u free=%u largest=%u cursor=%d active=%d",
                 spine, static_cast<unsigned>(allowFarSweep), static_cast<unsigned>(heap.freeBytes),
                 static_cast<unsigned>(heap.largestBlock), backgroundPrefetchCursorSpine_, activeSpineIndex);
         return didWork;
@@ -654,6 +654,19 @@ BackgroundCachePlan ReaderCacheController::planBackgroundCacheWork(Core& core) {
                               : position_.currentSpineIndex;
 
   plan.activeSpine = activeSpine;
+
+  // Early heap check: refuse background work if the device is near OOM.
+  // This guards ALL background paths (missing, partial, prefetch) because
+  // each path allocates a ContentParser that can push free heap below the
+  // threshold at which SdFat's internal state corrupts.
+  {
+    const HeapState earlyHeap = readHeapState();
+    if (isHeapCritical(earlyHeap)) {
+      plan.reason = BackgroundCacheWakeReason::BlockedByHeap;
+      return plan;
+    }
+  }
+
   if (!pageCache()) {
     plan.shouldStart = true;
     plan.reason = BackgroundCacheWakeReason::CurrentCacheMissing;

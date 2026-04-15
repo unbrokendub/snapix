@@ -25,6 +25,8 @@ const ReaderSettingsView::SettingDef ReaderSettingsView::DEFS[SETTING_COUNT] = {
     {"Show Images", SettingType::Toggle, nullptr, 0},
     {"Status Bar", SettingType::Enum, STATUS_BAR_VALUES, 3},
     {"Reading Orientation", SettingType::Enum, ORIENTATION_VALUES, 4},
+    {"Bionic Reading", SettingType::Toggle, nullptr, 0},
+    {"Fake Bold", SettingType::Toggle, nullptr, 0},
 };
 
 // DeviceSettingsView static definitions
@@ -36,13 +38,14 @@ constexpr const char* const DeviceSettingsView::PAGES_REFRESH_VALUES[];
 constexpr const char* const DeviceSettingsView::TOGGLE_VALUES[];
 constexpr const char* const DeviceSettingsView::FRONT_BUTTON_VALUES[];
 constexpr const char* const DeviceSettingsView::SIDE_BUTTON_VALUES[];
+constexpr const char* const DeviceSettingsView::SLEEP_HOLD_VALUES[];
 
 const DeviceSettingsView::SettingDef DeviceSettingsView::DEFS[SETTING_COUNT] = {
-    {"Auto Sleep Timeout", SLEEP_TIMEOUT_VALUES, 5}, {"Sleep Screen", SLEEP_SCREEN_VALUES, 4},
+    {"Auto Sleep Timeout", SLEEP_TIMEOUT_VALUES, 5}, {"Sleep Screen", SLEEP_SCREEN_VALUES, 5},
     {"Startup Behavior", STARTUP_VALUES, 2},         {"Short Power Button", SHORT_PWR_VALUES, 3},
-    {"Pages Per Refresh", PAGES_REFRESH_VALUES, 8},  {"Transition Refresh", TOGGLE_VALUES, 2},
-    {"Sunlight Fading Fix", TOGGLE_VALUES, 2},       {"Front Buttons", FRONT_BUTTON_VALUES, 2},
-    {"Side Buttons", SIDE_BUTTON_VALUES, 2},
+    {"Sleep Button Hold", SLEEP_HOLD_VALUES, 5},     {"Pages Per Refresh", PAGES_REFRESH_VALUES, 8},
+    {"Transition Refresh", TOGGLE_VALUES, 2},        {"Sunlight Fading Fix", TOGGLE_VALUES, 2},
+    {"Front Buttons", FRONT_BUTTON_VALUES, 2},       {"Side Buttons", SIDE_BUTTON_VALUES, 2},
 };
 
 // Render functions

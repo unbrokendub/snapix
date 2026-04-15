@@ -52,8 +52,15 @@ HeapState readHeapState() {
   return HeapState{heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)};
 }
 
-bool isHeapCritical(const HeapState& heap) { return heap.freeBytes < 72 * 1024 || heap.largestBlock < 36 * 1024; }
+// ESP32-C3 has ~194 KB total heap.  Normal operating free heap during FB2
+// reading is 35-85 KB, with the largest contiguous block around 30-35 KB.
+// The original thresholds (72 KB free / 36 KB largest) were always exceeded,
+// which disabled prefetch entirely and crippled page-turn performance.
+//
+// Revised thresholds: critical means the device genuinely risks OOM if a
+// prefetch or background operation allocates a few KB.
+bool isHeapCritical(const HeapState& heap) { return heap.freeBytes < 28 * 1024 || heap.largestBlock < 10 * 1024; }
 
-bool isHeapTight(const HeapState& heap) { return heap.freeBytes < 96 * 1024 || heap.largestBlock < 52 * 1024; }
+bool isHeapTight(const HeapState& heap) { return heap.freeBytes < 40 * 1024 || heap.largestBlock < 20 * 1024; }
 
 }  // namespace papyrix::reader

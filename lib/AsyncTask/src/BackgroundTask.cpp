@@ -68,7 +68,7 @@ bool BackgroundTask::start(const char* name, uint32_t stackSize, TaskFunction fu
 
   LOG_INF(TAG, "%s: started (handle=%p)", name, handle_);
   if (name_ == "TocJump" || name_ == "PageFill" || name_ == "PageCache" || name_ == "ReaderAsync") {
-    LOG_ERR(TAG, "[ASYNC] %s started (handle=%p stack=%u prio=%d)", name_.c_str(), handle_,
+    LOG_INF(TAG, "[ASYNC] %s started (handle=%p stack=%u prio=%d)", name_.c_str(), handle_,
             static_cast<unsigned>(stackSize), priority);
   }
   return true;
@@ -110,7 +110,7 @@ bool BackgroundTask::stop(uint32_t maxWaitMs) {
     handle_ = nullptr;
     LOG_INF(TAG, "%s: stopped cleanly via self-delete", taskName);
     if (name_ == "TocJump" || name_ == "PageFill" || name_ == "PageCache" || name_ == "ReaderAsync") {
-      LOG_ERR(TAG, "[ASYNC] %s stopped cleanly", taskName);
+      LOG_INF(TAG, "[ASYNC] %s stopped cleanly", taskName);
     }
     return true;
   }
@@ -141,9 +141,7 @@ void BackgroundTask::run() {
 
   const UBaseType_t highWaterWords = uxTaskGetStackHighWaterMark(nullptr);
   const uint32_t highWaterBytes = static_cast<uint32_t>(highWaterWords) * sizeof(StackType_t);
-  if (name_ == "TocJump" || name_ == "PageCache" || name_ == "PageFill") {
-    LOG_INF(TAG, "%s: stack high water %u bytes", name_.c_str(), static_cast<unsigned>(highWaterBytes));
-  }
+  LOG_INF(TAG, "%s: stack high water %u bytes", name_.c_str(), static_cast<unsigned>(highWaterBytes));
 
   // Update state BEFORE signaling (memory order matters)
   state_.store(State::COMPLETE, std::memory_order_release);

@@ -429,25 +429,33 @@ bool Epub::clearCache() const {
 
 void Epub::setupCacheDir() const {
   if (!SdMan.exists(cachePath.c_str())) {
-    SdMan.mkdir(cachePath.c_str());
+    if (!SdMan.mkdir(cachePath.c_str())) {
+      LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
+    }
   }
 
   // Create sections subdirectory for page cache
   const auto sectionsDir = cachePath + "/sections";
   if (!SdMan.exists(sectionsDir.c_str())) {
-    SdMan.mkdir(sectionsDir.c_str());
+    if (!SdMan.mkdir(sectionsDir.c_str())) {
+      LOG_ERR(TAG, "Failed to create sections dir: %s", sectionsDir.c_str());
+    }
   }
 
   // Create chapters subdirectory for prepared chapter HTML
   const auto chaptersDir = cachePath + "/chapters";
   if (!SdMan.exists(chaptersDir.c_str())) {
-    SdMan.mkdir(chaptersDir.c_str());
+    if (!SdMan.mkdir(chaptersDir.c_str())) {
+      LOG_ERR(TAG, "Failed to create chapters dir: %s", chaptersDir.c_str());
+    }
   }
 
   // Create images subdirectory for cached images
   const auto imagesDir = cachePath + "/images";
   if (!SdMan.exists(imagesDir.c_str())) {
-    SdMan.mkdir(imagesDir.c_str());
+    if (!SdMan.mkdir(imagesDir.c_str())) {
+      LOG_ERR(TAG, "Failed to create images dir: %s", imagesDir.c_str());
+    }
   }
 }
 
@@ -918,7 +926,10 @@ Epub::ItemReadResult Epub::readItemContentsToStreamDetailed(const std::string& i
     return ItemReadResult::NotFound;
   }
 
-  const std::string path = FsHelpers::normalisePath(itemHref);
+  // IRI references from OPF manifest or XHTML content may contain percent-
+  // encoded characters and fragment identifiers.  Decode before ZIP lookup.
+  const std::string path = FsHelpers::normalisePath(
+      FsHelpers::percentDecode(FsHelpers::stripQueryAndFragment(itemHref)));
   switch (ZipFile(filepath).readFileToStreamDetailed(path.c_str(), out, chunkSize, dictBuffer, shouldAbort)) {
     case ZipFile::StreamReadResult::Success:
       return ItemReadResult::Success;

@@ -11,8 +11,8 @@
 static std::vector<std::string> collectWords(const std::vector<std::shared_ptr<TextBlock>>& lines) {
   std::vector<std::string> result;
   for (auto& line : lines) {
-    for (auto& wd : line->getWords()) {
-      result.push_back(wd.word);
+    for (size_t i = 0; i < line->wordCount(); i++) {
+      result.emplace_back(line->wordCStr(i), line->wordLen(i));
     }
   }
   return result;
@@ -185,7 +185,7 @@ int main() {
           true, [&]() -> bool { return linesCollected >= 1; });
 
       for (auto& line : lines) {
-        totalWords += line->getWords().size();
+        totalWords += line->wordCount();
       }
     }
 

@@ -74,9 +74,9 @@ class GfxRenderer {
   // Sized for max screen dimension (800 pixels): outputRow = 800/4 = 200 bytes, rowBytes = 800*3 = 2400 bytes (24bpp)
   static constexpr size_t BITMAP_OUTPUT_ROW_SIZE = (EInkDisplay::DISPLAY_WIDTH + 3) / 4;
   static constexpr size_t BITMAP_ROW_BYTES_SIZE = EInkDisplay::DISPLAY_WIDTH * 3;  // 24-bit max
-  uint8_t* bitmapOutputRow_ = nullptr;
-  uint8_t* bitmapRowBytes_ = nullptr;
-  void allocateBitmapRowBuffers();
+  mutable uint8_t* bitmapOutputRow_ = nullptr;
+  mutable uint8_t* bitmapRowBytes_ = nullptr;
+  bool ensureBitmapRowBuffers() const;  // Lazy allocation on first use
   void freeBitmapRowBuffers();
 
   // Word width cache: open-addressing flat hash table for O(1) lookup.
@@ -115,7 +115,8 @@ class GfxRenderer {
 
  public:
   explicit GfxRenderer(EInkDisplay& einkDisplay) : einkDisplay(einkDisplay), renderMode(BW), orientation(Portrait) {
-    allocateBitmapRowBuffers();
+    // Bitmap row buffers are lazy-allocated on first image render (saves ~2.6KB
+    // for text-only reading sessions).  See ensureBitmapRowBuffers().
   }
   ~GfxRenderer() { freeBitmapRowBuffers(); }
 
@@ -182,6 +183,7 @@ class GfxRenderer {
   int getScreenHeight() const;
   void displayBuffer(EInkDisplay::RefreshMode refreshMode = EInkDisplay::FAST_REFRESH,
                      bool turnOffScreen = false) const;
+  void displayBufferDriveAll(bool turnOffScreen = false) const;
   void prepareCurrentFrameAsFastBaseline() const;
   void preparePartialUpdateFrame() const;
   // EXPERIMENTAL: Windowed update - display only a rectangular region

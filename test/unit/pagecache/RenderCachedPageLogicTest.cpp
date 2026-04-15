@@ -1,5 +1,6 @@
 #include "test_utils.h"
 
+#include "GfxRenderer.h"
 #include "states/reader/ReaderDocumentResources.h"
 
 int main() {

@@ -22,7 +22,7 @@ void ReaderNavigationController::enqueuePendingPageTurn(const int direction, con
   if (queuedPendingEpubTurnQueuedMs_ == 0) {
     queuedPendingEpubTurnQueuedMs_ = millis();
   }
-  LOG_ERR(TAG, "[INPUT] deferred page-turn dir=%d queue=%d reason=%s workerState=%d preemptAge=%lu", direction,
+  LOG_INF(TAG, "[INPUT] deferred page-turn dir=%d queue=%d reason=%s workerState=%d preemptAge=%lu", direction,
           queuedPendingEpubTurn_, reason ? reason : "unknown", workerState,
           lastCachePreemptRequestedMs_ == 0 ? 0UL : static_cast<unsigned long>(millis() - lastCachePreemptRequestedMs_));
 }
@@ -51,7 +51,7 @@ void ReaderNavigationController::noteWorkerIdle(const bool workerRunning) {
   deferredTurnIdleLogged_ = true;
   const uint32_t queuedForMs =
       queuedPendingEpubTurnQueuedMs_ == 0 ? 0 : static_cast<uint32_t>(millis() - queuedPendingEpubTurnQueuedMs_);
-  LOG_ERR(TAG, "[INPUT] deferred page-turn resumed queue=%d wait=%lu", queuedPendingEpubTurn_,
+  LOG_INF(TAG, "[INPUT] deferred page-turn resumed queue=%d wait=%lu", queuedPendingEpubTurn_,
           static_cast<unsigned long>(queuedForMs));
 }
 

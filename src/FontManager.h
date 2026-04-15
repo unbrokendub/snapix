@@ -89,6 +89,14 @@ class FontManager {
   int getReaderFontId(const char* familyName, int builtinFontId);
 
   /**
+   * Eagerly load the bold variant for a font family.
+   * Call this when bionic reading is enabled to avoid lazy-loading the bold
+   * font later when the heap may be too fragmented for a contiguous allocation.
+   * No-op if the font has no bold variant or bold is already loaded.
+   */
+  void ensureBoldLoaded(int fontId);
+
+  /**
    * Get font ID for status bar fonts with cleanup of the previous custom status font.
    *
    * @param familyName Font family name (empty = builtin)

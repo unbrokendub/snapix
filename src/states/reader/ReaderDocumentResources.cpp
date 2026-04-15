@@ -61,7 +61,7 @@ bool ReaderDocumentResources::acquire(const Owner kind, const char* reason) {
   }
 
   const char* currentReason = ownerReason_.load(std::memory_order_acquire);
-  LOG_ERR(TAG, "[OWNERSHIP] deny request=%d reason=%s current=%d currentReason=%s", static_cast<int>(kind),
+  LOG_INF(TAG, "[OWNERSHIP] deny request=%d reason=%s current=%d currentReason=%s", static_cast<int>(kind),
           reason ? reason : "-", static_cast<int>(expected), currentReason ? currentReason : "-");
   return false;
 }

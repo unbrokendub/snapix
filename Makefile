@@ -125,7 +125,12 @@ test: test-build test-run ## Build and run all unit tests
 
 test-build: ## Build unit tests
 	@mkdir -p test/build
-	@cd test/build && cmake .. -DCMAKE_BUILD_TYPE=Debug && cmake --build . --parallel
+	@cd test/build && cmake .. -DCMAKE_BUILD_TYPE=Debug \
+		$(if $(shell which /opt/homebrew/opt/llvm/bin/clang 2>/dev/null), \
+			-DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang \
+			-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ \
+			-DCMAKE_OSX_SYSROOT=$(shell xcrun --show-sdk-path),) \
+		&& cmake --build . --parallel
 
 test-run: ## Run unit tests (build first if needed)
 	@if [ ! -d test/build/bin ]; then $(MAKE) test-build; fi

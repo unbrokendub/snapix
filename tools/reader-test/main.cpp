@@ -100,8 +100,8 @@ static void dumpPages(PageCache& cache, const GfxRenderer& gfx, int fontId) {
     for (auto& elem : page->elements) {
       if (elem->getTag() == TAG_PageLine) {
         auto& tb = static_cast<PageLine*>(elem.get())->getTextBlock();
-        for (auto& wd : tb.getWords()) {
-          printf("%s ", renderWord(gfx, fontId, wd.word).c_str());
+        for (size_t wi = 0; wi < tb.wordCount(); wi++) {
+          printf("%s ", renderWord(gfx, fontId, std::string(tb.wordCStr(wi), tb.wordLen(wi))).c_str());
         }
         printf("\n");
       }

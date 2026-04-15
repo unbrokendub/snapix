@@ -96,6 +96,7 @@ class ReaderState : public State {
   std::unique_ptr<ContentParser>& lookaheadParser_;
   int& lookaheadParserSpineIndex_;
   uint8_t pagesUntilFullRefresh_;
+  bool forceCleanRefreshOnNext_ = false;  // drive-all refresh after overlay banner
   bool directUiTransition_ = false;
 
   bool& thumbnailDone_;
@@ -177,7 +178,7 @@ class ReaderState : public State {
 
   // Display helpers
   void displayWithRefresh(Core& core);
-  void renderCenteredStatusMessage(Core& core, const char* message);
+  void renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride = 0);
   Viewport getReaderViewport(bool showStatusBar) const;
   bool isWorkerRunning() const;
   BackgroundTask::State workerState() const;

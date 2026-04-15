@@ -1,7 +1,8 @@
 #pragma once
 
-#include <map>
+#include <algorithm>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "CssStyle.h"
@@ -71,5 +72,26 @@ class CssParser {
   static constexpr size_t MAX_CSS_SELECTOR_LENGTH = 256;
   static constexpr size_t MAX_CSS_FILE_SIZE = 64 * 1024;
 
-  std::map<std::string, CssStyle> styleMap_;
+  // Sorted vector instead of std::map — eliminates per-node heap overhead
+  // (~40 bytes/node for red-black tree).  Lookups stay O(log N) via
+  // std::lower_bound; inserts are O(N) but only happen during CSS parsing,
+  // not during rendering.
+  using StyleEntry = std::pair<std::string, CssStyle>;
+  std::vector<StyleEntry> styleMap_;
+
+  // Binary search helper — returns iterator to matching entry or end()
+  std::vector<StyleEntry>::const_iterator findStyle(const std::string& key) const {
+    auto it = std::lower_bound(
+        styleMap_.begin(), styleMap_.end(), key,
+        [](const StyleEntry& entry, const std::string& k) { return entry.first < k; });
+    if (it != styleMap_.end() && it->first == key) return it;
+    return styleMap_.end();
+  }
+  std::vector<StyleEntry>::iterator findStyleMut(const std::string& key) {
+    auto it = std::lower_bound(
+        styleMap_.begin(), styleMap_.end(), key,
+        [](const StyleEntry& entry, const std::string& k) { return entry.first < k; });
+    if (it != styleMap_.end() && it->first == key) return it;
+    return styleMap_.end();
+  }
 };

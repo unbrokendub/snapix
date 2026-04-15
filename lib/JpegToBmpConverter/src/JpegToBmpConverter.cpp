@@ -447,7 +447,12 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
     }
 
     if ((mcuY & 0x3) == 0) {
-      delay(1);
+      // Yield cooperatively rather than delay — vTaskDelay() puts the task in
+      // BLOCKED state which triggers FreeRTOS priority disinherit.  On
+      // single-core ESP32-C3 this asserts when a recursive mutex is held
+      // (SharedBusLock depth > 1).  taskYIELD() stays READY — no priority
+      // inheritance bookkeeping.
+      taskYIELD();
     }
 
     // Clear the MCU row buffer
@@ -462,6 +467,11 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
         } else {
           LOG_ERR(TAG, "JPEG decode MCU failed at (%d, %d) with error code: %d", mcuX, mcuY, mcuStatus);
         }
+        if (rowAccum) delete[] rowAccum;
+        if (rowCount) delete[] rowCount;
+        if (atkinsonDitherer) delete atkinsonDitherer;
+        if (fsDitherer) delete fsDitherer;
+        if (atkinson1BitDitherer) delete atkinson1BitDitherer;
         free(mcuRowBuffer);
         free(rowBuffer);
         return false;

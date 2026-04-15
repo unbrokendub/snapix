@@ -84,14 +84,15 @@ class ExternalFont {
   static constexpr int getCacheSize() { return CACHE_SIZE; }
 
   /**
-   * Get the approximate cache memory usage in bytes.
-   * Returns total allocated size (cache entries + hash table).
-   * Formula: CACHE_SIZE * (~268 bytes per entry + 2 bytes hash table)
+   * Get the approximate cache memory usage in bytes for the current font.
+   * Returns metadata (always allocated) + bitmap pool (allocated after load).
    */
-  static constexpr size_t getCacheMemorySize() {
-    // Each entry: ~268 bytes (codepoint + bitmap[256] + lastUsed + notFound + minX + advanceX)
-    // Hash table: 2 bytes per entry (int16_t)
-    return static_cast<size_t>(CACHE_SIZE) * (268 + sizeof(int16_t));
+  size_t getCacheMemorySize() const {
+    // Metadata: CacheEntry array + hash table (always present)
+    constexpr size_t metaSize = CACHE_SIZE * (sizeof(CacheEntry) + sizeof(int16_t));
+    // Bitmap pool: allocated after load() with actual _bytesPerChar
+    const size_t poolSize = _bitmapPool ? static_cast<size_t>(CACHE_SIZE) * _bytesPerChar : 0;
+    return metaSize + poolSize;
   }
 
  private:
@@ -110,29 +111,42 @@ class ExternalFont {
   // LRU cache configuration for CJK glyph caching
   // Trade-off: larger cache = better performance with CJK text, but more RAM usage
   //
-  // Memory usage: CACHE_SIZE * ~268 bytes per entry
-  //   - 256 entries = ~69KB (good for CJK-heavy content)
-  //   - 80 entries  = ~22KB (default, balanced for most content)
-  //   - 64 entries  = ~17KB (minimal, may cause cache thrashing with CJK)
+  // Memory usage: CACHE_SIZE * (12 bytes metadata + _bytesPerChar bitmap)
+  //   Bitmap pool is allocated once in load() at the actual glyph size, not a
+  //   fixed 256-byte maximum.  For a 20x22 font (_bytesPerChar=66) this saves
+  //   ~15KB vs the old fixed-slot layout.
   //
-  // To reduce memory usage, change EXTERNAL_FONT_CACHE_SIZE before including this header,
-  // or modify the default below.
+  //   - 256 entries, 33x39 font = 256*(12+195) = ~52KB (was ~69KB)
+  //   - 80 entries, 33x39 font  = 80*(12+195) = ~16KB (was ~22KB)
+  //   - 80 entries, 20x22 font  = 80*(12+66)  = ~6KB  (was ~22KB)
+  //
+  // To reduce cache slot count, change EXTERNAL_FONT_CACHE_SIZE before including
+  // this header, or modify the default below.
 #ifndef EXTERNAL_FONT_CACHE_SIZE
 #define EXTERNAL_FONT_CACHE_SIZE 80
 #endif
   static constexpr int CACHE_SIZE = EXTERNAL_FONT_CACHE_SIZE;
-  static constexpr int MAX_GLYPH_BYTES = 256;  // Max 256 bytes per glyph (supports up to ~45px height)
+  static constexpr int MAX_GLYPH_BYTES = 256;  // Hard limit on _bytesPerChar (supports up to ~45px height)
 
+  // Cache entry metadata — no bitmap storage here; bitmaps live in a
+  // separate contiguous pool (_bitmapPool) sized to the actual _bytesPerChar.
   struct CacheEntry {
     uint32_t codepoint = 0xFFFFFFFF;  // Invalid marker
-    uint8_t bitmap[MAX_GLYPH_BYTES];
     uint32_t lastUsed = 0;
     bool notFound = false;  // True if glyph doesn't exist in font
     uint8_t minX = 0;       // Cached rendering metrics
     uint8_t advanceX = 0;   // Cached advance width
   };
   CacheEntry _cache[CACHE_SIZE] = {};
+  // Contiguous bitmap pool: CACHE_SIZE * _bytesPerChar bytes.
+  // Allocated once in load(), freed in unload().  Slot i's bitmap starts at
+  // _bitmapPool + i * _bytesPerChar.
+  uint8_t* _bitmapPool = nullptr;
   uint32_t _accessCounter = 0;
+
+  /// Return pointer to bitmap data for a given cache slot.
+  uint8_t* slotBitmap(int slot) { return _bitmapPool + slot * _bytesPerChar; }
+  const uint8_t* slotBitmap(int slot) const { return _bitmapPool + slot * _bytesPerChar; }
 
   // Hash table for O(1) cache lookup (codepoint -> cache index)
   // Values: -1 = empty (never used), -2 = tombstone (deleted), >= 0 = cache index

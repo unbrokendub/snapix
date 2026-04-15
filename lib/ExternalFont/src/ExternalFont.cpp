@@ -1,6 +1,7 @@
 #include "ExternalFont.h"
 
 #include <Logging.h>
+#include <SharedSpiLock.h>
 
 #define TAG "EXT_FONT"
 
@@ -23,7 +24,13 @@ void ExternalFont::unload() {
   _bytesPerChar = 0;
   _accessCounter = 0;
 
-  // Clear cache and hash table
+  // Free bitmap pool
+  if (_bitmapPool) {
+    free(_bitmapPool);
+    _bitmapPool = nullptr;
+  }
+
+  // Clear cache metadata and hash table
   for (int i = 0; i < CACHE_SIZE; i++) {
     _cache[i].codepoint = 0xFFFFFFFF;
     _cache[i].lastUsed = 0;
@@ -128,9 +135,12 @@ bool ExternalFont::load(const char* filepath) {
     return false;
   }
 
-  if (!SdMan.openFileForRead("EXT_FONT", filepath, _fontFile)) {
-    LOG_ERR(TAG, "Failed to open: %s", filepath);
-    return false;
+  {
+    papyrix::spi::SharedBusLock busLock;
+    if (!SdMan.openFileForRead("EXT_FONT", filepath, _fontFile)) {
+      LOG_ERR(TAG, "Failed to open: %s", filepath);
+      return false;
+    }
   }
 
   // Validate file size
@@ -142,8 +152,20 @@ bool ExternalFont::load(const char* filepath) {
     return false;
   }
 
+  // Allocate contiguous bitmap pool sized to actual glyph dimensions.
+  // For a 20x22 font this is 80*66 = 5,280 bytes instead of the old
+  // 80*256 = 20,480 bytes — saving ~15KB of heap.
+  const size_t poolSize = static_cast<size_t>(CACHE_SIZE) * _bytesPerChar;
+  _bitmapPool = static_cast<uint8_t*>(malloc(poolSize));
+  if (!_bitmapPool) {
+    LOG_ERR(TAG, "Failed to allocate glyph bitmap pool (%zu bytes)", poolSize);
+    _fontFile.close();
+    return false;
+  }
+  memset(_bitmapPool, 0, poolSize);
+
   _isLoaded = true;
-  LOG_INF(TAG, "Loaded: %s", filepath);
+  LOG_INF(TAG, "Loaded: %s (cache pool %zuB = %d slots x %d B/glyph)", filepath, poolSize, CACHE_SIZE, _bytesPerChar);
   return true;
 }
 
@@ -194,6 +216,11 @@ bool ExternalFont::readGlyphAtOffset(uint32_t offset, uint8_t* buffer) {
     return false;
   }
 
+  papyrix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    return false;
+  }
+
   if (_fontFile.position() != offset && !_fontFile.seek(offset)) {
     return false;
   }
@@ -239,12 +266,13 @@ void ExternalFont::finalizeCacheEntry(const uint32_t codepoint, const int slot, 
   uint8_t maxX = 0;
   bool isEmpty = true;
 
+  const uint8_t* bmp = slotBitmap(slot);
   if (readSuccess && _bytesPerChar > 0) {
     for (int y = 0; y < _charHeight; y++) {
       for (int x = 0; x < _charWidth; x++) {
         const int byteIndex = y * _bytesPerRow + (x / 8);
         const int bitIndex = 7 - (x % 8);
-        if ((_cache[slot].bitmap[byteIndex] >> bitIndex) & 1) {
+        if ((bmp[byteIndex] >> bitIndex) & 1) {
           isEmpty = false;
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
@@ -288,11 +316,11 @@ void ExternalFont::finalizeCacheEntry(const uint32_t codepoint, const int slot, 
 const uint8_t* ExternalFont::loadGlyphIntoSlot(const uint32_t codepoint, const int slot) {
   removeHashEntryForSlot(slot);
 
-  const bool readSuccess = readGlyphFromSD(codepoint, _cache[slot].bitmap);
+  const bool readSuccess = readGlyphFromSD(codepoint, slotBitmap(slot));
   finalizeCacheEntry(codepoint, slot, readSuccess);
   insertHashEntry(codepoint, slot);
 
-  return _cache[slot].notFound ? nullptr : _cache[slot].bitmap;
+  return _cache[slot].notFound ? nullptr : slotBitmap(slot);
 }
 
 const uint8_t* ExternalFont::getGlyph(uint32_t codepoint) {
@@ -308,7 +336,7 @@ const uint8_t* ExternalFont::getGlyph(uint32_t codepoint) {
     if (_cache[cacheIndex].notFound) {
       return nullptr;
     }
-    return _cache[cacheIndex].bitmap;
+    return slotBitmap(cacheIndex);
   }
 
   // Cache miss, need to read from SD card
@@ -367,5 +395,8 @@ void ExternalFont::logCacheStats() const {
   for (int i = 0; i < CACHE_SIZE; i++) {
     if (_cache[i].codepoint != 0xFFFFFFFF) used++;
   }
-  LOG_DBG(TAG, "Cache: %d/%d slots used (~%dKB)", used, CACHE_SIZE, (used * sizeof(CacheEntry)) / 1024);
+  const size_t usedBytes = used * (sizeof(CacheEntry) + _bytesPerChar);
+  const size_t totalBytes = getCacheMemorySize();
+  LOG_DBG(TAG, "Cache: %d/%d slots used (%zuB active / %zuB total, %dB/glyph)",
+          used, CACHE_SIZE, usedBytes, totalBytes, _bytesPerChar);
 }

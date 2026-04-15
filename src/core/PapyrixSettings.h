@@ -16,7 +16,7 @@ class Storage;
 
 struct Settings {
   // Sleep screen display modes
-  enum SleepScreenMode : uint8_t { SleepDark = 0, SleepLight = 1, SleepCustom = 2, SleepCover = 3 };
+  enum SleepScreenMode : uint8_t { SleepDark = 0, SleepLight = 1, SleepCustom = 2, SleepCover = 3, SleepPage = 4 };
 
   // Status bar display modes
   enum StatusBarMode : uint8_t { StatusNone = 0, StatusShow = 1, StatusChapter = 2 };
@@ -68,6 +68,9 @@ struct Settings {
   // Startup behavior
   enum StartupBehavior : uint8_t { StartupLastDocument = 0, StartupHome = 1 };
 
+  // Sleep button hold time (how long power button must be held to enter sleep)
+  enum SleepHoldTime : uint8_t { SleepHold1s = 0, SleepHold2s = 1, SleepHold3s = 2, SleepHold4s = 3, SleepHold5s = 4 };
+
   // Settings fields (same order as CrossPointSettings for binary compatibility)
   uint8_t sleepScreen = SleepDark;
   uint8_t statusBar = StatusShow;
@@ -96,6 +99,9 @@ struct Settings {
   uint8_t frontButtonLayout = FrontBCLR;
   uint8_t transitionFullRefresh = 1;    // Use clean refresh on first render after major state transitions
   uint8_t pendingSleepWake = 0;         // 1 when device intentionally entered deep sleep and next boot should resume
+  uint8_t sleepHoldTime = SleepHold1s;  // How long power button must be held to enter sleep (1-5 seconds)
+  uint8_t bionicReading = 0;            // Bionic reading mode: bold first half of each word
+  uint8_t fakeBold = 0;                 // Fake bold: render bold text via 3x draw instead of bold font
 
   // Persistence (using drivers::Storage wrapper)
   Result<void> load(drivers::Storage& storage);
@@ -106,7 +112,11 @@ struct Settings {
   bool saveToFile() const;
 
   // Computed values
-  uint16_t getPowerButtonDuration() const { return (shortPwrBtn == PowerSleep) ? 10 : 400; }
+  uint16_t getPowerButtonDuration() const {
+    if (shortPwrBtn == PowerSleep) return 10;  // "Sleep" mode: any press triggers sleep
+    constexpr uint16_t holdMs[] = {1000, 2000, 3000, 4000, 5000};
+    return holdMs[sleepHoldTime < 5 ? sleepHoldTime : 0];
+  }
 
   uint32_t getAutoSleepTimeoutMs() const {
     switch (autoSleepMinutes) {
@@ -124,6 +134,7 @@ struct Settings {
   }
 
   int getReaderFontId(const Theme& theme) const;
+  const char* getReaderFontFamily(const Theme& theme) const;
   bool hasExternalReaderFont(const Theme& theme) const;
 
   int getPagesPerRefreshValue() const {

@@ -191,6 +191,19 @@ void FontManager::unloadAllFonts() {
   loadedFamilies.clear();
 }
 
+void FontManager::ensureBoldLoaded(int fontId) {
+  auto it = loadedFamilies.find(fontId);
+  if (it == loadedFamilies.end()) return;
+
+  auto& family = it->second;
+  if (family.deferredPaths[EpdFontFamily::BOLD].empty()) return;
+
+  LOG_INF(TAG, "Eagerly loading bold font for bionic reading (fontId=%d)", fontId);
+  logMemoryStatus("before bold preload");
+  loadDeferredStyle(fontId, EpdFontFamily::BOLD);
+  logMemoryStatus("after bold preload");
+}
+
 void FontManager::fontStyleResolverCallback(void* ctx, int fontId, int styleIdx) {
   auto* self = static_cast<FontManager*>(ctx);
   self->loadDeferredStyle(fontId, styleIdx);
@@ -466,7 +479,7 @@ size_t FontManager::getCustomFontMemoryUsage() const {
 
 size_t FontManager::getExternalFontMemoryUsage() const {
   if (_externalFont && _externalFont->isLoaded()) {
-    return ExternalFont::getCacheMemorySize();
+    return _externalFont->getCacheMemorySize();
   }
   return 0;
 }

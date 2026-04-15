@@ -155,6 +155,10 @@ class ChapterHtmlSlimParser {
   static constexpr uint16_t YIELD_CHECK_INTERVAL = 100;    // Check every 100 iterations
   static constexpr uint16_t CSS_HEAP_CHECK_INTERVAL = 64;  // Check heap for CSS every 64 elements
   static constexpr size_t MIN_FREE_HEAP = 8192;            // 8KB minimum free heap
+  // During JPEG conversion the decoder's own buffers (~6-7KB) consume part of
+  // the largest free block, making the generic 8KB threshold fire on its own
+  // allocations.  4KB is enough headroom for SPI I/O and FreeRTOS interrupts.
+  static constexpr size_t MIN_IMAGE_PROCESS_FREE_HEAP = 4096;
   // Layout needs a bit more headroom than the generic abort threshold, but the
   // old 2x multiplier was too conservative on fragmented heaps and could block
   // progress forever even when layout still had enough room to finish.

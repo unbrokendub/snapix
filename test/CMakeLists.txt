@@ -18,7 +18,7 @@ if(APPLE AND NOT CMAKE_OSX_SYSROOT)
   endif()
 endif()
 
-if(APPLE)
+if(APPLE AND NOT CMAKE_CXX_COMPILER MATCHES "/opt/homebrew")
   set(CLANG_STDLIB_PATH "/Library/Developer/CommandLineTools/usr/include/c++/v1")
   if(EXISTS "${CLANG_STDLIB_PATH}")
     include_directories(SYSTEM "${CLANG_STDLIB_PATH}")

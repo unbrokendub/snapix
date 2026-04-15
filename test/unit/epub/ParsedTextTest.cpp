@@ -99,28 +99,33 @@ static float calculateDemerits(float badness, bool isLastLine) {
   return (1.0f + badness) * (1.0f + badness);
 }
 
-// Known attaching punctuation (from ParsedText.cpp)
-static const std::vector<std::string> punctuation = {
-    ".",
-    ",",
-    "!",
-    "?",
-    ";",
-    ":",
-    "\"",
-    "'",
-    "\xE2\x80\x99",  // ' (U+2019 right single quote)
-    "\xE2\x80\x9D"   // " (U+201D right double quote)
+// Known attaching punctuation (from ParsedText.cpp — kept in sync)
+struct PunctEntry {
+  const char* str;
+  uint8_t len;
 };
+static constexpr PunctEntry punctuation[] = {
+    {".", 1},
+    {",", 1},
+    {"!", 1},
+    {"?", 1},
+    {";", 1},
+    {":", 1},
+    {"\"", 1},
+    {"'", 1},
+    {"\xE2\x80\x99", 3},  // ' (U+2019 right single quote)
+    {"\xE2\x80\x9D", 3},  // " (U+201D right double quote)
+};
+static constexpr size_t PUNCT_COUNT = sizeof(punctuation) / sizeof(punctuation[0]);
 
 static bool isAttachingPunctuationWord(const std::string& word) {
   if (word.empty()) return false;
   size_t pos = 0;
   while (pos < word.size()) {
     bool matched = false;
-    for (const auto& p : punctuation) {
-      if (word.compare(pos, p.size(), p) == 0) {
-        pos += p.size();
+    for (size_t pi = 0; pi < PUNCT_COUNT; pi++) {
+      if (word.compare(pos, punctuation[pi].len, punctuation[pi].str) == 0) {
+        pos += punctuation[pi].len;
         matched = true;
         break;
       }

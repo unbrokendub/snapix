@@ -549,9 +549,17 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     const char* nodeId = imageIdAttr ? imageIdAttr : imageClassAttr;
     LOG_DBG(TAG, "Found image: node=%s src=%s", nodeId ? nodeId : "-", srcAttr ? srcAttr : "(empty)");
 
+    // Decode IRI reference: strip query/fragment, percent-decode.
+    // EPUB XHTML content uses IRI references (RFC 3987) that may contain
+    // percent-encoded characters or fragment identifiers — these must be
+    // resolved to a filesystem path before ZIP entry lookup.
+    const std::string srcDecoded = srcAttr
+        ? FsHelpers::percentDecode(FsHelpers::stripQueryAndFragment(srcAttr))
+        : std::string();
+
     // Silently skip unsupported image formats (GIF, SVG, WebP, etc.)
-    if (srcAttr && !ImageConverterFactory::isSupported(srcAttr)) {
-      LOG_DBG(TAG, "Skipping unsupported format: %s", srcAttr);
+    if (!srcDecoded.empty() && !ImageConverterFactory::isSupported(srcDecoded)) {
+      LOG_DBG(TAG, "Skipping unsupported format: %s (raw: %s)", srcDecoded.c_str(), srcAttr);
       self->depth += 1;
       return;
     }
@@ -569,12 +577,12 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     std::string fallbackReason = "image-pipeline-disabled";
     auto fallbackClass = ImageFailureClass::ImageCacheDisabled;
     bool cacheHit = false;
-    if (srcAttr && self->readItemFn && !self->imageCachePath.empty()) {
-      const std::string srcAttrStr(srcAttr);
-      LOG_ERR(TAG, "[CONTENT][IMAGE] node start node=%s src=%s resolved=%s quick=%u", nodeId ? nodeId : "-",
-              srcAttr, FsHelpers::normalisePath(self->chapterBasePath + srcAttrStr).c_str(),
+    if (!srcDecoded.empty() && self->readItemFn && !self->imageCachePath.empty()) {
+      LOG_INF(TAG, "[CONTENT][IMAGE] node start node=%s src=%s decoded=%s resolved=%s quick=%u", nodeId ? nodeId : "-",
+              srcAttr, srcDecoded.c_str(),
+              FsHelpers::normalisePath(self->chapterBasePath + srcDecoded).c_str(),
               static_cast<unsigned>(self->quickImageDecode_));
-      CachedImageResult cacheResult = self->cacheImage(srcAttrStr);
+      CachedImageResult cacheResult = self->cacheImage(srcDecoded);
       cachedPath = std::move(cacheResult.cachedBmpPath);
       resolvedPath = std::move(cacheResult.resolvedPath);
       fallbackReason = std::move(cacheResult.failureReason);
@@ -601,7 +609,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       if (cacheResult.success) {
         // Skip tiny decorative images (e.g. 1px-tall line separators) - invisible on e-paper
         if (cacheResult.width < 20 || cacheResult.height < 20) {
-          LOG_ERR(TAG, "[CONTENT][IMAGE] skip tiny node=%s src=%s resolved=%s cached=%s size=%ux%u",
+          LOG_INF(TAG, "[CONTENT][IMAGE] skip tiny node=%s src=%s resolved=%s cached=%s size=%ux%u",
                   nodeId ? nodeId : "-", srcAttr, resolvedPath.empty() ? "-" : resolvedPath.c_str(),
                   cachedPath.empty() ? "-" : cachedPath.c_str(), static_cast<unsigned>(cacheResult.width),
                   static_cast<unsigned>(cacheResult.height));
@@ -610,7 +618,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         }
         LOG_DBG(TAG, "Image loaded: %dx%d", cacheResult.width, cacheResult.height);
         auto imageBlock = std::make_shared<ImageBlock>(cachedPath, cacheResult.width, cacheResult.height,
-                                                       nodeId ? nodeId : "", srcAttrStr, resolvedPath);
+                                                       nodeId ? nodeId : "", srcDecoded, resolvedPath);
 
         // Flush any pending text block before adding image
         if (self->currentTextBlock && !self->currentTextBlock->isEmpty()) {
@@ -622,7 +630,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         return;
       }
     } else {
-      if (!srcAttr) {
+      if (srcDecoded.empty()) {
         fallbackReason = "missing-src";
         fallbackClass = ImageFailureClass::MissingSrc;
       } else if (!self->readItemFn) {
@@ -632,11 +640,11 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         fallbackReason = "image-cache-disabled";
         fallbackClass = ImageFailureClass::ImageCacheDisabled;
       }
-      LOG_DBG(TAG, "Image skipped: src=%d, readItemFn=%d, imageCachePath=%d", srcAttr != nullptr,
+      LOG_DBG(TAG, "Image skipped: src=%d, readItemFn=%d, imageCachePath=%d", !srcDecoded.empty(),
               self->readItemFn != nullptr, !self->imageCachePath.empty());
     }
 
-    LOG_ERR(TAG,
+    LOG_INF(TAG,
             "[CONTENT][IMAGE] fallback parser node=%s src=%s resolved=%s cached=%s cacheHit=%u status=%s class=%s "
             "reason=%s retryable=0 terminal=1 stage=placeholder-text",
             nodeId ? nodeId : "-", srcAttr ? srcAttr : "-", resolvedPath.empty() ? "-" : resolvedPath.c_str(),
@@ -1053,13 +1061,15 @@ bool ChapterHtmlSlimParser::initParser() {
     return false;
   }
 
-  if (!SdMan.openFileForRead("EHP", filepath, file_)) {
-    XML_ParserFree(xmlParser_);
-    xmlParser_ = nullptr;
-    return false;
+  {
+    papyrix::spi::SharedBusLock busLock;
+    if (!SdMan.openFileForRead("EHP", filepath, file_)) {
+      XML_ParserFree(xmlParser_);
+      xmlParser_ = nullptr;
+      return false;
+    }
+    totalSize_ = file_.size();
   }
-
-  totalSize_ = file_.size();
   bytesRead_ = 0;
   lastProgress_ = -1;
   pagesCreated_ = 0;
@@ -1108,7 +1118,11 @@ bool ChapterHtmlSlimParser::parseLoop() {
       return false;
     }
 
-    size_t len = file_.read(static_cast<uint8_t*>(buf), kReadChunkSize);
+    size_t len;
+    {
+      papyrix::spi::SharedBusLock busLock;
+      len = file_.read(static_cast<uint8_t*>(buf), kReadChunkSize);
+    }
 
     if (len == 0) {
       LOG_ERR(TAG, "File read error");
@@ -1235,12 +1249,15 @@ bool ChapterHtmlSlimParser::resumeParsing() {
   }
 
   // Reopen file at saved position (closed on suspend to free file handle)
-  if (!SdMan.openFileForRead("EHP", filepath, file_)) {
-    LOG_ERR(TAG, "Failed to reopen file for resume");
-    cleanupParser();
-    return false;
+  {
+    papyrix::spi::SharedBusLock busLock;
+    if (!SdMan.openFileForRead("EHP", filepath, file_)) {
+      LOG_ERR(TAG, "Failed to reopen file for resume");
+      cleanupParser();
+      return false;
+    }
+    file_.seek(bytesRead_);
   }
-  file_.seek(bytesRead_);
 
   // Reset per-extend state
   parseStartTime_ = millis();
@@ -1462,12 +1479,14 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
   CachedImageResult result;
   result.resolvedPath = FsHelpers::normalisePath(chapterBasePath + src);
   result.status = CachedImageStatus::TerminalFailure;
-  LOG_ERR(TAG, "[CONTENT][IMAGE] start src=%s resolved=%s quick=%u", src.c_str(), result.resolvedPath.c_str(),
+  LOG_INF(TAG, "[CONTENT][IMAGE] start src=%s resolved=%s quick=%u", src.c_str(), result.resolvedPath.c_str(),
           static_cast<unsigned>(quickImageDecode_));
   const uint32_t imageStartedMs = millis();
   const uint32_t imageTimeoutMs =
       quickImageDecode_ ? MAX_QUICK_IMAGE_PROCESS_TIME_MS : MAX_FULL_IMAGE_PROCESS_TIME_MS;
-  auto classifyImageInterrupt = [this, imageStartedMs, imageTimeoutMs]() -> ImageInterruptReason {
+  ImageInterruptReason lastSeenInterrupt = ImageInterruptReason::None;
+  auto classifyImageInterrupt = [this, imageStartedMs, imageTimeoutMs,
+                                 &lastSeenInterrupt]() -> ImageInterruptReason {
     if (stopRequested_ || cooperativeAbortRequested_) {
       return ImageInterruptReason::StopRequested;
     }
@@ -1479,8 +1498,9 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
       return ImageInterruptReason::Timeout;
     }
     const size_t freeHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    if (freeHeap < MIN_FREE_HEAP) {
+    if (freeHeap < MIN_IMAGE_PROCESS_FREE_HEAP) {
       LOG_ERR(TAG, "Low memory during image processing (%zu bytes free)", freeHeap);
+      lastSeenInterrupt = ImageInterruptReason::LowMemory;
       return ImageInterruptReason::LowMemory;
     }
     return ImageInterruptReason::None;
@@ -1545,12 +1565,6 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
     return result;
   }
 
-  papyrix::spi::SharedBusLock imageBusLock;
-  if (!imageBusLock) {
-    setRetryable("shared-bus-lock-unavailable", ImageFailureClass::AbortRequested);
-    return result;
-  }
-
   // Generate cache filename from hash
   size_t srcHash = std::hash<std::string>{}(result.resolvedPath);
   result.cachedBmpPath = imageCachePath + "/" + std::to_string(srcHash) + ".bmp";
@@ -1559,98 +1573,112 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
   uint16_t cachedWidth = 0;
   uint16_t cachedHeight = 0;
   std::string cacheFailure;
+  std::string tempPath;
 
-  // Check if already cached and validate the cached BMP before trusting it.
-  if (SdMan.exists(result.cachedBmpPath.c_str())) {
-    result.cacheHit = true;
-    if (validateCachedBmp(result.cachedBmpPath, cachedWidth, cachedHeight, cacheFailure)) {
-      consecutiveImageFailures_ = 0;
-      result.width = cachedWidth;
-      result.height = cachedHeight;
-      result.success = true;
-      result.retryable = false;
-      result.status = CachedImageStatus::Success;
-      result.failureClass = ImageFailureClass::CacheHit;
-      result.failureReason = "cache-hit";
-      LOG_ERR(TAG, "[CONTENT][IMAGE] cache hit src=%s resolved=%s cached=%s size=%ux%u", src.c_str(),
-              result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), static_cast<unsigned>(result.width),
-              static_cast<unsigned>(result.height));
+  // ── Phase 1: cache check + extraction (holds SPI lock) ─────────────
+  // The lock is released before conversion so that convertToBmp() never
+  // runs at recursive-mutex depth > 1.  Deep nesting (depth 3) triggered
+  // xTaskPriorityDisinherit asserts on single-core ESP32-C3.
+  {
+    papyrix::spi::SharedBusLock preLock;
+    if (!preLock) {
+      setRetryable("shared-bus-lock-unavailable", ImageFailureClass::AbortRequested);
       return result;
     }
 
-    LOG_ERR(TAG, "[CONTENT][IMAGE] cache invalid src=%s resolved=%s cached=%s reason=%s action=rebuild", src.c_str(),
-            result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), cacheFailure.c_str());
-    SdMan.remove(result.cachedBmpPath.c_str());
-    SdMan.remove(failedMarker.c_str());
-  }
+    // Check if already cached and validate the cached BMP before trusting it.
+    if (SdMan.exists(result.cachedBmpPath.c_str())) {
+      result.cacheHit = true;
+      if (validateCachedBmp(result.cachedBmpPath, cachedWidth, cachedHeight, cacheFailure)) {
+        consecutiveImageFailures_ = 0;
+        result.width = cachedWidth;
+        result.height = cachedHeight;
+        result.success = true;
+        result.retryable = false;
+        result.status = CachedImageStatus::Success;
+        result.failureClass = ImageFailureClass::CacheHit;
+        result.failureReason = "cache-hit";
+        LOG_INF(TAG, "[CONTENT][IMAGE] cache hit src=%s resolved=%s cached=%s size=%ux%u", src.c_str(),
+                result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), static_cast<unsigned>(result.width),
+                static_cast<unsigned>(result.height));
+        return result;
+      }
 
-  // Failed markers are only trusted for extraction/format failures. Conversion
-  // can still succeed later in quick mode, so allow supported images to retry.
-  if (SdMan.exists(failedMarker.c_str())) {
+      LOG_INF(TAG, "[CONTENT][IMAGE] cache invalid src=%s resolved=%s cached=%s reason=%s action=rebuild", src.c_str(),
+              result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), cacheFailure.c_str());
+      SdMan.remove(result.cachedBmpPath.c_str());
+      SdMan.remove(failedMarker.c_str());
+    }
+
+    // Failed markers are only trusted for extraction/format failures. Conversion
+    // can still succeed later in quick mode, so allow supported images to retry.
+    if (SdMan.exists(failedMarker.c_str())) {
+      if (!ImageConverterFactory::isSupported(src)) {
+        consecutiveImageFailures_++;
+        setTerminal("failed-marker-unsupported-format", ImageFailureClass::UnsupportedFormat);
+        return result;
+      }
+      SdMan.remove(failedMarker.c_str());
+    }
+
+    // Check if format is supported
     if (!ImageConverterFactory::isSupported(src)) {
+      LOG_DBG(TAG, "Unsupported image format: %s", src.c_str());
+      FsFile marker;
+      if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
+        marker.close();
+      }
       consecutiveImageFailures_++;
-      setTerminal("failed-marker-unsupported-format", ImageFailureClass::UnsupportedFormat);
+      setTerminal("unsupported-format", ImageFailureClass::UnsupportedFormat);
       return result;
     }
-    SdMan.remove(failedMarker.c_str());
-  }
 
-  // Check if format is supported
-  if (!ImageConverterFactory::isSupported(src)) {
-    LOG_DBG(TAG, "Unsupported image format: %s", src.c_str());
-    FsFile marker;
-    if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
-      marker.close();
+    // Extract image to temp file (include hash in name for uniqueness)
+    const std::string tempExt = FsHelpers::isPngFile(src) ? ".png" : ".jpg";
+    tempPath = imageCachePath + "/.tmp_" + std::to_string(srcHash) + tempExt;
+    FsFile tempFile;
+    if (!SdMan.openFileForWrite("EHP", tempPath, tempFile)) {
+      LOG_ERR(TAG, "Failed to create temp file for image");
+      setRetryable("temp-open-failed", ImageFailureClass::TempOpenFailed);
+      return result;
     }
-    consecutiveImageFailures_++;
-    setTerminal("unsupported-format", ImageFailureClass::UnsupportedFormat);
-    return result;
-  }
 
-  // Extract image to temp file (include hash in name for uniqueness)
-  const std::string tempExt = FsHelpers::isPngFile(src) ? ".png" : ".jpg";
-  std::string tempPath = imageCachePath + "/.tmp_" + std::to_string(srcHash) + tempExt;
-  FsFile tempFile;
-  if (!SdMan.openFileForWrite("EHP", tempPath, tempFile)) {
-    LOG_ERR(TAG, "Failed to create temp file for image");
-    setRetryable("temp-open-failed", ImageFailureClass::TempOpenFailed);
-    return result;
-  }
-
-  const ReadItemStatus readStatus = readItemFn(result.resolvedPath, tempFile, 1024, shouldAbortImage);
-  if (readStatus != ReadItemStatus::Success) {
-    LOG_ERR(TAG, "[CONTENT][IMAGE] extract result src=%s resolved=%s result=%s", src.c_str(),
-            result.resolvedPath.c_str(), readItemStatusToString(readStatus));
+    const ReadItemStatus readStatus = readItemFn(result.resolvedPath, tempFile, 1024, shouldAbortImage);
+    if (readStatus != ReadItemStatus::Success) {
+      LOG_INF(TAG, "[CONTENT][IMAGE] extract result src=%s resolved=%s result=%s", src.c_str(),
+              result.resolvedPath.c_str(), readItemStatusToString(readStatus));
+      tempFile.close();
+      SdMan.remove(tempPath.c_str());
+      if (readStatus == ReadItemStatus::Aborted) {
+        setRetryable("extract-aborted", ImageFailureClass::ExtractAborted);
+        return result;
+      }
+      if (readStatus == ReadItemStatus::NotFound) {
+        FsFile marker;
+        if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
+          marker.close();
+        }
+        consecutiveImageFailures_++;
+        setTerminal("extract-not-found", ImageFailureClass::ExtractFailed);
+        return result;
+      }
+      if (readStatus == ReadItemStatus::ArchiveError) {
+        FsFile marker;
+        if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
+          marker.close();
+        }
+        consecutiveImageFailures_++;
+        setTerminal("extract-archive-error", ImageFailureClass::ExtractFailed);
+        return result;
+      }
+      setRetryable(readStatus == ReadItemStatus::WriteError ? "extract-write-error" : "extract-io-error",
+                   ImageFailureClass::ExtractFailed);
+      return result;
+    }
     tempFile.close();
-    SdMan.remove(tempPath.c_str());
-    if (readStatus == ReadItemStatus::Aborted) {
-      setRetryable("extract-aborted", ImageFailureClass::ExtractAborted);
-      return result;
-    }
-    if (readStatus == ReadItemStatus::NotFound) {
-      FsFile marker;
-      if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
-        marker.close();
-      }
-      consecutiveImageFailures_++;
-      setTerminal("extract-not-found", ImageFailureClass::ExtractFailed);
-      return result;
-    }
-    if (readStatus == ReadItemStatus::ArchiveError) {
-      FsFile marker;
-      if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
-        marker.close();
-      }
-      consecutiveImageFailures_++;
-      setTerminal("extract-archive-error", ImageFailureClass::ExtractFailed);
-      return result;
-    }
-    setRetryable(readStatus == ReadItemStatus::WriteError ? "extract-write-error" : "extract-io-error",
-                 ImageFailureClass::ExtractFailed);
-    return result;
-  }
-  tempFile.close();
+  }  // preLock released — SPI bus free for convertToBmp
 
+  // ── Phase 2: conversion (convertToBmp acquires its own lock) ───────
   const int maxImageHeight = config.viewportHeight;
   const int maxImageWidth = static_cast<int>(config.viewportWidth);
   auto tryConvert = [&](int maxWidth, int maxHeight, bool quickMode) -> bool {
@@ -1665,48 +1693,58 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
 
   bool success = tryConvert(maxImageWidth, maxImageHeight, quickImageDecode_);
   if (!success && !shouldAbortImage() && !quickImageDecode_) {
-    LOG_ERR(TAG, "[CONTENT][IMAGE] retry quick src=%s", result.resolvedPath.c_str());
-    SdMan.remove(result.cachedBmpPath.c_str());
+    LOG_INF(TAG, "[CONTENT][IMAGE] retry quick src=%s", result.resolvedPath.c_str());
+    { papyrix::spi::SharedBusLock lk; SdMan.remove(result.cachedBmpPath.c_str()); }
     success = tryConvert(maxImageWidth, maxImageHeight, true);
   }
   if (!success && !shouldAbortImage()) {
     const int fallbackWidth = std::max(64, (maxImageWidth * 3) / 4);
     const int fallbackHeight = std::max(64, (maxImageHeight * 3) / 4);
     if (fallbackWidth != maxImageWidth || fallbackHeight != maxImageHeight) {
-      LOG_ERR(TAG, "[CONTENT][IMAGE] retry reduced src=%s size=%dx%d", result.resolvedPath.c_str(), fallbackWidth,
+      LOG_INF(TAG, "[CONTENT][IMAGE] retry reduced src=%s size=%dx%d", result.resolvedPath.c_str(), fallbackWidth,
               fallbackHeight);
-      SdMan.remove(result.cachedBmpPath.c_str());
+      { papyrix::spi::SharedBusLock lk; SdMan.remove(result.cachedBmpPath.c_str()); }
       success = tryConvert(fallbackWidth, fallbackHeight, true);
     }
   }
-  SdMan.remove(tempPath.c_str());
 
-  if (!success) {
-    const ImageInterruptReason interrupt = classifyImageInterrupt();
-    LOG_ERR(TAG, "[CONTENT][IMAGE] convert failed: %s interrupt=%s", result.resolvedPath.c_str(),
-            interruptToReason(interrupt, "none"));
-    SdMan.remove(result.cachedBmpPath.c_str());
-    if (interrupt != ImageInterruptReason::None) {
-      setRetryable(interruptToReason(interrupt, "convert-aborted"),
-                   interruptToFailureClass(interrupt, ImageFailureClass::ConvertAborted));
+  // ── Phase 3: post-conversion cleanup (holds SPI lock) ─────────────
+  {
+    papyrix::spi::SharedBusLock postLock;
+    SdMan.remove(tempPath.c_str());
+
+    if (!success) {
+      const ImageInterruptReason interrupt = classifyImageInterrupt();
+      // Use lastSeenInterrupt when current check shows none — transient conditions
+      // like low memory resolve after the converter frees its buffers.
+      const ImageInterruptReason effectiveInterrupt =
+          (interrupt != ImageInterruptReason::None) ? interrupt : lastSeenInterrupt;
+      LOG_ERR(TAG, "[CONTENT][IMAGE] convert failed: %s interrupt=%s (last=%s)", result.resolvedPath.c_str(),
+              interruptToReason(interrupt, "none"), interruptToReason(effectiveInterrupt, "none"));
+      SdMan.remove(result.cachedBmpPath.c_str());
+      if (effectiveInterrupt != ImageInterruptReason::None) {
+        setRetryable(interruptToReason(effectiveInterrupt, "convert-aborted"),
+                     interruptToFailureClass(effectiveInterrupt, ImageFailureClass::ConvertAborted));
+        return result;
+      }
+      consecutiveImageFailures_++;
+      setTerminal("convert-failed", ImageFailureClass::ConvertFailed);
       return result;
     }
-    consecutiveImageFailures_++;
-    setTerminal("convert-failed", ImageFailureClass::ConvertFailed);
-    return result;
-  }
 
-  std::string generatedFailure;
-  if (!validateCachedBmp(result.cachedBmpPath, cachedWidth, cachedHeight, generatedFailure)) {
-    LOG_ERR(TAG, "[CONTENT][IMAGE] generated invalid bmp src=%s resolved=%s cached=%s reason=%s", src.c_str(),
-            result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), generatedFailure.c_str());
-    SdMan.remove(result.cachedBmpPath.c_str());
-    consecutiveImageFailures_++;
-    setTerminal("generated-bmp-invalid", ImageFailureClass::GeneratedBmpInvalid);
-    return result;
-  }
+    std::string generatedFailure;
+    if (!validateCachedBmp(result.cachedBmpPath, cachedWidth, cachedHeight, generatedFailure)) {
+      LOG_ERR(TAG, "[CONTENT][IMAGE] generated invalid bmp src=%s resolved=%s cached=%s reason=%s", src.c_str(),
+              result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), generatedFailure.c_str());
+      SdMan.remove(result.cachedBmpPath.c_str());
+      consecutiveImageFailures_++;
+      setTerminal("generated-bmp-invalid", ImageFailureClass::GeneratedBmpInvalid);
+      return result;
+    }
 
-  SdMan.remove(failedMarker.c_str());
+    SdMan.remove(failedMarker.c_str());
+  }  // postLock released
+
   consecutiveImageFailures_ = 0;
   result.width = cachedWidth;
   result.height = cachedHeight;
@@ -1715,7 +1753,7 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
   result.status = CachedImageStatus::Success;
   result.failureClass = ImageFailureClass::None;
   result.failureReason = "generated";
-  LOG_ERR(TAG, "[CONTENT][IMAGE] done src=%s resolved=%s cached=%s elapsed=%lu size=%ux%u", src.c_str(),
+  LOG_INF(TAG, "[CONTENT][IMAGE] done src=%s resolved=%s cached=%s elapsed=%lu size=%ux%u", src.c_str(),
           result.resolvedPath.c_str(), result.cachedBmpPath.c_str(),
           static_cast<unsigned long>(millis() - imageStartedMs), static_cast<unsigned>(result.width),
           static_cast<unsigned>(result.height));

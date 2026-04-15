@@ -9,8 +9,13 @@
 class GfxRenderer {
  public:
   int getSpaceWidth(int) const { return 4; }
+  int getSpaceWidth(int, EpdFontFamily::Style) const { return 4; }
 
   int getTextWidth(int, const char* text, EpdFontFamily::Style = EpdFontFamily::REGULAR) const {
+    return static_cast<int>(strlen(text)) * 6;
+  }
+
+  int getTextAdvanceWidth(int, const char* text, EpdFontFamily::Style = EpdFontFamily::REGULAR) const {
     return static_cast<int>(strlen(text)) * 6;
   }
 

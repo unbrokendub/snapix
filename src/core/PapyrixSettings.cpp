@@ -20,9 +20,9 @@ constexpr uint32_t SETTINGS_MAGIC = 0x53585050;
 // Minimum version we can read (allows backward compatibility)
 constexpr uint8_t MIN_SETTINGS_VERSION = 3;
 // Version 9: Moved frontButtonLayout from Theme to Settings
-constexpr uint8_t SETTINGS_FILE_VERSION = 11;
+constexpr uint8_t SETTINGS_FILE_VERSION = 12;
 // Increment this when adding new persisted settings fields
-constexpr uint8_t SETTINGS_COUNT = 27;
+constexpr uint8_t SETTINGS_COUNT = 30;
 }  // namespace
 
 Result<void> Settings::save(drivers::Storage& storage) const {
@@ -67,6 +67,9 @@ Result<void> Settings::save(drivers::Storage& storage) const {
   serialization::writePod(outputFile, frontButtonLayout);
   serialization::writePod(outputFile, transitionFullRefresh);
   serialization::writePod(outputFile, pendingSleepWake);
+  serialization::writePod(outputFile, sleepHoldTime);
+  serialization::writePod(outputFile, bionicReading);
+  serialization::writePod(outputFile, fakeBold);
   outputFile.close();
 
   LOG_INF(TAG, "Settings saved to file");
@@ -111,7 +114,7 @@ Result<void> Settings::load(drivers::Storage& storage) {
   // readPodValidated keeps default value if read value >= maxValue
   uint8_t settingsRead = 0;
   do {
-    serialization::readPodValidated(inputFile, sleepScreen, uint8_t(4));
+    serialization::readPodValidated(inputFile, sleepScreen, uint8_t(5));
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, textLayout, uint8_t(3));
     if (++settingsRead >= fileSettingsCount) break;
@@ -170,6 +173,12 @@ Result<void> Settings::load(drivers::Storage& storage) {
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, pendingSleepWake, uint8_t(2));
     if (++settingsRead >= fileSettingsCount) break;
+    serialization::readPodValidated(inputFile, sleepHoldTime, uint8_t(5));
+    if (++settingsRead >= fileSettingsCount) break;
+    serialization::readPodValidated(inputFile, bionicReading, uint8_t(2));
+    if (++settingsRead >= fileSettingsCount) break;
+    serialization::readPodValidated(inputFile, fakeBold, uint8_t(2));
+    if (++settingsRead >= fileSettingsCount) break;
   } while (false);
 
   // Migrate font size from version < 8 (enum values shifted +1 for FontXSmall)
@@ -198,29 +207,28 @@ int Settings::getReaderFontId(const Theme& theme) const {
   }
 }
 
-bool Settings::hasExternalReaderFont(const Theme& theme) const {
-  const char* family = nullptr;
+const char* Settings::getReaderFontFamily(const Theme& theme) const {
   switch (fontSize) {
     case FontXSmall:
-      family = theme.readerFontFamilyXSmall;
-      break;
+      return theme.readerFontFamilyXSmall;
     case FontMedium:
-      family = theme.readerFontFamilyMedium;
-      break;
+      return theme.readerFontFamilyMedium;
     case FontLarge:
-      family = theme.readerFontFamilyLarge;
-      break;
+      return theme.readerFontFamilyLarge;
     default:
-      family = theme.readerFontFamilySmall;
-      break;
+      return theme.readerFontFamilySmall;
   }
+}
+
+bool Settings::hasExternalReaderFont(const Theme& theme) const {
+  const char* family = getReaderFontFamily(theme);
   return family && *family;
 }
 
 RenderConfig Settings::getRenderConfig(const Theme& theme, uint16_t viewportWidth, uint16_t viewportHeight) const {
   return RenderConfig(getReaderFontId(theme), getLineCompression(), getIndentLevel(), getSpacingLevel(),
-                      paragraphAlignment, static_cast<bool>(hyphenation), static_cast<bool>(showImages), viewportWidth,
-                      viewportHeight);
+                      paragraphAlignment, static_cast<bool>(hyphenation), static_cast<bool>(showImages),
+                      static_cast<bool>(bionicReading), static_cast<bool>(fakeBold), viewportWidth, viewportHeight);
 }
 
 // Legacy methods that use SdMan directly (for early init before Core)
@@ -263,6 +271,9 @@ bool Settings::saveToFile() const {
   serialization::writePod(outputFile, frontButtonLayout);
   serialization::writePod(outputFile, transitionFullRefresh);
   serialization::writePod(outputFile, pendingSleepWake);
+  serialization::writePod(outputFile, sleepHoldTime);
+  serialization::writePod(outputFile, bionicReading);
+  serialization::writePod(outputFile, fakeBold);
   outputFile.close();
 
   LOG_INF(TAG, "Settings saved to file");
@@ -304,7 +315,7 @@ bool Settings::loadFromFile() {
 
   uint8_t settingsRead = 0;
   do {
-    serialization::readPodValidated(inputFile, sleepScreen, uint8_t(4));
+    serialization::readPodValidated(inputFile, sleepScreen, uint8_t(5));
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, textLayout, uint8_t(3));
     if (++settingsRead >= fileSettingsCount) break;
@@ -361,6 +372,12 @@ bool Settings::loadFromFile() {
     serialization::readPodValidated(inputFile, transitionFullRefresh, uint8_t(2));
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, pendingSleepWake, uint8_t(2));
+    if (++settingsRead >= fileSettingsCount) break;
+    serialization::readPodValidated(inputFile, sleepHoldTime, uint8_t(5));
+    if (++settingsRead >= fileSettingsCount) break;
+    serialization::readPodValidated(inputFile, bionicReading, uint8_t(2));
+    if (++settingsRead >= fileSettingsCount) break;
+    serialization::readPodValidated(inputFile, fakeBold, uint8_t(2));
     if (++settingsRead >= fileSettingsCount) break;
   } while (false);
 

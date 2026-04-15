@@ -65,10 +65,11 @@ class Fb2Parser : public ContentParser {
   bool targetSectionStarted_ = false;
   int targetSectionDepth_ = 0;
   bool fragmentComplete_ = false;
+  bool xmlParserSuspended_ = false;
 
-  // Word buffer
+  // Word buffer (lazy-allocated on first use to save ~201 bytes when idle)
   static constexpr int MAX_WORD_SIZE = 200;
-  char partWordBuffer_[MAX_WORD_SIZE + 1] = {};
+  char* partWordBuffer_ = nullptr;
   int partWordBufferIndex_ = 0;
 
   // Page building

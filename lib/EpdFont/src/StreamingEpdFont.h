@@ -106,8 +106,9 @@ class StreamingEpdFont {
 
  private:
   // Cache configuration
-  // 64 entries balances hit rate vs RAM for Latin/Western fonts (fewer unique glyphs per page than CJK)
-  static constexpr int CACHE_SIZE = 64;
+  // 32 entries balances hit rate vs RAM — halves scattered bitmap allocations vs 64.
+  // Latin/Western pages rarely exceed 30 unique glyphs; CJK uses ExternalFont.
+  static constexpr int CACHE_SIZE = 32;
   static constexpr uint32_t INVALID_CODEPOINT = 0xFFFFFFFF;
 
   // Maximum allowed glyph bitmap size (defense against corrupted font files)
@@ -154,7 +155,7 @@ class StreamingEpdFont {
   mutable uint32_t _cacheMisses = 0;
 
   // Glyph lookup cache (codepoint -> glyph pointer, for O(1) repeated lookups)
-  static constexpr int GLYPH_CACHE_SIZE = 64;
+  static constexpr int GLYPH_CACHE_SIZE = 32;
   struct GlyphCacheEntry {
     uint32_t codepoint = INVALID_CODEPOINT;
     const EpdGlyph* glyph = nullptr;

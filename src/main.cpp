@@ -558,6 +558,10 @@ void initUIMode() {
 
   stateMachine.init(papyrix::core, initialState);
 
+  // Discard button events generated during state entry (e.g. power button
+  // release captured during the loading-banner display wait on wake from sleep).
+  papyrix::core.events.clear();
+
   // Force initial render
   LOG_DBG(TAG, "Forcing initial render");
   stateMachine.update(papyrix::core);
@@ -627,6 +631,10 @@ void initReaderMode() {
   }
 
   stateMachine.init(papyrix::core, papyrix::StateId::Reader);
+
+  // Discard button events generated during state entry (e.g. power button
+  // release captured during the loading-banner display wait on wake from sleep).
+  papyrix::core.events.clear();
 
   // Force initial render
   LOG_DBG(TAG, "Forcing initial render");

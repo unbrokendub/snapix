@@ -40,22 +40,28 @@ SleepState::SleepState(GfxRenderer& renderer) : renderer_(renderer) {}
 void SleepState::enter(Core& core) {
   LOG_INF(TAG, "SleepState::enter - rendering sleep screen");
 
-  // Show immediate feedback before rendering sleep screen
-  renderer_.clearScreen(0xFF);
-  renderer_.drawCenteredText(THEME.uiFontId, renderer_.getScreenHeight() / 2, "Sleeping...", true);
-  renderer_.displayBuffer(EInkDisplay::FAST_REFRESH);
+  if (core.settings.sleepScreen == Settings::SleepPage) {
+    // SleepPage: overlay a banner on the current page content.
+    // Skip the intermediate "Sleeping..." clear-screen so the page stays visible.
+    renderPageSleepScreen(core);
+  } else {
+    // Show immediate feedback before rendering sleep screen
+    renderer_.clearScreen(0xFF);
+    renderer_.drawCenteredText(THEME.uiFontId, renderer_.getScreenHeight() / 2, "Sleeping...", true);
+    renderer_.displayBuffer(EInkDisplay::FAST_REFRESH);
 
-  // Render the appropriate sleep screen based on settings
-  switch (core.settings.sleepScreen) {
-    case Settings::SleepCustom:
-      renderCustomSleepScreen(core);
-      break;
-    case Settings::SleepCover:
-      renderCoverSleepScreen(core);
-      break;
-    default:
-      renderDefaultSleepScreen(core);
-      break;
+    // Render the appropriate sleep screen based on settings
+    switch (core.settings.sleepScreen) {
+      case Settings::SleepCustom:
+        renderCustomSleepScreen(core);
+        break;
+      case Settings::SleepCover:
+        renderCoverSleepScreen(core);
+        break;
+      default:
+        renderDefaultSleepScreen(core);
+        break;
+    }
   }
 
   // Save power button duration to RTC memory for wake-up verification
@@ -101,6 +107,29 @@ StateTransition SleepState::update(Core& core) {
   // This should never be called - enter() calls esp_deep_sleep_start() and never returns
   LOG_ERR(TAG, "SleepState::update (unexpected - enter() should not return)");
   return StateTransition::stay(StateId::Sleep);
+}
+
+void SleepState::renderPageSleepScreen(const Core& core) const {
+  const Theme& theme = THEME_MANAGER.current();
+
+  // Draw a centered "Sleeping" banner on top of the current page framebuffer
+  // (same style as the "Loading..." overlay in ReaderState).
+  constexpr int padH = 24;
+  constexpr int padV = 16;
+  const char* message = "Sleeping";
+  const int fontId = theme.uiFontId;
+  const int textWidth = renderer_.getTextWidth(fontId, message, EpdFontFamily::BOLD);
+  const int lineHeight = renderer_.getLineHeight(fontId);
+  const int bannerW = textWidth + padH * 2;
+  const int bannerH = lineHeight + padV * 2;
+  const int bannerX = (renderer_.getScreenWidth() - bannerW) / 2;
+  const int bannerY = (renderer_.getScreenHeight() - bannerH) / 2;
+
+  renderer_.fillRect(bannerX, bannerY, bannerW, bannerH, !theme.primaryTextBlack);
+  renderer_.drawText(fontId, bannerX + padH, bannerY + padV, message, theme.primaryTextBlack, EpdFontFamily::BOLD);
+  renderer_.drawRect(bannerX + 3, bannerY + 3, bannerW - 6, bannerH - 6, theme.primaryTextBlack);
+
+  renderer_.displayBuffer(EInkDisplay::FAST_REFRESH);
 }
 
 void SleepState::renderDefaultSleepScreen(const Core& core) const {

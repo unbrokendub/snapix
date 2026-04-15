@@ -492,6 +492,40 @@ void EInkDisplay::writeRamBuffer(uint8_t ramBuffer, const uint8_t* data, uint32_
   LOG_DBG(TAG, "%s RAM write complete (%lu ms)", bufferName, duration);
 }
 
+void EInkDisplay::writeRamBufferInverted(uint8_t ramBuffer, const uint8_t* data, uint32_t size) {
+  const char* bufferName = (ramBuffer == CMD_WRITE_RAM_BW) ? "BW" : "RED";
+  const unsigned long startTime = millis();
+  LOG_DBG(TAG, "Writing inverted buffer to %s RAM (%lu bytes)...", bufferName, size);
+
+  papyrix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    LOG_ERR(TAG, "Shared SPI lock unavailable for inverted write");
+    return;
+  }
+
+  SPI.beginTransaction(spiSettings);
+  digitalWrite(_cs, LOW);
+  // Command byte
+  digitalWrite(_dc, LOW);
+  SPI.transfer(ramBuffer);
+  // Inverted data in 256-byte chunks (single SPI transaction, no extra lock churn)
+  digitalWrite(_dc, HIGH);
+  constexpr uint16_t kChunk = 256;
+  uint8_t buf[kChunk];
+  for (uint32_t off = 0; off < size; off += kChunk) {
+    const uint16_t len = (size - off < kChunk) ? static_cast<uint16_t>(size - off) : kChunk;
+    for (uint16_t j = 0; j < len; j++) {
+      buf[j] = ~data[off + j];
+    }
+    SPI.writeBytes(buf, len);
+  }
+  digitalWrite(_cs, HIGH);
+  SPI.endTransaction();
+
+  const unsigned long duration = millis() - startTime;
+  LOG_DBG(TAG, "%s RAM inverted write complete (%lu ms)", bufferName, duration);
+}
+
 void EInkDisplay::setFramebuffer(const uint8_t* bwBuffer) const { memcpy(frameBuffer, bwBuffer, BUFFER_SIZE); }
 
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
@@ -611,6 +645,54 @@ void EInkDisplay::displayBuffer(RefreshMode mode, bool turnOffScreen) {
   }
 }
 
+void EInkDisplay::displayBufferDriveAll(bool turnOffScreen) {
+  // Force-drive all pixels to their correct state without the visible black
+  // flash of FULL/HALF_REFRESH.  Technique: write the bitwise-inverse of the
+  // framebuffer into RED RAM so every pixel is seen as "changed" by the
+  // SSD1677 differential engine.  The fast-mode waveform then drives each
+  // pixel to its target state — white pixels get a positive pulse, black
+  // pixels a negative pulse — clearing any accumulated ghosting.
+  //
+  // Speed is comparable to FAST_REFRESH (~450 ms + ~12 ms inverted write).
+
+  if (!canUseFastRefresh()) {
+    // No valid baseline — fall back to HALF_REFRESH which initialises one.
+    displayBuffer(HALF_REFRESH, turnOffScreen);
+    return;
+  }
+
+  grayscaleRevert();
+
+  setRamArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+  // BW RAM: target state (what we want on screen)
+  writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, BUFFER_SIZE);
+
+  // RED RAM: bitwise-inverse — every pixel now appears "changed" to the
+  // differential engine, guaranteeing it receives a driving pulse.
+  writeRamBufferInverted(CMD_WRITE_RAM_RED, frameBuffer, BUFFER_SIZE);
+
+#ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
+  swapBuffers();
+#endif
+
+  // Refresh — controller drives 100% of pixels via the fast-mode waveform.
+  refreshDisplay(FAST_REFRESH, turnOffScreen);
+
+  // Post-refresh: sync RED RAM with the real displayed frame so that the
+  // next differential FAST_REFRESH has a correct baseline.
+  setRamArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+#ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
+  writeRamBuffer(CMD_WRITE_RAM_RED, frameBuffer, BUFFER_SIZE);
+#else
+  writeRamBuffer(CMD_WRITE_RAM_RED, frameBufferActive, BUFFER_SIZE);
+#endif
+
+  if (state_.controller != ControllerState::Faulted && state_.controller != ControllerState::Recovering) {
+    markBaselineKnown(true);
+  }
+}
+
 // EXPERIMENTAL: Windowed update support
 // Displays only a rectangular region of the frame buffer, preserving the rest of the screen.
 // Requirements: x and w must be byte-aligned (multiples of 8 pixels)
@@ -639,6 +721,16 @@ void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
 
   if (state_.controller == ControllerState::Faulted) {
     LOG_ERR(TAG, "Skipping window update while display controller is faulted");
+    return;
+  }
+
+  // Window updates always use fast refresh which requires a valid differential
+  // baseline.  If the display isn't ready (cold boot, after deep-sleep, after
+  // power-off), fall back to a full-screen displayBuffer which handles the
+  // HALF_REFRESH fallback and establishes the baseline for future fast updates.
+  if (!canUseFastRefresh()) {
+    LOG_DBG(TAG, "Window update: display not ready for fast refresh, using full displayBuffer");
+    displayBuffer(FAST_REFRESH, turnOffScreen);
     return;
   }
 

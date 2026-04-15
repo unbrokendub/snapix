@@ -3,6 +3,7 @@
 #include <chrono>
 #include <thread>
 
+#include "platform_stubs.h"
 #include "states/reader/ReaderNavigationController.h"
 
 int main() {

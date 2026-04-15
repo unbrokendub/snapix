@@ -6,6 +6,17 @@ class FsHelpers {
  public:
   static std::string normalisePath(const std::string& path);
 
+  /// Percent-decode (URL-decode) a path.  Converts %XX sequences to the
+  /// corresponding byte.  EPUB XHTML uses IRI references (RFC 3987) that may
+  /// contain percent-encoded characters; these must be decoded before ZIP
+  /// entry lookup.
+  static std::string percentDecode(const std::string& encoded);
+
+  /// Strip IRI fragment (#...) and query (?...) from a reference.
+  /// Per RFC 3986 §3.5, fragments and queries are not part of the resource
+  /// path and must be removed before file lookup.
+  static std::string stripQueryAndFragment(const std::string& ref);
+
   // Check if a filename should be hidden from file browsers
   // Note: Does NOT check for "." prefix - caller should check that separately
   static bool isHiddenFsItem(const char* name);

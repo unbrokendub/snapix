@@ -191,7 +191,7 @@ bool CssParser::parseFile(const char* filepath) {
 }
 
 const CssStyle* CssParser::getStyleForClass(const std::string& className) const {
-  auto it = styleMap_.find(className);
+  auto it = findStyle(className);
   if (it != styleMap_.end()) {
     return &it->second;
   }
@@ -294,11 +294,15 @@ void CssParser::parseRule(const std::string& selector, const std::string& proper
 
       // Store style if it has any supported properties
       if (style.hasTextAlign || style.hasFontStyle || style.hasFontWeight || style.hasDirection) {
-        auto it = styleMap_.find(singleSelector);
+        auto it = findStyleMut(singleSelector);
         if (it != styleMap_.end()) {
           it->second.merge(style);
         } else if (styleMap_.size() < MAX_CSS_RULES) {
-          styleMap_[singleSelector] = style;
+          // Insert in sorted position to maintain binary-search invariant
+          auto insertPos = std::lower_bound(
+              styleMap_.begin(), styleMap_.end(), singleSelector,
+              [](const StyleEntry& entry, const std::string& k) { return entry.first < k; });
+          styleMap_.insert(insertPos, {singleSelector, style});
         }
       }
     }

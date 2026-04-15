@@ -28,15 +28,15 @@ void TextBlock::render(const GfxRenderer&, int, int, int, bool) const {}
 bool TextBlock::serialize(FsFile&) const { return false; }
 std::unique_ptr<TextBlock> TextBlock::deserialize(FsFile&) { return nullptr; }
 
-static std::shared_ptr<PageImage> makeImage(int16_t x, int16_t y, uint16_t w, uint16_t h) {
+static std::unique_ptr<PageImage> makeImage(int16_t x, int16_t y, uint16_t w, uint16_t h) {
   auto block = std::make_shared<ImageBlock>("img.bmp", w, h);
-  return std::make_shared<PageImage>(block, x, y);
+  return std::make_unique<PageImage>(block, x, y);
 }
 
-static std::shared_ptr<PageLine> makeLine(int16_t x, int16_t y) {
+static std::unique_ptr<PageLine> makeLine(int16_t x, int16_t y) {
   std::vector<TextBlock::WordData> words = {{"hello", 0, {}}};
   auto block = std::make_shared<TextBlock>(std::move(words), TextBlock::JUSTIFIED);
-  return std::make_shared<PageLine>(block, x, y);
+  return std::make_unique<PageLine>(block, x, y);
 }
 
 int main() {

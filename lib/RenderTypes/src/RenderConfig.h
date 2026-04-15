@@ -10,12 +10,15 @@ struct RenderConfig {
   uint8_t paragraphAlignment = 0;
   bool hyphenation = false;
   bool showImages = false;
+  bool bionicReading = false;
+  bool fakeBold = false;
   uint16_t viewportWidth = 0;
   uint16_t viewportHeight = 0;
 
   RenderConfig() = default;
   RenderConfig(int fontId, float lineCompression, uint8_t indentLevel, uint8_t spacingLevel, uint8_t paragraphAlignment,
-               bool hyphenation, bool showImages, uint16_t viewportWidth, uint16_t viewportHeight)
+               bool hyphenation, bool showImages, bool bionicReading, bool fakeBold, uint16_t viewportWidth,
+               uint16_t viewportHeight)
       : fontId(fontId),
         lineCompression(lineCompression),
         indentLevel(indentLevel),
@@ -23,6 +26,8 @@ struct RenderConfig {
         paragraphAlignment(paragraphAlignment),
         hyphenation(hyphenation),
         showImages(showImages),
+        bionicReading(bionicReading),
+        fakeBold(fakeBold),
         viewportWidth(viewportWidth),
         viewportHeight(viewportHeight) {}
 
@@ -30,6 +35,7 @@ struct RenderConfig {
     return fontId == o.fontId && std::abs(lineCompression - o.lineCompression) < 1e-6f &&
            indentLevel == o.indentLevel && spacingLevel == o.spacingLevel &&
            paragraphAlignment == o.paragraphAlignment && hyphenation == o.hyphenation && showImages == o.showImages &&
+           bionicReading == o.bionicReading && fakeBold == o.fakeBold &&
            viewportWidth == o.viewportWidth && viewportHeight == o.viewportHeight;
   }
   bool operator!=(const RenderConfig& o) const { return !(*this == o); }

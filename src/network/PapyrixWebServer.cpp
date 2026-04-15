@@ -13,6 +13,169 @@
 
 #define TAG "WEBSERVER"
 
+// ── Lightweight NFD → NFC normalizer for filenames ───────────────
+// macOS (Safari, Finder) sends filenames in NFD: "й" becomes "и" +
+// combining breve (U+0306).  FAT32 stores the raw bytes, but macOS's
+// FAT32 driver then can't stat/rename them because it normalizes the
+// lookup path to NFC and the bytes don't match.
+//
+// We compose the most common Cyrillic and Latin decompositions here
+// before writing to the SD card.  This is NOT a full Unicode NFC
+// implementation — just enough for real-world filenames.
+static uint32_t tryComposeNfc(uint32_t base, uint32_t combining) {
+  switch (combining) {
+    case 0x0300:  // combining grave
+      switch (base) {
+        case 'a': return 0xE0; case 'A': return 0xC0;
+        case 'e': return 0xE8; case 'E': return 0xC8;
+        case 'i': return 0xEC; case 'I': return 0xCC;
+        case 'o': return 0xF2; case 'O': return 0xD2;
+        case 'u': return 0xF9; case 'U': return 0xD9;
+      }
+      break;
+    case 0x0301:  // combining acute
+      switch (base) {
+        case 'a': return 0xE1; case 'A': return 0xC1;
+        case 'e': return 0xE9; case 'E': return 0xC9;
+        case 'i': return 0xED; case 'I': return 0xCD;
+        case 'o': return 0xF3; case 'O': return 0xD3;
+        case 'u': return 0xFA; case 'U': return 0xDA;
+        case 'y': return 0xFD; case 'Y': return 0xDD;
+      }
+      break;
+    case 0x0302:  // combining circumflex
+      switch (base) {
+        case 'a': return 0xE2; case 'A': return 0xC2;
+        case 'e': return 0xEA; case 'E': return 0xCA;
+        case 'i': return 0xEE; case 'I': return 0xCE;
+        case 'o': return 0xF4; case 'O': return 0xD4;
+        case 'u': return 0xFB; case 'U': return 0xDB;
+      }
+      break;
+    case 0x0303:  // combining tilde
+      switch (base) {
+        case 'a': return 0xE3; case 'A': return 0xC3;
+        case 'n': return 0xF1; case 'N': return 0xD1;
+        case 'o': return 0xF5; case 'O': return 0xD5;
+      }
+      break;
+    case 0x0306:  // combining breve  (Cyrillic й/Й, Belarusian ў/Ў)
+      switch (base) {
+        case 0x0438: return 0x0439;  // и → й
+        case 0x0418: return 0x0419;  // И → Й
+        case 0x0443: return 0x045E;  // у → ў
+        case 0x0423: return 0x040E;  // У → Ў
+      }
+      break;
+    case 0x0308:  // combining diaeresis
+      switch (base) {
+        case 'a': return 0xE4; case 'A': return 0xC4;
+        case 'e': return 0xEB; case 'E': return 0xCB;
+        case 'i': return 0xEF; case 'I': return 0xCF;
+        case 'o': return 0xF6; case 'O': return 0xD6;
+        case 'u': return 0xFC; case 'U': return 0xDC;
+        case 'y': return 0xFF; case 'Y': return 0x0178;
+        case 0x0435: return 0x0451;  // е → ё
+        case 0x0415: return 0x0401;  // Е → Ё
+      }
+      break;
+    case 0x030C:  // combining caron  (č, š, ž…)
+      switch (base) {
+        case 'c': return 0x010D; case 'C': return 0x010C;
+        case 's': return 0x0161; case 'S': return 0x0160;
+        case 'z': return 0x017E; case 'Z': return 0x017D;
+      }
+      break;
+    case 0x0327:  // combining cedilla
+      switch (base) {
+        case 'c': return 0xE7; case 'C': return 0xC7;
+      }
+      break;
+  }
+  return 0;  // no composition found — keep as-is
+}
+
+static String normalizeFilenameNFC(const String& input) {
+  const char* s = input.c_str();
+  const size_t len = input.length();
+  String out;
+  out.reserve(len);
+
+  size_t i = 0;
+  while (i < len) {
+    // ── decode one UTF-8 character (the potential base) ──────────
+    const size_t charStart = i;
+    uint32_t base;
+    const uint8_t b0 = static_cast<uint8_t>(s[i]);
+    size_t charLen;
+    if (b0 < 0x80) {
+      base = b0; charLen = 1;
+    } else if ((b0 & 0xE0) == 0xC0 && i + 1 < len) {
+      base = ((b0 & 0x1F) << 6) | (static_cast<uint8_t>(s[i + 1]) & 0x3F);
+      charLen = 2;
+    } else if ((b0 & 0xF0) == 0xE0 && i + 2 < len) {
+      base = ((b0 & 0x0F) << 12) | ((static_cast<uint8_t>(s[i + 1]) & 0x3F) << 6) |
+             (static_cast<uint8_t>(s[i + 2]) & 0x3F);
+      charLen = 3;
+    } else if ((b0 & 0xF8) == 0xF0 && i + 3 < len) {
+      base = ((b0 & 0x07) << 18) | ((static_cast<uint8_t>(s[i + 1]) & 0x3F) << 12) |
+             ((static_cast<uint8_t>(s[i + 2]) & 0x3F) << 6) |
+             (static_cast<uint8_t>(s[i + 3]) & 0x3F);
+      charLen = 4;
+    } else {
+      out += s[i]; i++; continue;  // invalid / pass-through
+    }
+
+    const size_t nextPos = i + charLen;
+
+    // ── peek at the next character: is it a combining mark? ─────
+    if (nextPos + 1 < len && static_cast<uint8_t>(s[nextPos]) == 0xCC) {
+      // U+0300..U+033F → CC 80..CC BF
+      uint32_t comb = ((0xCC & 0x1F) << 6) | (static_cast<uint8_t>(s[nextPos + 1]) & 0x3F);
+      uint32_t composed = tryComposeNfc(base, comb);
+      if (composed) {
+        // encode composed codepoint
+        if (composed < 0x80) {
+          out += static_cast<char>(composed);
+        } else if (composed < 0x800) {
+          out += static_cast<char>(0xC0 | (composed >> 6));
+          out += static_cast<char>(0x80 | (composed & 0x3F));
+        } else {
+          out += static_cast<char>(0xE0 | (composed >> 12));
+          out += static_cast<char>(0x80 | ((composed >> 6) & 0x3F));
+          out += static_cast<char>(0x80 | (composed & 0x3F));
+        }
+        i = nextPos + 2;  // skip base + combining mark
+        continue;
+      }
+    }
+    if (nextPos + 1 < len && static_cast<uint8_t>(s[nextPos]) == 0xCD) {
+      // U+0340..U+037F → CD 80..CD BF  (rare, but check)
+      uint32_t comb = ((0xCD & 0x1F) << 6) | (static_cast<uint8_t>(s[nextPos + 1]) & 0x3F);
+      uint32_t composed = tryComposeNfc(base, comb);
+      if (composed) {
+        if (composed < 0x80) {
+          out += static_cast<char>(composed);
+        } else if (composed < 0x800) {
+          out += static_cast<char>(0xC0 | (composed >> 6));
+          out += static_cast<char>(0x80 | (composed & 0x3F));
+        } else {
+          out += static_cast<char>(0xE0 | (composed >> 12));
+          out += static_cast<char>(0x80 | ((composed >> 6) & 0x3F));
+          out += static_cast<char>(0x80 | (composed & 0x3F));
+        }
+        i = nextPos + 2;
+        continue;
+      }
+    }
+
+    // no composition — copy original bytes
+    for (size_t j = charStart; j < nextPos; j++) out += s[j];
+    i = nextPos;
+  }
+  return out;
+}
+
 namespace papyrix {
 
 static void sendGzipHtml(WebServer* server, const char* data, size_t len) {
@@ -204,7 +367,7 @@ void PapyrixWebServer::handleUpload() {
   HTTPUpload& upload = server_->upload();
 
   if (upload.status == UPLOAD_FILE_START) {
-    upload_.fileName = upload.filename;
+    upload_.fileName = normalizeFilenameNFC(upload.filename);
     upload_.size = 0;
     upload_.success = false;
     upload_.error = "";

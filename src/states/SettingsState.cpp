@@ -427,8 +427,8 @@ void SettingsState::goBack(Core& core) {
     case SettingsScreen::Device:
       saveDeviceSettings();
       // Apply button layouts now that we're leaving the screen
-      core.settings.frontButtonLayout = std::min(deviceView_.values[7], uint8_t(Settings::FrontLRBC));
-      core.settings.sideButtonLayout = std::min(deviceView_.values[8], uint8_t(Settings::NextPrev));
+      core.settings.frontButtonLayout = std::min(deviceView_.values[8], uint8_t(Settings::FrontLRBC));
+      core.settings.sideButtonLayout = std::min(deviceView_.values[9], uint8_t(Settings::NextPrev));
       ui::setFrontButtonLayout(core.settings.frontButtonLayout);
       core.input.resyncState();
       currentScreen_ = SettingsScreen::Menu;
@@ -482,9 +482,20 @@ void SettingsState::handleConfirm(Core& core) {
           // Clear Book Cache
           ui::centeredMessage(renderer_, THEME, THEME.uiFontId, "Clearing cache...");
 
-          auto result = core.storage.rmdir(PAPYRIX_CACHE_DIR);
+          const auto exists = core.storage.exists(PAPYRIX_CACHE_DIR);
+          const bool hadCache = exists.ok() && *exists;
+          const auto result = hadCache ? core.storage.rmdir(PAPYRIX_CACHE_DIR) : Ok();
 
-          const char* msg = result.ok() ? "Cache cleared" : "No cache to clear";
+          // Recreate the empty base cache directory so downstream code
+          // (setupCacheDir, PageCache) can mkdir subdirectories without
+          // needing to recreate every parent from scratch.
+          if (hadCache && result.ok()) {
+            core.storage.mkdir(PAPYRIX_CACHE_DIR);
+          }
+
+          const char* msg = !hadCache       ? "No cache to clear"
+                            : result.ok()   ? "Cache cleared"
+                                            : "Error clearing cache";
           ui::centeredMessage(renderer_, THEME, THEME.uiFontId, msg);
           vTaskDelay(1500 / portTICK_PERIOD_MS);
 
@@ -580,6 +591,12 @@ void SettingsState::loadReaderSettings() {
 
   // Index 9: Reading Orientation (0=Portrait, 1=Landscape CW, 2=Inverted, 3=Landscape CCW)
   readerView_.values[9] = settings.orientation;
+
+  // Index 10: Bionic Reading (toggle)
+  readerView_.values[10] = settings.bionicReading;
+
+  // Index 11: Fake Bold (toggle)
+  readerView_.values[11] = settings.fakeBold;
 }
 
 void SettingsState::saveReaderSettings() {
@@ -623,6 +640,12 @@ void SettingsState::saveReaderSettings() {
 
   // Index 9: Reading Orientation
   settings.orientation = readerView_.values[9];
+
+  // Index 10: Bionic Reading
+  settings.bionicReading = readerView_.values[10];
+
+  // Index 11: Fake Bold
+  settings.fakeBold = readerView_.values[11];
 }
 
 void SettingsState::loadDeviceSettings() {
@@ -640,20 +663,23 @@ void SettingsState::loadDeviceSettings() {
   // Index 3: Short Power Button (Ignore=0, Sleep=1, Page Turn=2)
   deviceView_.values[3] = settings.shortPwrBtn;
 
-  // Index 4: Pages Per Refresh (0=0, 1=1, 5=2, 10=3, 15=4, 30=5, 60=6, 100=7)
-  deviceView_.values[4] = settings.pagesPerRefresh;
+  // Index 4: Sleep Button Hold (1s=0, 2s=1, 3s=2, 4s=3, 5s=4)
+  deviceView_.values[4] = settings.sleepHoldTime;
 
-  // Index 5: Transition Refresh (toggle)
-  deviceView_.values[5] = settings.transitionFullRefresh;
+  // Index 5: Pages Per Refresh (0=0, 1=1, 5=2, 10=3, 15=4, 30=5, 60=6, 100=7)
+  deviceView_.values[5] = settings.pagesPerRefresh;
 
-  // Index 6: Sunlight Fading Fix (toggle)
-  deviceView_.values[6] = settings.sunlightFadingFix;
+  // Index 6: Transition Refresh (toggle)
+  deviceView_.values[6] = settings.transitionFullRefresh;
 
-  // Index 7: Front Buttons (B/C/L/R=0, L/R/B/C=1)
-  deviceView_.values[7] = settings.frontButtonLayout;
+  // Index 7: Sunlight Fading Fix (toggle)
+  deviceView_.values[7] = settings.sunlightFadingFix;
 
-  // Index 8: Side Buttons (Prev/Next=0, Next/Prev=1)
-  deviceView_.values[8] = settings.sideButtonLayout;
+  // Index 8: Front Buttons (B/C/L/R=0, L/R/B/C=1)
+  deviceView_.values[8] = settings.frontButtonLayout;
+
+  // Index 9: Side Buttons (Prev/Next=0, Next/Prev=1)
+  deviceView_.values[9] = settings.sideButtonLayout;
 }
 
 void SettingsState::saveDeviceSettings() {
@@ -671,20 +697,23 @@ void SettingsState::saveDeviceSettings() {
   // Index 3: Short Power Button
   settings.shortPwrBtn = deviceView_.values[3];
 
-  // Index 4: Pages Per Refresh
-  settings.pagesPerRefresh = deviceView_.values[4];
+  // Index 4: Sleep Button Hold
+  settings.sleepHoldTime = deviceView_.values[4];
 
-  // Index 5: Transition Refresh
-  settings.transitionFullRefresh = deviceView_.values[5];
+  // Index 5: Pages Per Refresh
+  settings.pagesPerRefresh = deviceView_.values[5];
 
-  // Index 6: Sunlight Fading Fix
-  settings.sunlightFadingFix = deviceView_.values[6];
+  // Index 6: Transition Refresh
+  settings.transitionFullRefresh = deviceView_.values[6];
 
-  // Index 7: Front Buttons - deferred to goBack() on screen exit.
+  // Index 7: Sunlight Fading Fix
+  settings.sunlightFadingFix = deviceView_.values[7];
+
+  // Index 8: Front Buttons - deferred to goBack() on screen exit.
   // Changing layout while navigating causes ghost button events because the
   // MappedInputManager remaps physical buttons mid-press.
 
-  // Index 8: Side Buttons - deferred to goBack() on screen exit.
+  // Index 9: Side Buttons - deferred to goBack() on screen exit.
   // Same as front buttons: changing layout mid-navigation causes ghost events.
 }
 

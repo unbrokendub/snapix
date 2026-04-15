@@ -11,11 +11,13 @@ struct HeapState {
   size_t largestBlock = 0;
 };
 
-constexpr int kCacheTaskStackSize = 20480;
+constexpr int kCacheTaskStackSize = 16384;
 constexpr int kCacheTaskStopTimeoutMs = 10000;
 constexpr uint8_t kPendingTocJumpMaxRetries = 3;
 constexpr uint8_t kPendingEpubPageLoadMaxRetries = 3;
-constexpr int kInteractiveCacheTaskPriority = 2;
+// Must not exceed the main Arduino loop priority (1) — on single-core
+// ESP32-C3, a higher priority would starve the UI and block button input.
+constexpr int kInteractiveCacheTaskPriority = 1;
 constexpr uint8_t kEpubActivePrefetchAheadSpines = 3;
 constexpr uint32_t kEpubDeepIdleSweepDelayMs = 8000;
 constexpr uint32_t kIdleBackgroundKickIntervalMs = 1500;

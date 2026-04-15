@@ -1,6 +1,9 @@
 #include "ReaderAsyncJobsController.h"
 
 #include <Logging.h>
+#include <esp_heap_caps.h>
+
+#include <new>
 
 #define TAG "RDR_ASYNC"
 
@@ -177,7 +180,29 @@ size_t ReaderAsyncJobsController::clearQueuedCommands() {
 }
 
 ReaderAsyncJobsController::AbortCallback ReaderAsyncJobsController::abortCallback() const {
-  return [this]() { return cancelCurrentJob_.load(std::memory_order_acquire) || workerTask_.shouldStop(); };
+  return [this]() {
+    if (cancelCurrentJob_.load(std::memory_order_acquire) || workerTask_.shouldStop()) return true;
+    // Abort parsing early when heap is dangerously low to prevent std::bad_alloc.
+    // Normal operating heap on ESP32-C3 is ~40-55 KB; the parser pipeline needs
+    // ~5-10 KB working memory for text layout.  Threshold must stay well below
+    // the steady-state level so normal extend/create operations are not blocked.
+    const size_t freeBytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    if (freeBytes < 15 * 1024) {
+      LOG_ERR(TAG, "Aborting job: heap dangerously low (%u bytes free)", static_cast<unsigned>(freeBytes));
+      return true;
+    }
+    // Also check heap fragmentation.  Repeated hot extends keep the parser
+    // alive between calls; its allocations sit in the middle of the heap
+    // and prevent coalescing.  With pool-based TextBlock the parser's largest
+    // single allocation is well under 4 KB, so 8 KB contiguous is sufficient.
+    const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largestBlock < 8 * 1024) {
+      LOG_ERR(TAG, "Aborting job: heap fragmented (largest=%u free=%u)",
+              static_cast<unsigned>(largestBlock), static_cast<unsigned>(freeBytes));
+      return true;
+    }
+    return false;
+  };
 }
 
 void ReaderAsyncJobsController::workerLoop() {
@@ -197,18 +222,25 @@ void ReaderAsyncJobsController::workerLoop() {
     vTaskPrioritySet(nullptr, priority);
 
     const AbortCallback abort = abortCallback();
-    switch (cmd.type) {
-      case JobType::BackgroundCache:
-        if (backgroundCacheHandler_) backgroundCacheHandler_(cmd.background, abort);
-        break;
-      case JobType::TocJump:
-        if (tocJumpHandler_) tocJumpHandler_(cmd.tocJump, abort);
-        break;
-      case JobType::PageFill:
-        if (pageFillHandler_) pageFillHandler_(cmd.pageFill, abort);
-        break;
-      case JobType::None:
-        break;
+    try {
+      switch (cmd.type) {
+        case JobType::BackgroundCache:
+          if (backgroundCacheHandler_) backgroundCacheHandler_(cmd.background, abort);
+          break;
+        case JobType::TocJump:
+          if (tocJumpHandler_) tocJumpHandler_(cmd.tocJump, abort);
+          break;
+        case JobType::PageFill:
+          if (pageFillHandler_) pageFillHandler_(cmd.pageFill, abort);
+          break;
+        case JobType::None:
+          break;
+      }
+    } catch (const std::bad_alloc&) {
+      LOG_ERR(TAG, "OOM in worker (job=%d, heap=%u)", static_cast<int>(cmd.type),
+              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
+    } catch (...) {
+      LOG_ERR(TAG, "Unhandled exception in worker (job=%d)", static_cast<int>(cmd.type));
     }
 
     currentJob_.store(JobType::None, std::memory_order_release);

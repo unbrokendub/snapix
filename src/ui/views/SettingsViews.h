@@ -120,7 +120,7 @@ struct ReaderSettingsView {
   static constexpr const char* const STATUS_BAR_VALUES[] = {"None", "Title", "Chapter"};
   static constexpr const char* const ORIENTATION_VALUES[] = {"Portrait", "Landscape CW", "Inverted", "Landscape CCW"};
 
-  static constexpr int SETTING_COUNT = 10;
+  static constexpr int SETTING_COUNT = 12;
   static constexpr int MAX_THEMES = 16;
   static const SettingDef DEFS[SETTING_COUNT];
 
@@ -194,13 +194,14 @@ void render(const GfxRenderer& r, const Theme& t, const ReaderSettingsView& v);
 
 struct DeviceSettingsView {
   static constexpr const char* const SLEEP_TIMEOUT_VALUES[] = {"5 min", "10 min", "15 min", "30 min", "Never"};
-  static constexpr const char* const SLEEP_SCREEN_VALUES[] = {"Dark", "Light", "Custom", "Cover"};
+  static constexpr const char* const SLEEP_SCREEN_VALUES[] = {"Dark", "Light", "Custom", "Cover", "Page"};
   static constexpr const char* const STARTUP_VALUES[] = {"Last Document", "Home"};
   static constexpr const char* const SHORT_PWR_VALUES[] = {"Ignore", "Sleep", "Page Turn"};
   static constexpr const char* const PAGES_REFRESH_VALUES[] = {"0", "1", "5", "10", "15", "30", "60", "100"};
   static constexpr const char* const TOGGLE_VALUES[] = {"OFF", "ON"};
   static constexpr const char* const FRONT_BUTTON_VALUES[] = {"B/C/L/R", "L/R/B/C"};
   static constexpr const char* const SIDE_BUTTON_VALUES[] = {"Prev/Next", "Next/Prev"};
+  static constexpr const char* const SLEEP_HOLD_VALUES[] = {"1 sec", "2 sec", "3 sec", "4 sec", "5 sec"};
 
   struct SettingDef {
     const char* label;
@@ -208,7 +209,7 @@ struct DeviceSettingsView {
     uint8_t valueCount;
   };
 
-  static constexpr int SETTING_COUNT = 9;
+  static constexpr int SETTING_COUNT = 10;
   static const SettingDef DEFS[SETTING_COUNT];
 
   ButtonBar buttons{"Back", "", "<", ">"};

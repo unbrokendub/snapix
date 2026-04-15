@@ -3,7 +3,6 @@
 #include <EpdFontFamily.h>
 
 #include <functional>
-#include <list>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,7 +23,7 @@ class ParsedText {
     EpdFontFamily::Style style;
   };
 
-  std::list<WordEntry> words;
+  std::vector<WordEntry> words;
   TextBlock::BLOCK_STYLE style;
   uint8_t indentLevel;
   bool hyphenationEnabled;
@@ -32,14 +31,16 @@ class ParsedText {
   bool isRtl = false;
   bool indentApplied = false;
 
+  // Pooled buffer reused across extractLine calls to avoid per-line heap allocation
+  std::vector<uint16_t> gapWidthsPool_;
+
   std::vector<size_t> computeLineBreaks(int pageWidth, int spaceWidth, const std::vector<uint16_t>& wordWidths,
                                         const AbortCallback& shouldAbort = nullptr) const;
   std::vector<size_t> computeLineBreaksGreedy(const GfxRenderer& renderer, int fontId, int pageWidth, int spaceWidth,
                                               std::vector<uint16_t>& wordWidths,
                                               const AbortCallback& shouldAbort = nullptr);
   bool trySplitWordForLineEnd(const GfxRenderer& renderer, int fontId, int remainingWidth,
-                              std::list<WordEntry>::iterator wordIt, size_t wordIndex,
-                              std::vector<uint16_t>& wordWidths);
+                              size_t wordIndex, std::vector<uint16_t>& wordWidths);
   void extractLine(const GfxRenderer& renderer, int fontId, size_t breakIndex, int pageWidth, int spaceWidth,
                    const std::vector<uint16_t>& wordWidths,
                    const std::vector<size_t>& lineBreakIndices,

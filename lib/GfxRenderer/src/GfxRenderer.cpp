@@ -480,8 +480,7 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
   const size_t outputRowSize = static_cast<size_t>((bitmap.getWidth() + 3) / 4);
   const size_t rowBytesSize = static_cast<size_t>(bitmap.getRowBytes());
 
-  if (!bitmapOutputRow_ || !bitmapRowBytes_) {
-    LOG_ERR(TAG, "!! Bitmap row buffers not allocated");
+  if (!ensureBitmapRowBuffers()) {
     return;
   }
 
@@ -638,6 +637,15 @@ void GfxRenderer::displayBuffer(const EInkDisplay::RefreshMode refreshMode, bool
     renderStartMs = 0;
   }
   einkDisplay.displayBuffer(refreshMode, turnOffScreen);
+  frameBuffer = einkDisplay.getFrameBuffer();
+}
+
+void GfxRenderer::displayBufferDriveAll(bool turnOffScreen) const {
+  if (renderStartMs > 0) {
+    LOG_DBG(TAG, "Render took %lu ms", millis() - renderStartMs);
+    renderStartMs = 0;
+  }
+  einkDisplay.displayBufferDriveAll(turnOffScreen);
   frameBuffer = einkDisplay.getFrameBuffer();
 }
 
@@ -1253,14 +1261,23 @@ void GfxRenderer::getOrientedViewableTRBL(int* outTop, int* outRight, int* outBo
   }
 }
 
-void GfxRenderer::allocateBitmapRowBuffers() {
+bool GfxRenderer::ensureBitmapRowBuffers() const {
+  if (bitmapOutputRow_ && bitmapRowBytes_) {
+    return true;  // Already allocated
+  }
+
   bitmapOutputRow_ = static_cast<uint8_t*>(malloc(BITMAP_OUTPUT_ROW_SIZE));
   bitmapRowBytes_ = static_cast<uint8_t*>(malloc(BITMAP_ROW_BYTES_SIZE));
 
   if (!bitmapOutputRow_ || !bitmapRowBytes_) {
-    LOG_ERR(TAG, "!! Failed to allocate bitmap row buffers");
-    freeBitmapRowBuffers();
+    LOG_ERR(TAG, "!! Failed to allocate bitmap row buffers (%zu + %zu bytes)",
+            BITMAP_OUTPUT_ROW_SIZE, BITMAP_ROW_BYTES_SIZE);
+    // Clean up partial allocation
+    if (bitmapOutputRow_) { free(bitmapOutputRow_); bitmapOutputRow_ = nullptr; }
+    if (bitmapRowBytes_) { free(bitmapRowBytes_); bitmapRowBytes_ = nullptr; }
+    return false;
   }
+  return true;
 }
 
 void GfxRenderer::freeBitmapRowBuffers() {
