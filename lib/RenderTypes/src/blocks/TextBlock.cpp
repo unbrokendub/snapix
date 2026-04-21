@@ -97,7 +97,7 @@ IRAM_ATTR void TextBlock::render(const GfxRenderer& renderer, const int fontId, 
   }
 }
 
-void TextBlock::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
+IRAM_ATTR void TextBlock::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
   for (size_t i = 0; i < wordData.size(); i++) {
     auto style = wordData[i].style;
     // When fakeBold is on, BOLD/BOLD_ITALIC are drawn as REGULAR/ITALIC — warm accordingly

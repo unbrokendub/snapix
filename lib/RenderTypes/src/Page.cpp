@@ -3,10 +3,11 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Serialization.h>
+#include <esp_attr.h>
 
 #define TAG "PAGE"
 
-void PageLine::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset, const bool black) {
+IRAM_ATTR void PageLine::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset, const bool black) {
   block->render(renderer, fontId, xPos + xOffset, yPos + yOffset, black);
 }
 
@@ -59,14 +60,14 @@ std::unique_ptr<PageImage> PageImage::deserialize(FsFile& file) {
   return std::unique_ptr<PageImage>(new PageImage(std::move(ib), xPos, yPos));
 }
 
-void Page::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
+IRAM_ATTR void Page::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
                   const bool black) const {
   for (auto& element : elements) {
     element->render(renderer, fontId, xOffset, yOffset, black);
   }
 }
 
-void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
+IRAM_ATTR void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
   for (const auto& element : elements) {
     if (element->getTag() != TAG_PageLine) continue;
     const auto& line = static_cast<const PageLine&>(*element);
