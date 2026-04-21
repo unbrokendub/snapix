@@ -11,13 +11,13 @@ struct RenderConfig {
   bool hyphenation = false;
   bool showImages = false;
   bool bionicReading = false;
-  bool fakeBold = false;
+  uint8_t fakeBold = 0;  // 0=off, 1=bold (+1 shift), 2=extrabold (-1/+1 shift)
   uint16_t viewportWidth = 0;
   uint16_t viewportHeight = 0;
 
   RenderConfig() = default;
   RenderConfig(int fontId, float lineCompression, uint8_t indentLevel, uint8_t spacingLevel, uint8_t paragraphAlignment,
-               bool hyphenation, bool showImages, bool bionicReading, bool fakeBold, uint16_t viewportWidth,
+               bool hyphenation, bool showImages, bool bionicReading, uint8_t fakeBold, uint16_t viewportWidth,
                uint16_t viewportHeight)
       : fontId(fontId),
         lineCompression(lineCompression),

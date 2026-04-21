@@ -119,6 +119,7 @@ struct ReaderSettingsView {
   static constexpr const char* const ALIGNMENT_VALUES[] = {"Justified", "Left", "Center", "Right"};
   static constexpr const char* const STATUS_BAR_VALUES[] = {"None", "Title", "Chapter"};
   static constexpr const char* const ORIENTATION_VALUES[] = {"Portrait", "Landscape CW", "Inverted", "Landscape CCW"};
+  static constexpr const char* const FAKE_BOLD_VALUES[] = {"Off", "Bold", "Extra Bold"};
 
   static constexpr int SETTING_COUNT = 12;
   static constexpr int MAX_THEMES = 16;

@@ -1613,10 +1613,23 @@ void ReaderState::renderCachedPage(Core& core) {
   readerPerfLog("reader-page-load", pageLoadMs, "(spine=%d page=%d)", currentSpineIndex_, currentSectionPage_);
 
   if (!page) {
-    LOG_ERR(TAG, "Failed to load page, clearing cache");
+    LOG_ERR(TAG, "Failed to load page, clearing cache and recovering dir structure");
     if (pageCache_) {
       pageCache_->clear();
       pageCache_.reset();
+    }
+    // Re-create cache directory hierarchy — SdFat can lose directory entries
+    // under memory pressure, causing all subsequent cache operations to fail.
+    if (core.content.metadata().type == ContentType::Epub) {
+      auto* provider = core.content.asEpub();
+      if (provider && provider->getEpub()) {
+        provider->getEpub()->setupCacheDir();
+      }
+    } else if (core.content.metadata().type == ContentType::Fb2) {
+      auto* provider = core.content.asFb2();
+      if (provider && provider->getFb2()) {
+        provider->getFb2()->setupCacheDir();
+      }
     }
     invalidateAnchorMapCache();
     clearPagePrefetch();

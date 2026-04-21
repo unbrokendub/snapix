@@ -4,11 +4,12 @@
 #include <Logging.h>
 #include <Serialization.h>
 #include <Utf8.h>
+#include <esp_attr.h>
 
 #define TAG "TEXT_BLOCK"
 
 bool TextBlock::bionicReading = false;
-bool TextBlock::fakeBold = false;
+uint8_t TextBlock::fakeBold = 0;
 
 std::shared_ptr<TextBlock> TextBlock::fromWords(std::vector<WordInput>& words, BLOCK_STYLE style) {
   // Calculate total pool size needed
@@ -33,18 +34,25 @@ std::shared_ptr<TextBlock> TextBlock::fromWords(std::vector<WordInput>& words, B
   return std::make_shared<TextBlock>(std::move(pool), std::move(data), style);
 }
 
-void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int x, const int y,
+IRAM_ATTR void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int x, const int y,
                        const bool black) const {
   for (size_t i = 0; i < wordData.size(); i++) {
     const auto& wd = wordData[i];
     const char* word = wordCStr(i);
 
-    // Fake bold: render BOLD/BOLD_ITALIC words using REGULAR/ITALIC with 3× draw
+    // Fake bold: render BOLD/BOLD_ITALIC words using REGULAR/ITALIC with multi-pass draw
     if (fakeBold && (wd.style == EpdFontFamily::BOLD || wd.style == EpdFontFamily::BOLD_ITALIC)) {
       const auto drawStyle = (wd.style == EpdFontFamily::BOLD_ITALIC) ? EpdFontFamily::ITALIC : EpdFontFamily::REGULAR;
-      renderer.drawText(fontId, wd.xPos + x - 1, y, word, black, drawStyle);
-      renderer.drawText(fontId, wd.xPos + x, y, word, black, drawStyle);
-      renderer.drawText(fontId, wd.xPos + x + 1, y, word, black, drawStyle);
+      if (fakeBold == 2) {
+        // extrabold: 3× draw at x-1, x, x+1
+        renderer.drawText(fontId, wd.xPos + x - 1, y, word, black, drawStyle);
+        renderer.drawText(fontId, wd.xPos + x, y, word, black, drawStyle);
+        renderer.drawText(fontId, wd.xPos + x + 1, y, word, black, drawStyle);
+      } else {
+        // bold: 2× draw at x, x+1
+        renderer.drawText(fontId, wd.xPos + x, y, word, black, drawStyle);
+        renderer.drawText(fontId, wd.xPos + x + 1, y, word, black, drawStyle);
+      }
       continue;
     }
 

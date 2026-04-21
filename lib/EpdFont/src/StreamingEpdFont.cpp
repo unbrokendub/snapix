@@ -1,6 +1,7 @@
 #include "StreamingEpdFont.h"
 
 #include <Utf8.h>
+#include <esp_attr.h>
 
 #include <algorithm>
 #include <cstring>
@@ -96,7 +97,7 @@ void StreamingEpdFont::unload() {
   memset(&_fontData, 0, sizeof(_fontData));
 }
 
-const EpdGlyph* StreamingEpdFont::lookupGlyph(uint32_t cp) const {
+IRAM_ATTR const EpdGlyph* StreamingEpdFont::lookupGlyph(uint32_t cp) const {
   // Check glyph cache first (O(1) for hot glyphs)
   const int cacheIdx = cp % GLYPH_CACHE_SIZE;
   if (_glyphCache[cacheIdx].codepoint == cp) {
@@ -135,7 +136,7 @@ const EpdGlyph* StreamingEpdFont::lookupGlyph(uint32_t cp) const {
   return nullptr;
 }
 
-const EpdGlyph* StreamingEpdFont::getGlyph(uint32_t cp) {
+IRAM_ATTR const EpdGlyph* StreamingEpdFont::getGlyph(uint32_t cp) {
   if (!_isLoaded) return nullptr;
   return lookupGlyph(cp);
 }

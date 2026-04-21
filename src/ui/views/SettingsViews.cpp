@@ -13,6 +13,7 @@ constexpr const char* const ReaderSettingsView::LINE_SPACING_VALUES[];
 constexpr const char* const ReaderSettingsView::ALIGNMENT_VALUES[];
 constexpr const char* const ReaderSettingsView::STATUS_BAR_VALUES[];
 constexpr const char* const ReaderSettingsView::ORIENTATION_VALUES[];
+constexpr const char* const ReaderSettingsView::FAKE_BOLD_VALUES[];
 
 const ReaderSettingsView::SettingDef ReaderSettingsView::DEFS[SETTING_COUNT] = {
     {"Theme", SettingType::ThemeSelect, nullptr, 0},
@@ -26,7 +27,7 @@ const ReaderSettingsView::SettingDef ReaderSettingsView::DEFS[SETTING_COUNT] = {
     {"Status Bar", SettingType::Enum, STATUS_BAR_VALUES, 3},
     {"Reading Orientation", SettingType::Enum, ORIENTATION_VALUES, 4},
     {"Bionic Reading", SettingType::Toggle, nullptr, 0},
-    {"Fake Bold", SettingType::Toggle, nullptr, 0},
+    {"Fake Bold", SettingType::Enum, FAKE_BOLD_VALUES, 3},
 };
 
 // DeviceSettingsView static definitions

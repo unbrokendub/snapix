@@ -121,6 +121,11 @@ bool evictCacheFile(const std::string& cachePath, const char* reason) {
 void closeFileProtected(FsFile& f) {
   if (f) {
     papyrix::spi::SharedBusLock lk;
+    // Explicit sync before close to ensure directory metadata is flushed to SD.
+    // SdFat's close() calls sync() internally, but under memory pressure the
+    // single-sector cache can lose directory entries between sync and close,
+    // causing "file vanished" on the next access.
+    f.sync();
     f.close();
   }
 }
@@ -130,12 +135,21 @@ PageCache::PageCache(std::string cachePath) : cachePath_(std::move(cachePath)) {
 
 bool PageCache::ensureReadHandle() {
   if (readFile_) return true;
-  papyrix::spi::SharedBusLock lk;
-  if (!SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
-    return false;
+  // SdFat's single-sector directory cache can return stale "not found" results
+  // immediately after another thread created a file. Retry with a short delay
+  // to let the cache settle.
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      delay(20);
+      LOG_DBG(TAG, "Retry ensureReadHandle attempt %d for %s", attempt + 1, cachePath_.c_str());
+    }
+    papyrix::spi::SharedBusLock lk;
+    if (SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
+      readFileSize_ = readFile_.size();
+      return true;
+    }
   }
-  readFileSize_ = readFile_.size();
-  return true;
+  return false;
 }
 
 void PageCache::closeReadHandle() {
@@ -521,14 +535,33 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     closeReadHandle();
     closeFileProtected(file_);
 
-    // Ensure parent directory exists — setupCacheDir() may have failed silently
-    // after a cache-clear, or this path may be used before it was called.
+    // Ensure full directory hierarchy exists — setupCacheDir() may have failed
+    // silently, or SdFat's directory cache may have lost entries under memory
+    // pressure, causing both parent and grandparent dirs to appear missing.
     {
       const auto slash = cachePath_.rfind('/');
       if (slash != std::string::npos) {
         const std::string parentDir = cachePath_.substr(0, slash);
         if (!SdMan.exists(parentDir.c_str())) {
-          LOG_INF(TAG, "Creating missing parent dir: %s", parentDir.c_str());
+          LOG_INF(TAG, "Recreating cache dir hierarchy: %s", parentDir.c_str());
+          // Walk up and ensure each ancestor exists, then create downward.
+          // SdMan.mkdir with pFlag=true should handle this, but SdFat can fail
+          // when its internal state is corrupted.  Explicit per-level creation
+          // is more reliable on FAT32 under memory pressure.
+          const auto slash2 = parentDir.rfind('/');
+          if (slash2 != std::string::npos) {
+            const std::string grandparent = parentDir.substr(0, slash2);
+            if (!SdMan.exists(grandparent.c_str())) {
+              const auto slash3 = grandparent.rfind('/');
+              if (slash3 != std::string::npos) {
+                const std::string root = grandparent.substr(0, slash3);
+                if (!SdMan.exists(root.c_str())) {
+                  SdMan.mkdir(root.c_str());
+                }
+              }
+              SdMan.mkdir(grandparent.c_str());
+            }
+          }
           if (!SdMan.mkdir(parentDir.c_str())) {
             LOG_ERR(TAG, "Failed to create parent dir: %s", parentDir.c_str());
           }

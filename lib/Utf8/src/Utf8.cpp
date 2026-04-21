@@ -1,6 +1,8 @@
 #include "Utf8.h"
 
-int utf8CodepointLen(const unsigned char c) {
+#include <esp_attr.h>
+
+IRAM_ATTR int utf8CodepointLen(const unsigned char c) {
   if (c < 0x80) return 1;          // 0xxxxxxx
   if ((c >> 5) == 0x6) return 2;   // 110xxxxx
   if ((c >> 4) == 0xE) return 3;   // 1110xxxx
@@ -8,7 +10,7 @@ int utf8CodepointLen(const unsigned char c) {
   return 1;                        // fallback for invalid
 }
 
-uint32_t utf8NextCodepoint(const unsigned char** string) {
+IRAM_ATTR uint32_t utf8NextCodepoint(const unsigned char** string) {
   if (**string == 0) {
     return 0;
   }

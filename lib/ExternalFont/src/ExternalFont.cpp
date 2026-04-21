@@ -2,6 +2,7 @@
 
 #include <Logging.h>
 #include <SharedSpiLock.h>
+#include <esp_attr.h>
 
 #define TAG "EXT_FONT"
 
@@ -169,7 +170,7 @@ bool ExternalFont::load(const char* filepath) {
   return true;
 }
 
-int ExternalFont::findInCache(uint32_t codepoint) {
+IRAM_ATTR int ExternalFont::findInCache(uint32_t codepoint) {
   // O(1) hash table lookup with linear probing for collisions
   int hash = hashCodepoint(codepoint);
   for (int i = 0; i < CACHE_SIZE; i++) {
@@ -323,7 +324,7 @@ const uint8_t* ExternalFont::loadGlyphIntoSlot(const uint32_t codepoint, const i
   return _cache[slot].notFound ? nullptr : slotBitmap(slot);
 }
 
-const uint8_t* ExternalFont::getGlyph(uint32_t codepoint) {
+IRAM_ATTR const uint8_t* ExternalFont::getGlyph(uint32_t codepoint) {
   if (!_isLoaded) {
     return nullptr;
   }

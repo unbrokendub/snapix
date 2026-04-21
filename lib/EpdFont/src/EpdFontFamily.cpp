@@ -1,6 +1,8 @@
 #include "EpdFontFamily.h"
 
-const EpdFont* EpdFontFamily::getFont(const Style style) const {
+#include <esp_attr.h>
+
+IRAM_ATTR const EpdFont* EpdFontFamily::getFont(const Style style) const {
   if (style == BOLD && bold) {
     return bold;
   }
@@ -32,6 +34,6 @@ bool EpdFontFamily::hasPrintableChars(const char* string, const Style style) con
 
 const EpdFontData* EpdFontFamily::getData(const Style style) const { return getFont(style)->data; }
 
-const EpdGlyph* EpdFontFamily::getGlyph(const uint32_t cp, const Style style) const {
+IRAM_ATTR const EpdGlyph* EpdFontFamily::getGlyph(const uint32_t cp, const Style style) const {
   return getFont(style)->getGlyph(cp);
 };

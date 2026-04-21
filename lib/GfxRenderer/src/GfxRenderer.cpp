@@ -7,6 +7,7 @@
 #include <StreamingEpdFont.h>
 #include <ThaiShaper.h>
 #include <Utf8.h>
+#include <esp_attr.h>
 
 #include <cassert>
 
@@ -254,7 +255,7 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   return w;
 }
 
-int GfxRenderer::getTextAdvanceWidth(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+IRAM_ATTR int GfxRenderer::getTextAdvanceWidth(const int fontId, const char* text, const EpdFontFamily::Style style) const {
   if (!text || !*text) return 0;
 
   auto fontIt = fontMap.find(fontId);
@@ -319,7 +320,7 @@ void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* te
   drawText(fontId, x, y, text, black, style);
 }
 
-void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+IRAM_ATTR void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, const EpdFontFamily::Style style) const {
   if (!text || !*text) return;
 
   StreamingEpdFont* streamingFont = getStreamingFont(fontId, style);
@@ -359,7 +360,7 @@ void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, const EpdFo
   }
 }
 
-void GfxRenderer::drawText(const int fontId, const int x, const int y, const char* text, const bool black,
+IRAM_ATTR void GfxRenderer::drawText(const int fontId, const int x, const int y, const char* text, const bool black,
                            const EpdFontFamily::Style style) const {
   // cannot draw a NULL / empty string
   if (text == nullptr || *text == '\0') {
@@ -1123,7 +1124,7 @@ void GfxRenderer::restoreBwBuffer() {
  */
 void GfxRenderer::cleanupGrayscaleWithFrameBuffer() const { einkDisplay.cleanupGrayscaleBuffers(frameBuffer); }
 
-void GfxRenderer::renderChar(const EpdFontFamily& fontFamily, const uint32_t cp, int* x, const int* y,
+IRAM_ATTR void GfxRenderer::renderChar(const EpdFontFamily& fontFamily, const uint32_t cp, int* x, const int* y,
                              const bool pixelState, const EpdFontFamily::Style style, const int fontId) const {
   // Try external font first — covers CJK and optionally Latin from .bin fonts
   if (isExternalFontAllowed(fontId) && (_externalFont || tryResolveExternalFont()) && _externalFont->isLoaded()) {

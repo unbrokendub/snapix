@@ -71,9 +71,9 @@ class TextBlock final : public Block {
   /// Global bionic reading flag. Set before rendering pages.
   /// When true, render() splits REGULAR-styled words: bold first half, regular second half.
   static bool bionicReading;
-  /// Global fake bold flag. When true, BOLD/BOLD_ITALIC words are rendered as
-  /// REGULAR/ITALIC with 3× draw at -1/0/+1 offset (saves ~42KB bold font memory).
-  static bool fakeBold;
+  /// Global fake bold mode: 0=off, 1=bold (x,x+1), 2=extrabold (x-1,x,x+1).
+  /// Renders BOLD/BOLD_ITALIC using REGULAR/ITALIC with multi-pass draw.
+  static uint8_t fakeBold;
   BlockType getType() override { return TEXT_BLOCK; }
   bool serialize(FsFile& file) const;
   static std::unique_ptr<TextBlock> deserialize(FsFile& file);

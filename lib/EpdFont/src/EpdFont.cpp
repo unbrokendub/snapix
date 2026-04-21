@@ -1,5 +1,6 @@
 #include "EpdFont.h"
 
+#include <esp_attr.h>
 #include <Utf8.h>
 
 inline int min(const int a, const int b) { return a < b ? a : b; }
@@ -69,7 +70,7 @@ bool EpdFont::hasPrintableChars(const char* string) const {
   return w > 0 || h > 0;
 }
 
-const EpdGlyph* EpdFont::getGlyph(const uint32_t cp) const {
+IRAM_ATTR const EpdGlyph* EpdFont::getGlyph(const uint32_t cp) const {
   // Check cache first for O(1) lookup of hot glyphs
   const EpdGlyph* cached = glyphCache.lookup(cp);
   if (cached) {

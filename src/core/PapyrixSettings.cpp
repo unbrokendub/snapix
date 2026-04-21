@@ -177,7 +177,7 @@ Result<void> Settings::load(drivers::Storage& storage) {
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, bionicReading, uint8_t(2));
     if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPodValidated(inputFile, fakeBold, uint8_t(2));
+    serialization::readPodValidated(inputFile, fakeBold, uint8_t(3));
     if (++settingsRead >= fileSettingsCount) break;
   } while (false);
 
@@ -228,7 +228,7 @@ bool Settings::hasExternalReaderFont(const Theme& theme) const {
 RenderConfig Settings::getRenderConfig(const Theme& theme, uint16_t viewportWidth, uint16_t viewportHeight) const {
   return RenderConfig(getReaderFontId(theme), getLineCompression(), getIndentLevel(), getSpacingLevel(),
                       paragraphAlignment, static_cast<bool>(hyphenation), static_cast<bool>(showImages),
-                      static_cast<bool>(bionicReading), static_cast<bool>(fakeBold), viewportWidth, viewportHeight);
+                      static_cast<bool>(bionicReading), fakeBold, viewportWidth, viewportHeight);
 }
 
 // Legacy methods that use SdMan directly (for early init before Core)
@@ -377,7 +377,7 @@ bool Settings::loadFromFile() {
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, bionicReading, uint8_t(2));
     if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPodValidated(inputFile, fakeBold, uint8_t(2));
+    serialization::readPodValidated(inputFile, fakeBold, uint8_t(3));
     if (++settingsRead >= fileSettingsCount) break;
   } while (false);
 
