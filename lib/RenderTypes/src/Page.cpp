@@ -3,7 +3,13 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Serialization.h>
+
+#if __has_include(<esp_attr.h>)
 #include <esp_attr.h>
+#endif
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
 
 #define TAG "PAGE"
 

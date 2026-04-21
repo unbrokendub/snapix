@@ -7,7 +7,13 @@
 #include <StreamingEpdFont.h>
 #include <ThaiShaper.h>
 #include <Utf8.h>
+
+#if __has_include(<esp_attr.h>)
 #include <esp_attr.h>
+#endif
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
 
 #include <cassert>
 

@@ -34,8 +34,12 @@ static std::unique_ptr<PageImage> makeImage(int16_t x, int16_t y, uint16_t w, ui
 }
 
 static std::unique_ptr<PageLine> makeLine(int16_t x, int16_t y) {
-  std::vector<TextBlock::WordData> words = {{"hello", 0, {}}};
-  auto block = std::make_shared<TextBlock>(std::move(words), TextBlock::JUSTIFIED);
+  // Build pooled word storage directly (TextBlock::fromWords factory lives in
+  // TextBlock.cpp which this test doesn't link — keep the test self-contained
+  // by constructing the pool inline).
+  std::vector<char> pool = {'h', 'e', 'l', 'l', 'o', '\0'};
+  std::vector<TextBlock::WordData> data = {{0, 5, 0, EpdFontFamily::REGULAR}};
+  auto block = std::make_shared<TextBlock>(std::move(pool), std::move(data), TextBlock::JUSTIFIED);
   return std::make_unique<PageLine>(block, x, y);
 }
 

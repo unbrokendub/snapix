@@ -1,6 +1,11 @@
 #include "EpdFontFamily.h"
 
+#if __has_include(<esp_attr.h>)
 #include <esp_attr.h>
+#endif
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
 
 IRAM_ATTR const EpdFont* EpdFontFamily::getFont(const Style style) const {
   if (style == BOLD && bold) {

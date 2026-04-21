@@ -2,7 +2,13 @@
 
 #include <Logging.h>
 #include <SharedSpiLock.h>
+
+#if __has_include(<esp_attr.h>)
 #include <esp_attr.h>
+#endif
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
 
 #define TAG "EXT_FONT"
 

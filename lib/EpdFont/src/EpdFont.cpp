@@ -1,7 +1,13 @@
 #include "EpdFont.h"
 
-#include <esp_attr.h>
 #include <Utf8.h>
+
+#if __has_include(<esp_attr.h>)
+#include <esp_attr.h>
+#endif
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
 
 inline int min(const int a, const int b) { return a < b ? a : b; }
 inline int max(const int a, const int b) { return a < b ? b : a; }

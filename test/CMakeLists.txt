@@ -244,6 +244,7 @@ foreach(TEST_SRC ${TEST_SOURCES})
     add_executable(${TEST_NAME}
       ${TEST_SRC}
       ${PROJECT_ROOT}/lib/RenderTypes/src/ParsedText.cpp
+      ${PROJECT_ROOT}/lib/RenderTypes/src/blocks/TextBlock.cpp
       ${PROJECT_ROOT}/lib/Utf8/src/Utf8.cpp
       ${TEST_HELPERS}
     )

@@ -1,6 +1,11 @@
 #include "Utf8.h"
 
+#if __has_include(<esp_attr.h>)
 #include <esp_attr.h>
+#endif
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
 
 IRAM_ATTR int utf8CodepointLen(const unsigned char c) {
   if (c < 0x80) return 1;          // 0xxxxxxx

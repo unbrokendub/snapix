@@ -20,4 +20,11 @@ class GfxRenderer {
   }
 
   int getLineHeight(int) const { return 20; }
+
+  // TextBlock::render() / warmGlyphs() stubs — not exercised by layout tests
+  // but required for linking now that TextBlock.cpp is compiled in.
+  void drawText(int, int, int, const char*, bool = true,
+                EpdFontFamily::Style = EpdFontFamily::REGULAR) const {}
+  int getTextAdvanceWidth(int, const char*, EpdFontFamily::Style) { return 0; }
+  void warmTextGlyphs(int, const char*, EpdFontFamily::Style = EpdFontFamily::REGULAR) const {}
 };
