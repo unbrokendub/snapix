@@ -1,0 +1,119 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.cache/pip
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build release firmware
+        run: pio run -e release
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create merged flashable binary
+        run: |
+          python -m esptool --chip esp32c3 merge-bin \
+            --output "snapix-${{ steps.version.outputs.version }}-full.bin" \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0 .pio/build/release/bootloader.bin \
+            0x8000 .pio/build/release/partitions.bin \
+            0x10000 .pio/build/release/firmware.bin
+          cp .pio/build/release/firmware.bin "snapix-${{ steps.version.outputs.version }}-firmware.bin"
+          cp .pio/build/release/bootloader.bin "snapix-${{ steps.version.outputs.version }}-bootloader.bin"
+          cp .pio/build/release/partitions.bin "snapix-${{ steps.version.outputs.version }}-partitions.bin"
+          ls -lah snapix-*.bin
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapix-firmware-${{ steps.version.outputs.version }}
+          path: snapix-*.bin
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            snapix-${{ steps.version.outputs.version }}-full.bin
+            snapix-${{ steps.version.outputs.version }}-firmware.bin
+            snapix-${{ steps.version.outputs.version }}-bootloader.bin
+            snapix-${{ steps.version.outputs.version }}-partitions.bin
+          body: |
+            ## Snapix ${{ steps.version.outputs.version }}
+
+            ⚡ Super-fast fork of Papyrix firmware for Xteink X4 e-paper reader.
+
+            ### How to flash
+
+            **Option A — First-time install (recommended for fresh device)**
+
+            Use `snapix-*-full.bin` — a merged binary containing bootloader, partition table, and firmware.
+
+            Using esptool (Python):
+            ```bash
+            pip install esptool
+            esptool.py --chip esp32c3 --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 snapix-*-full.bin
+            ```
+
+            Using [papyrix-flasher](https://github.com/bigbag/papyrix-flasher) (no install needed):
+            ```bash
+            papyrix-flasher flash snapix-*-full.bin
+            ```
+
+            If the device won't boot after flashing, first erase flash and retry:
+            ```bash
+            esptool.py --chip esp32c3 erase_flash
+            ```
+
+            **Option B — OTA update (already running Snapix)**
+
+            Copy `snapix-*-firmware.bin` to the `/update/` folder on your SD card as `firmware.bin`.
+            The device will flash on the next boot.
+
+            ### Individual artifacts
+
+            - `snapix-*-full.bin` — flashable merged image (bootloader + partitions + firmware)
+            - `snapix-*-firmware.bin` — app only, for OTA or overwriting `app0`
+            - `snapix-*-bootloader.bin` — 2nd-stage bootloader (offset `0x0`)
+            - `snapix-*-partitions.bin` — partition table (offset `0x8000`)
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
