@@ -1,7 +1,7 @@
 /**
  * Fb2.h
  *
- * FictionBook 2.0 XML e-book handler for Papyrix Reader
+ * FictionBook 2.0 XML e-book handler for Snapix Reader
  * Provides EPUB-like interface for FB2 file handling
  */
 

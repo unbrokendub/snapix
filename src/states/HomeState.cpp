@@ -20,7 +20,7 @@
 
 #define TAG "HOME"
 
-namespace papyrix {
+namespace snapix {
 
 HomeState::HomeState(GfxRenderer& renderer) : renderer_(renderer) {}
 
@@ -79,7 +79,7 @@ void HomeState::loadLastBook(Core& core) {
   const char* savedPath = core.settings.lastBookPath;
   if (savedPath[0] != '\0' && core.storage.exists(savedPath)) {
     // Open temporarily to get metadata
-    auto result = core.content.open(savedPath, PAPYRIX_CACHE_DIR);
+    auto result = core.content.open(savedPath, SNAPIX_CACHE_DIR);
     if (result.ok()) {
       const auto& meta = core.content.metadata();
       view_.setBook(meta.title, meta.author, savedPath);
@@ -487,4 +487,4 @@ void HomeState::freeCoverThumbnail() {
   coverBufferStored_ = false;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

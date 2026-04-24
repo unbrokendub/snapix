@@ -9,7 +9,7 @@
 #include "TxtProvider.h"
 #include "XtcProvider.h"
 
-namespace papyrix {
+namespace snapix {
 
 // ContentHandle - Tagged union holding one content provider at a time
 // Only one provider is active - saves memory by not allocating all providers
@@ -84,4 +84,4 @@ struct ContentHandle {
   static ContentMetadata emptyMetadata_;
 };
 
-}  // namespace papyrix
+}  // namespace snapix

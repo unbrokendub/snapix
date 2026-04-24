@@ -7,7 +7,7 @@ int main() {
   TestUtils::TestRunner runner("ReaderDocumentResources");
 
   GfxRenderer renderer;
-  papyrix::reader::ReaderDocumentResources resources(renderer);
+  snapix::reader::ReaderDocumentResources resources(renderer);
 
   {
     auto foreground = resources.acquireForeground("foreground-test");

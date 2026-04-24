@@ -2,7 +2,7 @@
 
 #include <freertos/task.h>
 
-namespace papyrix::spi {
+namespace snapix::spi {
 
 // ── Manual recursive lock backed by a binary semaphore ────────────
 //
@@ -91,4 +91,4 @@ SharedBusLock::SharedBusLock(SharedBusLock&& other) noexcept : mutex_(nullptr), 
   other.acquired_ = false;
 }
 
-}  // namespace papyrix::spi
+}  // namespace snapix::spi

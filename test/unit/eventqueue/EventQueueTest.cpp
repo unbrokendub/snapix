@@ -5,7 +5,7 @@
 // We need to provide the dependencies for EventQueue.h
 // Create minimal stubs for Result.h and Types.h dependencies
 
-namespace papyrix {
+namespace snapix {
 
 enum class Button : uint8_t {
   Up,
@@ -24,14 +24,14 @@ enum class Error : uint8_t {
   FileCorrupted,
 };
 
-}  // namespace papyrix
+}  // namespace snapix
 
 // Now include EventQueue (we define Result.h and Types.h deps inline)
 #define RESULT_H_INCLUDED  // Skip the real header
 #define TYPES_H_INCLUDED
 
 // Include the EventQueue implementation
-namespace papyrix {
+namespace snapix {
 
 enum class EventType : uint8_t {
   None = 0,
@@ -136,9 +136,9 @@ class EventQueue {
   uint8_t tail_ = 0;
 };
 
-}  // namespace papyrix
+}  // namespace snapix
 
-using namespace papyrix;
+using namespace snapix;
 
 int main() {
   TestUtils::TestRunner runner("EventQueue");

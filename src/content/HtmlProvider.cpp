@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace papyrix {
+namespace snapix {
 
 Result<void> HtmlProvider::open(const char* path, const char* cacheDir) {
   close();
@@ -51,4 +51,4 @@ uint32_t HtmlProvider::pageCount() const {
   return (fileSize + BYTES_PER_PAGE - 1) / BYTES_PER_PAGE;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

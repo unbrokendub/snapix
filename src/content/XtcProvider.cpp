@@ -9,7 +9,7 @@
 #include <functional>
 #include <string>
 
-namespace papyrix {
+namespace snapix {
 
 Result<void> XtcProvider::open(const char* path, const char* cacheDir) {
   close();
@@ -129,4 +129,4 @@ bool XtcProvider::generateThumbBmp() {
   return success;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

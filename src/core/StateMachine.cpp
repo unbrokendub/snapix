@@ -7,7 +7,7 @@
 
 #define TAG "STATE"
 
-namespace papyrix {
+namespace snapix {
 
 void StateMachine::init(Core& core, StateId initialState) {
   // Exit current state if one exists (e.g., when triggering sleep from any state)
@@ -81,4 +81,4 @@ void StateMachine::transition(StateId next, Core& core, bool immediate) {
   current_->enter(core);
 }
 
-}  // namespace papyrix
+}  // namespace snapix

@@ -22,7 +22,7 @@
 
 #define TAG "RDR_CACHE"
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 namespace {
 
@@ -894,4 +894,4 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
   createOrExtendCacheImpl(*parser, cachePath, config, effectiveBatch);
 }
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

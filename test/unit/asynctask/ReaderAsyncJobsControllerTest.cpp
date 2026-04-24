@@ -11,8 +11,8 @@
 int main() {
   TestUtils::TestRunner runner("ReaderAsyncJobsController");
 
-  using papyrix::reader::BackgroundCacheWakeReason;
-  using papyrix::reader::ReaderAsyncJobsController;
+  using snapix::reader::BackgroundCacheWakeReason;
+  using snapix::reader::ReaderAsyncJobsController;
 
   {
     cleanupMockTasks();

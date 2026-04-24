@@ -27,7 +27,7 @@ class Page;
 struct RenderConfig;
 struct Theme;
 
-namespace papyrix {
+namespace snapix {
 
 // Forward declarations
 class Core;
@@ -287,4 +287,4 @@ class ReaderState : public State {
   StateTransition exitToUI(Core& core);
 };
 
-}  // namespace papyrix
+}  // namespace snapix

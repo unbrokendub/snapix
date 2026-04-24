@@ -10,7 +10,7 @@
 
 #define TAG "APP_LAUNCHER"
 
-namespace papyrix {
+namespace snapix {
 
 AppLauncherState::AppLauncherState(GfxRenderer& renderer)
     : renderer_(renderer), mode_(Mode::Menu), activeApp_(-1), needsRender_(true), goNetwork_(false), menuView_{} {}
@@ -242,4 +242,4 @@ void AppLauncherState::hideOverlay() {
   needsRender_ = true;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

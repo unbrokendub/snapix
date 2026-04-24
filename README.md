@@ -1,4 +1,4 @@
-# Papyrix
+# Snapix
 
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](CHANGELOG.md)
 [![User Guide](https://img.shields.io/badge/docs-User_Guide-green)](docs/user_guide.md)
@@ -22,7 +22,7 @@ Built using **PlatformIO** and targeting the **ESP32-C3** microcontroller.
 
 E-paper devices are fantastic for reading, but most commercially available readers are closed systems with limited customisation. The **Xteink X4** is an affordable e-paper device, however the official firmware remains closed.
 
-Papyrix aims to:
+Snapix aims to:
 * Provide a **lightweight, open-source alternative** to the official firmware.
 * Offer a **document reader** capable of handling EPUB content on constrained hardware.
 * Support **customisable font, layout, and display** options.
@@ -87,12 +87,12 @@ See [the user guide](docs/user_guide.md) for operating instructions, and the [cu
 
 ## Installing
 
-### Using Papyrix Flasher (Recommended)
+### Using Snapix Flasher (Recommended)
 
-The easiest way to install Papyrix is using [papyrix-flasher](https://github.com/bigbag/papyrix-flasher) — a cross-platform CLI tool with auto-detection and embedded bootloader. Download the latest release for your platform and run:
+The easiest way to install Snapix is using [snapix-flasher](https://github.com/bigbag/snapix-flasher) — a cross-platform CLI tool with auto-detection and embedded bootloader. Download the latest release for your platform and run:
 
 ```bash
-papyrix-flasher flash firmware.bin
+snapix-flasher flash firmware.bin
 ```
 
 ### Manual Build
@@ -139,10 +139,10 @@ nix-channel --update
 
 ### Checking out the code
 
-Papyrix uses PlatformIO for building and flashing the firmware. To get started, clone the repository:
+Snapix uses PlatformIO for building and flashing the firmware. To get started, clone the repository:
 
 ```
-git clone --recursive https://github.com/pliashkou/papyrix
+git clone --recursive https://github.com/pliashkou/snapix
 
 # Or, if you've already cloned without --recursive:
 git submodule update --init --recursive
@@ -187,7 +187,7 @@ Build scripts are in the `scripts/` directory.
 
 #### Converting fonts
 
-Convert TTF/OTF fonts to Papyrix `.epdfont` format using Python (requires [uv](https://docs.astral.sh/uv/)):
+Convert TTF/OTF fonts to Snapix `.epdfont` format using Python (requires [uv](https://docs.astral.sh/uv/)):
 
 ```bash
 # Basic conversion (outputs to current directory)
@@ -236,7 +236,7 @@ Copy the output BMP to `/sleep/` directory or as `/sleep.bmp` on the SD card.
 Convert image to C header for firmware logo (128x128 monochrome):
 
 ```bash
-cd scripts && node convert-logo.mjs logo.png ../src/images/PapyrixLogo.h
+cd scripts && node convert-logo.mjs logo.png ../src/images/SnapixLogo.h
 ```
 
 Options: `--invert`, `--threshold <0-255>`, `--rotate <0|90|180|270>`
@@ -248,7 +248,7 @@ Two simulators are provided for testing the Calibre Wireless Device feature with
 ```bash
 cd scripts
 
-# Simulate a Papyrix device (for testing Calibre desktop connection)
+# Simulate a Snapix device (for testing Calibre desktop connection)
 node device-simulator.mjs
 
 # Simulate Calibre desktop (for testing device firmware)
@@ -259,7 +259,7 @@ The device simulator listens for Calibre broadcasts and can receive books (saved
 
 #### Serial monitor
 
-A standalone Go binary for reading device logs without PlatformIO. Pre-built binaries are available on the [releases page](https://github.com/pliashkou/papyrix/releases), or build from source:
+A standalone Go binary for reading device logs without PlatformIO. Pre-built binaries are available on the [releases page](https://github.com/pliashkou/snapix/releases), or build from source:
 
 ```bash
 cd tools/monitor && go build -o monitor .
@@ -313,15 +313,15 @@ This creates a changelog grouped by version tags, with commit messages and autho
 
 ## Internals
 
-Papyrix is designed for the ESP32-C3's ~380KB RAM constraint. See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
+Snapix is designed for the ESP32-C3's ~380KB RAM constraint. See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
 
 ### Data caching
 
-The first time chapters of a book are loaded, they are cached to the SD card. Subsequent loads are served from the cache. This cache directory exists at `.papyrix` on the SD card. The structure is as follows:
+The first time chapters of a book are loaded, they are cached to the SD card. Subsequent loads are served from the cache. This cache directory exists at `.snapix` on the SD card. The structure is as follows:
 
 
 ```
-.papyrix/
+.snapix/
 ├── epub_12471232/       # Each EPUB is cached to a subdirectory named `epub_<hash>`
 │   ├── progress.bin     # Stores reading progress (chapter, page, etc.)
 │   ├── bookmarks.bin    # Saved bookmarks (up to 20 per book)
@@ -363,7 +363,7 @@ The first time chapters of a book are loaded, they are cached to the SD card. Su
 └── epub_189013891/
 ```
 
-To clear cached data, use **Settings > Cleanup** (see [User Guide](docs/user_guide.md)). Alternatively, delete the `.papyrix` directory manually.
+To clear cached data, use **Settings > Cleanup** (see [User Guide](docs/user_guide.md)). Alternatively, delete the `.snapix` directory manually.
 
 Due the way it's currently implemented, the cache is not automatically cleared when a book is deleted and moving a book file will use a new cache directory, resetting the reading progress.
 
@@ -413,7 +413,7 @@ Contributions are very welcome!
 
 ---
 
-Papyrix is a fork of [CrossPoint Reader](https://github.com/daveallie/crosspoint-reader) by Dave Allie.
+Snapix is a fork of [CrossPoint Reader](https://github.com/daveallie/crosspoint-reader) by Dave Allie.
 
 X4 hardware insights from [bb_epaper](https://github.com/bitbank2/bb_epaper) by Larry Bank.
 

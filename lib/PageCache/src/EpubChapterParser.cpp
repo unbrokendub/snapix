@@ -232,7 +232,7 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
 
       // Reuse frame buffer (48KB) as ZIP decompression dict (32KB) — safe because
       // the background task owns the renderer and display isn't active during parsing
-      papyrix::crashdebug::mark(papyrix::crashdebug::CrashPhase::EpubTocExtract, static_cast<int16_t>(spineIndex_));
+      snapix::crashdebug::mark(snapix::crashdebug::CrashPhase::EpubTocExtract, static_cast<int16_t>(spineIndex_));
       success = epub_->readItemContentsToStream(localPath, sourceHtml, 1024, renderer_.getFrameBuffer(),
                                                 shouldAbortPrepare);
       sourceHtml.close();
@@ -251,7 +251,7 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
   }
 
   parseHtmlPath_ = sourceHtmlPath_;
-  papyrix::crashdebug::mark(papyrix::crashdebug::CrashPhase::EpubTocNormalize, static_cast<int16_t>(spineIndex_));
+  snapix::crashdebug::mark(snapix::crashdebug::CrashPhase::EpubTocNormalize, static_cast<int16_t>(spineIndex_));
   if (html5::normalizeVoidElements(sourceHtmlPath_, normalizedPath_, shouldAbortPrepare)) {
     parseHtmlPath_ = normalizedPath_;
     LOG_INF(TAG, "[CONTENT][EPUB] prepare normalized spine=%d", spineIndex_);
@@ -390,7 +390,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
                                               epub_->getCssParser(),
                                               shouldAbort));
 
-  papyrix::crashdebug::mark(papyrix::crashdebug::CrashPhase::EpubTocParse, static_cast<int16_t>(spineIndex_));
+  snapix::crashdebug::mark(snapix::crashdebug::CrashPhase::EpubTocParse, static_cast<int16_t>(spineIndex_));
   bool success = liveParser_->parseAndBuildPages();
   initialized_ = true;
 

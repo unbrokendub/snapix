@@ -7,7 +7,7 @@
 #include "../core/Result.h"
 #include "ContentTypes.h"
 
-namespace papyrix {
+namespace snapix {
 
 // MarkdownProvider wraps the Markdown handler
 struct MarkdownProvider {
@@ -37,4 +37,4 @@ struct MarkdownProvider {
   const Markdown* getMarkdown() const { return markdown.get(); }
 };
 
-}  // namespace papyrix
+}  // namespace snapix

@@ -7,7 +7,7 @@
 
 #define TAG "RDR_ASYNC"
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 ReaderAsyncJobsController::ReaderAsyncJobsController() {
   commandQueue_ = xQueueCreate(6, sizeof(Command));
@@ -250,4 +250,4 @@ void ReaderAsyncJobsController::workerLoop() {
   }
 }
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

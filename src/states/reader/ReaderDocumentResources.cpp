@@ -5,7 +5,7 @@
 
 #define TAG "RDR_RES"
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 ReaderDocumentResources::Session::Session(ReaderDocumentResources& owner, const Owner kind) : owner_(&owner), kind_(kind) {}
 
@@ -76,4 +76,4 @@ void ReaderDocumentResources::release(const Owner kind) {
   ownerReason_.store(nullptr, std::memory_order_release);
 }
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

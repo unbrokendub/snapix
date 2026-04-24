@@ -8,7 +8,7 @@
 
 struct Theme;
 
-namespace papyrix {
+namespace snapix {
 
 namespace drivers {
 class Storage;
@@ -186,4 +186,4 @@ struct Settings {
   RenderConfig getRenderConfig(const Theme& theme, uint16_t viewportWidth, uint16_t viewportHeight) const;
 };
 
-}  // namespace papyrix
+}  // namespace snapix

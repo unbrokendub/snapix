@@ -9,7 +9,7 @@
 int main() {
   TestUtils::TestRunner runner("ReaderNavigationController");
 
-  using papyrix::reader::ReaderNavigationController;
+  using snapix::reader::ReaderNavigationController;
 
   {
     ReaderNavigationController controller;

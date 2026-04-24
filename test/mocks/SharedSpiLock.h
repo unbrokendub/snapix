@@ -1,6 +1,6 @@
 #pragma once
 
-namespace papyrix::spi {
+namespace snapix::spi {
 
 class SharedBusLock {
  public:
@@ -8,4 +8,4 @@ class SharedBusLock {
   explicit operator bool() const { return true; }
 };
 
-}  // namespace papyrix::spi
+}  // namespace snapix::spi

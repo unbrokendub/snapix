@@ -7,7 +7,7 @@
 
 class GfxRenderer;
 
-namespace papyrix {
+namespace snapix {
 
 enum class SettingsScreen : uint8_t {
   Menu,
@@ -74,4 +74,4 @@ class SettingsState : public State {
   void clearCache(int type, Core& core);
 };
 
-}  // namespace papyrix
+}  // namespace snapix

@@ -9,14 +9,14 @@ int main() {
 
   // === Default state: not throttled ===
   {
-    papyrix::drivers::Cpu cpu;
+    snapix::drivers::Cpu cpu;
     runner.expectTrue(!cpu.isThrottled(), "default: not throttled");
     runner.expectEq(uint8_t(10), cpu.loopDelayMs(), "default: active loop delay 10ms");
   }
 
   // === throttle() drops frequency and changes delay ===
   {
-    papyrix::drivers::Cpu cpu;
+    snapix::drivers::Cpu cpu;
     g_mockCpuFreqMhz = 160;
 
     cpu.throttle();
@@ -28,7 +28,7 @@ int main() {
 
   // === unthrottle() restores frequency ===
   {
-    papyrix::drivers::Cpu cpu;
+    snapix::drivers::Cpu cpu;
     g_mockCpuFreqMhz = 160;
 
     cpu.throttle();
@@ -41,7 +41,7 @@ int main() {
 
   // === throttle() is idempotent ===
   {
-    papyrix::drivers::Cpu cpu;
+    snapix::drivers::Cpu cpu;
     g_mockCpuFreqMhz = 160;
 
     cpu.throttle();
@@ -53,7 +53,7 @@ int main() {
 
   // === unthrottle() is idempotent ===
   {
-    papyrix::drivers::Cpu cpu;
+    snapix::drivers::Cpu cpu;
     g_mockCpuFreqMhz = 160;
 
     cpu.unthrottle();  // Already not throttled — should be no-op
@@ -63,7 +63,7 @@ int main() {
 
   // === throttle -> unthrottle -> throttle cycle ===
   {
-    papyrix::drivers::Cpu cpu;
+    snapix::drivers::Cpu cpu;
     g_mockCpuFreqMhz = 160;
 
     cpu.throttle();

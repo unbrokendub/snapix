@@ -21,14 +21,14 @@ namespace {
 constexpr uint8_t CACHE_FILE_VERSION = 22;  // v22: add fakeBold to config header
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
-#ifndef PAPYRIX_PERF_LOG
-#define PAPYRIX_PERF_LOG 0
+#ifndef SNAPIX_PERF_LOG
+#define SNAPIX_PERF_LOG 0
 #endif
 
 inline uint32_t perfMsNow() { return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL); }
 
 inline void perfLog(const char* phase, uint32_t startedMs, const char* fmt = nullptr, ...) {
-#if PAPYRIX_PERF_LOG
+#if SNAPIX_PERF_LOG
   char suffix[96] = "";
   if (fmt) {
     va_list args;
@@ -120,7 +120,7 @@ bool evictCacheFile(const std::string& cachePath, const char* reason) {
 // transactions that must not overlap with e-ink display SPI traffic.
 void closeFileProtected(FsFile& f) {
   if (f) {
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     // Explicit sync before close to ensure directory metadata is flushed to SD.
     // SdFat's close() calls sync() internally, but under memory pressure the
     // single-sector cache can lose directory entries between sync and close,
@@ -136,7 +136,7 @@ PageCache::PageCache(std::string cachePath) : cachePath_(std::move(cachePath)) {
 bool PageCache::ensureReadHandle() {
   if (readFile_) return true;
   {
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     if (SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
       readFileSize_ = readFile_.size();
       return true;
@@ -151,7 +151,7 @@ bool PageCache::ensureReadHandle() {
   for (int attempt = 1; attempt < 3; attempt++) {
     delay(10);
     LOG_DBG(TAG, "Retry ensureReadHandle attempt %d for %s", attempt + 1, cachePath_.c_str());
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     if (SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
       readFileSize_ = readFile_.size();
       return true;
@@ -162,7 +162,7 @@ bool PageCache::ensureReadHandle() {
 
 void PageCache::closeReadHandle() {
   if (readFile_) {
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     readFile_.close();
   }
   readFileSize_ = 0;
@@ -231,7 +231,7 @@ void PageCache::trimResidentPages(uint16_t centerPage, uint8_t keepBehind, uint8
 }
 
 bool PageCache::writeHeader(bool isPartial) {
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
   file_.seek(0);
   serialization::writePod(file_, CACHE_FILE_VERSION);
   serialization::writePod(file_, config_.fontId);
@@ -252,7 +252,7 @@ bool PageCache::writeHeader(bool isPartial) {
 }
 
 bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
   const uint32_t lutOffset = file_.position();
 
   for (const uint32_t pos : lut) {
@@ -279,7 +279,7 @@ bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
 }
 
 bool PageCache::loadLut(std::vector<uint32_t>& lut) {
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -326,7 +326,7 @@ bool PageCache::loadLut(std::vector<uint32_t>& lut) {
 }
 
 bool PageCache::loadRaw() {
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -368,7 +368,7 @@ bool PageCache::loadRaw() {
 
 PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const RenderConfig& config, bool cleanupInvalid) {
   ProbeResult result;
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
   if (!SdMan.exists(cachePath.c_str())) {
     return result;
   }
@@ -441,7 +441,7 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
 }
 
 bool PageCache::load(const RenderConfig& config) {
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -531,7 +531,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     // Append new pages AFTER old LUT (crash-safe: old LUT remains valid until header update)
     closeReadHandle();
     {
-      papyrix::spi::SharedBusLock lk;
+      snapix::spi::SharedBusLock lk;
       if (!file_.open(cachePath_.c_str(), O_RDWR)) {
         LOG_ERR(TAG, "Failed to open cache file for append");
         return false;
@@ -633,7 +633,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
           }
 
           // Serialize new page — lock SPI bus for position read + write
-          papyrix::spi::SharedBusLock lk;
+          snapix::spi::SharedBusLock lk;
           const uint32_t position = file_.position();
           if (!page->serialize(file_)) {
             LOG_ERR(TAG, "Failed to serialize page %d", pageCount_);
@@ -712,7 +712,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     }
 
     {
-      papyrix::spi::SharedBusLock lk;
+      snapix::spi::SharedBusLock lk;
       file_.sync();
     }
     closeFileProtected(file_);
@@ -747,7 +747,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
   }
 
   {
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     file_.sync();
   }
   closeFileProtected(file_);
@@ -787,7 +787,7 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     bool opened = false;
     for (int attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) delay(50);
-      papyrix::spi::SharedBusLock lk;
+      snapix::spi::SharedBusLock lk;
       if (file_.open(cachePath_.c_str(), O_RDWR)) {
         file_.seekEnd();
         opened = true;
@@ -804,7 +804,7 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     try {
       parseOk = parser.parsePages(
           [this, &lut](std::unique_ptr<Page> page) {
-            papyrix::spi::SharedBusLock lk;
+            snapix::spi::SharedBusLock lk;
             const uint32_t position = file_.position();
             if (!page->serialize(file_)) return;
             lut.push_back(position);
@@ -849,7 +849,7 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     // section) evicts that cached sector, the entry is lost and the file
     // appears to vanish.
     {
-      papyrix::spi::SharedBusLock lk;
+      snapix::spi::SharedBusLock lk;
       file_.sync();
     }
 
@@ -895,7 +895,7 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
   parser.reset();
   const std::string rebuildPath = cachePath_ + ".rebuild";
   {
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     if (SdMan.exists(rebuildPath.c_str())) {
       SdMan.remove(rebuildPath.c_str());
     }
@@ -912,7 +912,7 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     // old cache, corrupting section pagination.
     parser.reset();
     {
-      papyrix::spi::SharedBusLock lk;
+      snapix::spi::SharedBusLock lk;
       if (SdMan.exists(rebuildPath.c_str())) {
         SdMan.remove(rebuildPath.c_str());
       }
@@ -933,7 +933,7 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
   // display driver (or any other SPI user) might be active.
   bool result = false;
   {
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
 
     closeReadHandle();
     closeFileProtected(file_);
@@ -1024,7 +1024,7 @@ std::shared_ptr<Page> PageCache::loadPage(uint16_t pageNum) {
   for (int attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) delay(50);
 
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     if (!ensureReadHandle()) {
       continue;
     }
@@ -1088,7 +1088,7 @@ void PageCache::prefetchWindow(uint16_t centerPage, int direction, uint8_t span)
 
   const uint32_t startMs = perfMsNow();
   {
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     if (!ensureReadHandle()) return;
 
     const size_t fileSize = readFileSize_;

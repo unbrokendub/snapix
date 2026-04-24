@@ -7,7 +7,7 @@
 #include "../core/Result.h"
 #include "ContentTypes.h"
 
-namespace papyrix {
+namespace snapix {
 
 // TxtProvider wraps the Txt handler
 struct TxtProvider {
@@ -37,4 +37,4 @@ struct TxtProvider {
   const Txt* getTxt() const { return txt.get(); }
 };
 
-}  // namespace papyrix
+}  // namespace snapix

@@ -16,7 +16,7 @@
 
 #define READER_STATE_TAG "READER"
 
-namespace papyrix {
+namespace snapix {
 
 inline bool fb2UsesSectionNavigation(const Fb2Provider* provider) {
   return provider && provider->getFb2() && provider->tocCount() > 0;
@@ -46,12 +46,12 @@ inline bool resolveFb2SectionContext(const Fb2Provider* provider, const RenderCo
 }
 
 // Local perf logging wrapper that uses the READER tag.
-#ifndef PAPYRIX_PERF_LOG
-#define PAPYRIX_PERF_LOG 0
+#ifndef SNAPIX_PERF_LOG
+#define SNAPIX_PERF_LOG 0
 #endif
 
 inline void readerPerfLog(const char* phase, uint32_t startedMs, const char* fmt = nullptr, ...) {
-#if PAPYRIX_PERF_LOG
+#if SNAPIX_PERF_LOG
   char suffix[128] = "";
   if (fmt) {
     va_list args;
@@ -94,4 +94,4 @@ inline int estimateFb2TocTargetPageHint(const Fb2* fb2, const uint32_t estimated
   return tocItem.sectionIndex >= 0 ? tocItem.sectionIndex : -1;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

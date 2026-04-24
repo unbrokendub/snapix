@@ -23,11 +23,11 @@
 
 extern GfxRenderer renderer;
 
-namespace papyrix {
+namespace snapix {
 namespace imageviewer_app {
 
 static constexpr const char* IMAGES_DIR = "/images";
-static constexpr const char* SETTINGS_PATH = "/.papyrix/apps/image-viewer.txt";
+static constexpr const char* SETTINGS_PATH = "/.snapix/apps/image-viewer.txt";
 static constexpr uint32_t SLIDESHOW_INTERVALS[] = {0, 30000, 60000, 300000};
 static constexpr const char* SLIDESHOW_LABELS[] = {"Off", "30s", "60s", "5min"};
 static constexpr int SLIDESHOW_COUNT = 4;
@@ -68,7 +68,7 @@ static void loadSettings(Core& core) {
 }
 
 static void saveSettings(Core& core) {
-  core.storage.mkdir("/.papyrix/apps");
+  core.storage.mkdir("/.snapix/apps");
 
   FsFile file;
   auto result = core.storage.openWrite(SETTINGS_PATH, file);
@@ -302,4 +302,4 @@ void onMenuButton(Core& core, Button btn) {
 }
 
 }  // namespace imageviewer_app
-}  // namespace papyrix
+}  // namespace snapix

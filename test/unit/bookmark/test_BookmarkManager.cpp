@@ -9,7 +9,7 @@
 // Provide findAt implementation directly to avoid pulling in Core.h and all its
 // transitive dependencies via BookmarkManager.cpp.  save()/load() are not tested
 // here (they require Storage I/O), so the linker won't look for them.
-namespace papyrix {
+namespace snapix {
 
 int BookmarkManager::findAt(const Bookmark* bookmarks, int count,
                             ContentType type, int spineIndex, int sectionPage,
@@ -33,9 +33,9 @@ int BookmarkManager::findAt(const Bookmark* bookmarks, int count,
   return -1;
 }
 
-}  // namespace papyrix
+}  // namespace snapix
 
-using namespace papyrix;
+using namespace snapix;
 
 static void test_findAt_epub() {
   Bookmark bookmarks[3];

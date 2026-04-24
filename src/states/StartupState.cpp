@@ -7,7 +7,7 @@
 
 #define TAG "STARTUP"
 
-namespace papyrix {
+namespace snapix {
 
 void StartupState::enter(Core& core) {
   LOG_INF(TAG, "Entering");
@@ -29,4 +29,4 @@ StateTransition StartupState::update(Core& core) {
   return StateTransition::stay(StateId::Startup);
 }
 
-}  // namespace papyrix
+}  // namespace snapix

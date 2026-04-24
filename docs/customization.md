@@ -1,12 +1,12 @@
 # Customization Guide
 
-This guide explains how to create custom themes and add custom fonts to Papyrix.
+This guide explains how to create custom themes and add custom fonts to Snapix.
 
 ---
 
 ## Custom Themes
 
-Papyrix supports user-customizable themes stored on the SD card. Themes control colors, layout options, and fonts.
+Snapix supports user-customizable themes stored on the SD card. Themes control colors, layout options, and fonts.
 
 ### Theme File Location
 
@@ -42,7 +42,7 @@ When you first use the device, default `light.theme` and `dark.theme` files are 
 Theme files use a simple INI format:
 
 ```ini
-# Papyrix Theme Configuration
+# Snapix Theme Configuration
 # Edit values and restart device to apply
 
 [theme]
@@ -220,7 +220,7 @@ If any font directory doesn't exist, the device falls back to the builtin font f
 
 ## Custom Fonts
 
-Papyrix supports loading custom fonts from the SD card. Fonts must be pre-converted to the `.epdfont` binary format.
+Snapix supports loading custom fonts from the SD card. Fonts must be pre-converted to the `.epdfont` binary format.
 
 ### Font File Location
 

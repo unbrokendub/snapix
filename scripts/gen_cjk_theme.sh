@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gen_cjk_theme.sh — Generate a .bin font and .theme file for Papyrix Reader
+# gen_cjk_theme.sh — Generate a .bin font and .theme file for Snapix Reader
 #
 # Runs fontconvert-bin at a single pixel height and creates a matching
 # theme INI file. All reader font sizes point to the same .bin file.
@@ -30,7 +30,7 @@ die() { echo "Error: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 warn() { echo "WARNING: $*" >&2; }
 
-GITHUB_REPO="bigbag/papyrix-reader"
+GITHUB_REPO="bigbag/snapix-reader"
 GITHUB_RELEASE_TAG="fontconvert-bin-v0.1.0"
 
 # Auto-download fontconvert-bin from GitHub releases if not found locally
@@ -312,7 +312,7 @@ file_size=$(stat -f%z "$BIN_FILE" 2>/dev/null || stat --printf="%s" "$BIN_FILE" 
 size_mb=$(echo "scale=0; ($file_size + 524288) / 1048576" | bc)
 
 cat > "$THEME_FILE" <<EOF
-# Papyrix Theme: $THEME_DISPLAY
+# Snapix Theme: $THEME_DISPLAY
 # Copy this file to /config/themes/ on your SD card.
 # Copy $BIN_BASENAME to /config/fonts/ on your SD card.
 #

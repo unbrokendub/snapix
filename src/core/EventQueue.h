@@ -5,7 +5,7 @@
 #include "Result.h"
 #include "Types.h"
 
-namespace papyrix {
+namespace snapix {
 
 enum class EventType : uint8_t {
   None = 0,
@@ -125,4 +125,4 @@ struct Event {
   uint32_t dropped_ = 0;
 };
 
-}  // namespace papyrix
+}  // namespace snapix

@@ -1,6 +1,6 @@
 # Calibre Wireless Device Guide
 
-This guide explains how to use the **Calibre Wireless Device** feature to send books directly from Calibre to your Papyrix Reader over WiFi.
+This guide explains how to use the **Calibre Wireless Device** feature to send books directly from Calibre to your Snapix Reader over WiFi.
 
 ## Overview
 
@@ -16,19 +16,19 @@ This is the fastest and most convenient way to transfer books if you already use
 ## Prerequisites
 
 - **Calibre** installed on your computer ([download here](https://calibre-ebook.com/download))
-- Your Papyrix Reader device
+- Your Snapix Reader device
 - Both devices connected to the **same WiFi network**
 
 ---
 
-## Step 1: Enable Wireless Device in Papyrix
+## Step 1: Enable Wireless Device in Snapix
 
 1. From the Home screen, press the **Left** button to access **Sync**
 2. Select **Calibre Wireless**
 3. Connect to your WiFi network when prompted
 4. Once connected, the screen displays:
    - **IP Address and Port** (e.g., `192.168.1.42:9090`)
-   - **Device Name** (e.g., "Papyrix Reader")
+   - **Device Name** (e.g., "Snapix Reader")
    - Status: "Waiting for Calibre..."
 
 Leave the device on this screen while connecting from Calibre.
@@ -45,18 +45,18 @@ Leave the device on this screen while connecting from Calibre.
 
 ### Automatic Discovery
 
-Calibre will automatically scan for wireless devices on your network. Your Papyrix Reader should appear in the device list within a few seconds.
+Calibre will automatically scan for wireless devices on your network. Your Snapix Reader should appear in the device list within a few seconds.
 
 If automatic discovery doesn't work, you can manually enter the IP address:
 1. In Calibre, go to **Connect/Share > Start wireless device connection**
 2. Click **Manual connect**
-3. Enter the IP address shown on your Papyrix (e.g., `192.168.1.42`)
+3. Enter the IP address shown on your Snapix (e.g., `192.168.1.42`)
 4. Enter the port number (default: `9090`)
 
 ### Connection Confirmation
 
 When connected:
-- Your Papyrix screen changes to "Connected to Calibre"
+- Your Snapix screen changes to "Connected to Calibre"
 - Calibre shows your device in the left sidebar
 
 ---
@@ -78,7 +78,7 @@ When connected:
 ### Progress Display
 
 While transferring:
-- Papyrix shows "Receiving book..." with the title
+- Snapix shows "Receiving book..." with the title
 - A progress bar indicates transfer status
 - Transfer speed depends on your WiFi connection
 
@@ -91,7 +91,7 @@ Books are saved to the `/Books/` folder on your SD card.
 ### Viewing Books on Device
 
 Once connected, Calibre's left sidebar shows:
-- **Device** section with your Papyrix Reader
+- **Device** section with your Snapix Reader
 - Click on **Main memory** to see books on your device
 
 ### Deleting Books
@@ -101,7 +101,7 @@ From Calibre:
 2. Select the book(s) to delete
 3. Right-click and select **Remove books from device**
 
-The book is deleted from your Papyrix's SD card.
+The book is deleted from your Snapix's SD card.
 
 ---
 
@@ -113,13 +113,13 @@ Settings are stored in `/config/calibre.ini` on your SD card:
 
 ```ini
 [Settings]
-device_name = Papyrix Reader
+device_name = Snapix Reader
 password =
 ```
 
 ### Available Settings
 
-- **device_name** - How your device appears in Calibre (default: `Papyrix Reader`)
+- **device_name** - How your device appears in Calibre (default: `Snapix Reader`)
 - **password** - Optional password for authentication (default: empty = no password)
 
 ### Setting a Password
@@ -144,7 +144,7 @@ Both passwords must match for the connection to work.
 
 ### Device Not Found in Calibre
 
-**Problem:** Calibre doesn't discover your Papyrix Reader
+**Problem:** Calibre doesn't discover your Snapix Reader
 
 **Solutions:**
 1. Verify both devices are on the **same WiFi network**
@@ -186,7 +186,7 @@ Both passwords must match for the connection to work.
 
 ### Protocol
 
-Papyrix implements the **Calibre Smart Device App** protocol:
+Snapix implements the **Calibre Smart Device App** protocol:
 - **Discovery:** UDP broadcast on ports 54982, 48123, 39001, 44044, 59678
 - **Communication:** TCP connection on port 9090
 - **Authentication:** SHA1-based password hashing (optional)
@@ -221,7 +221,7 @@ Papyrix implements the **Calibre Smart Device App** protocol:
 When you're finished:
 
 1. In Calibre, right-click your device and select **Eject this device**
-2. On your Papyrix, press the **Back** button
+2. On your Snapix, press the **Back** button
 3. The device will automatically restart to reclaim WiFi memory
 
 > **Note:** The automatic restart is required because the ESP32's WiFi stack fragments memory. Without this restart, some features may not work correctly.

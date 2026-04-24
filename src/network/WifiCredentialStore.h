@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace papyrix {
+namespace snapix {
 
 // Fixed-size WiFi credential (no heap allocation)
 struct WifiCredential {
@@ -12,7 +12,7 @@ struct WifiCredential {
 };  // 98 bytes each
 
 // Singleton credential store using fixed arrays (~800 bytes total)
-// File: /.papyrix/wifi.bin (XOR-obfuscated passwords)
+// File: /.snapix/wifi.bin (XOR-obfuscated passwords)
 class WifiCredentialStore {
  public:
   static constexpr int MAX_NETWORKS = 8;
@@ -46,4 +46,4 @@ class WifiCredentialStore {
 
 #define WIFI_STORE WifiCredentialStore::getInstance()
 
-}  // namespace papyrix
+}  // namespace snapix

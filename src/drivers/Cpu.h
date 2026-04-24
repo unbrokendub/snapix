@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace papyrix {
+namespace snapix {
 namespace drivers {
 
 class Cpu {
@@ -17,4 +17,4 @@ class Cpu {
 };
 
 }  // namespace drivers
-}  // namespace papyrix
+}  // namespace snapix

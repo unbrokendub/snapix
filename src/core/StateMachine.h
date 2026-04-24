@@ -3,7 +3,7 @@
 #include "../states/State.h"
 #include "Types.h"
 
-namespace papyrix {
+namespace snapix {
 
 struct Core;
 
@@ -31,4 +31,4 @@ class StateMachine {
   size_t stateCount_ = 0;
 };
 
-}  // namespace papyrix
+}  // namespace snapix

@@ -88,7 +88,7 @@ ImageConverter* ImageConverterFactory::getConverter(const std::string& filePath)
 
 bool ImageConverterFactory::convertToBmp(const std::string& inputPath, const std::string& outputPath,
                                          const ImageConvertConfig& config) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     LOG_ERR(config.logTag, "Shared SPI lock unavailable for image conversion");
     return false;

@@ -13,7 +13,7 @@
 
 #define TAG "CALIBRE"
 
-namespace papyrix {
+namespace snapix {
 
 namespace {
 
@@ -66,8 +66,8 @@ void CalibreSyncState::initializeCalibre(Core& core) {
   calibre_device_config_t config;
   calibre_device_config_init(&config);
 
-  snprintf(config.device_name, sizeof(config.device_name), "Papyrix Reader");
-  snprintf(config.manufacturer, sizeof(config.manufacturer), "Papyrix");
+  snprintf(config.device_name, sizeof(config.device_name), "Snapix Reader");
+  snprintf(config.manufacturer, sizeof(config.manufacturer), "Snapix");
   snprintf(config.model, sizeof(config.model), "X4");
 
   // Add supported formats (Xteink: epub, txt, md, xtc, xtch)
@@ -313,4 +313,4 @@ bool CalibreSyncState::onDelete(void* ctx, const char* lpath) {
   }
 }
 
-}  // namespace papyrix
+}  // namespace snapix

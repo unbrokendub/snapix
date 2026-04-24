@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace papyrix {
+namespace snapix {
 
 // Button identifiers
 enum class Button : uint8_t {
@@ -67,4 +67,4 @@ constexpr uint16_t Height = 800;
 constexpr size_t BufferSize = (Width * Height) / 8;  // 1-bit display
 }  // namespace Screen
 
-}  // namespace papyrix
+}  // namespace snapix

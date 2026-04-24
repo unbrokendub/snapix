@@ -9,7 +9,7 @@
 class InputManager;
 class MappedInputManager;
 
-namespace papyrix {
+namespace snapix {
 namespace drivers {
 
 class Input {
@@ -65,4 +65,4 @@ class Input {
 };
 
 }  // namespace drivers
-}  // namespace papyrix
+}  // namespace snapix

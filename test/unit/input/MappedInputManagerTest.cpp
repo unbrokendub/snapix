@@ -15,7 +15,7 @@ class InputManager {
 };
 
 // Inline Settings enums
-namespace papyrix {
+namespace snapix {
 struct Settings {
   enum SideButtonLayout : uint8_t { PrevNext = 0, NextPrev = 1 };
   enum FrontButtonLayout : uint8_t { FrontBCLR = 0, FrontLRBC = 1 };
@@ -23,63 +23,63 @@ struct Settings {
   uint8_t sideButtonLayout = PrevNext;
   uint8_t frontButtonLayout = FrontBCLR;
 };
-}  // namespace papyrix
+}  // namespace snapix
 
 // Inline button mapping logic from MappedInputManager
 enum class Button { Back, Confirm, Left, Right, Up, Down, Power, PageBack, PageForward };
 
-int mapButton(Button button, papyrix::Settings* settings) {
-  const auto frontLayout = settings ? static_cast<papyrix::Settings::FrontButtonLayout>(settings->frontButtonLayout)
-                                    : papyrix::Settings::FrontBCLR;
-  const auto sideLayout = settings ? static_cast<papyrix::Settings::SideButtonLayout>(settings->sideButtonLayout)
-                                   : papyrix::Settings::PrevNext;
+int mapButton(Button button, snapix::Settings* settings) {
+  const auto frontLayout = settings ? static_cast<snapix::Settings::FrontButtonLayout>(settings->frontButtonLayout)
+                                    : snapix::Settings::FrontBCLR;
+  const auto sideLayout = settings ? static_cast<snapix::Settings::SideButtonLayout>(settings->sideButtonLayout)
+                                   : snapix::Settings::PrevNext;
 
   switch (button) {
     case Button::Back:
       switch (frontLayout) {
-        case papyrix::Settings::FrontLRBC:
+        case snapix::Settings::FrontLRBC:
           return InputManager::BTN_LEFT;
-        case papyrix::Settings::FrontBCLR:
+        case snapix::Settings::FrontBCLR:
         default:
           return InputManager::BTN_BACK;
       }
     case Button::Confirm:
       switch (frontLayout) {
-        case papyrix::Settings::FrontLRBC:
+        case snapix::Settings::FrontLRBC:
           return InputManager::BTN_RIGHT;
-        case papyrix::Settings::FrontBCLR:
+        case snapix::Settings::FrontBCLR:
         default:
           return InputManager::BTN_CONFIRM;
       }
     case Button::Left:
       switch (frontLayout) {
-        case papyrix::Settings::FrontLRBC:
+        case snapix::Settings::FrontLRBC:
           return InputManager::BTN_BACK;
-        case papyrix::Settings::FrontBCLR:
+        case snapix::Settings::FrontBCLR:
         default:
           return InputManager::BTN_LEFT;
       }
     case Button::Right:
       switch (frontLayout) {
-        case papyrix::Settings::FrontLRBC:
+        case snapix::Settings::FrontLRBC:
           return InputManager::BTN_CONFIRM;
-        case papyrix::Settings::FrontBCLR:
+        case snapix::Settings::FrontBCLR:
         default:
           return InputManager::BTN_RIGHT;
       }
     case Button::Up:
       switch (sideLayout) {
-        case papyrix::Settings::NextPrev:
+        case snapix::Settings::NextPrev:
           return InputManager::BTN_DOWN;
-        case papyrix::Settings::PrevNext:
+        case snapix::Settings::PrevNext:
         default:
           return InputManager::BTN_UP;
       }
     case Button::Down:
       switch (sideLayout) {
-        case papyrix::Settings::NextPrev:
+        case snapix::Settings::NextPrev:
           return InputManager::BTN_UP;
-        case papyrix::Settings::PrevNext:
+        case snapix::Settings::PrevNext:
         default:
           return InputManager::BTN_DOWN;
       }
@@ -87,17 +87,17 @@ int mapButton(Button button, papyrix::Settings* settings) {
       return InputManager::BTN_POWER;
     case Button::PageBack:
       switch (sideLayout) {
-        case papyrix::Settings::NextPrev:
+        case snapix::Settings::NextPrev:
           return InputManager::BTN_DOWN;
-        case papyrix::Settings::PrevNext:
+        case snapix::Settings::PrevNext:
         default:
           return InputManager::BTN_UP;
       }
     case Button::PageForward:
       switch (sideLayout) {
-        case papyrix::Settings::NextPrev:
+        case snapix::Settings::NextPrev:
           return InputManager::BTN_UP;
-        case papyrix::Settings::PrevNext:
+        case snapix::Settings::PrevNext:
         default:
           return InputManager::BTN_DOWN;
       }
@@ -110,8 +110,8 @@ int main() {
 
   // === Front button mapping: BCLR (default) ===
   {
-    papyrix::Settings settings;
-    settings.frontButtonLayout = papyrix::Settings::FrontBCLR;
+    snapix::Settings settings;
+    settings.frontButtonLayout = snapix::Settings::FrontBCLR;
 
     runner.expectEq(InputManager::BTN_BACK, mapButton(Button::Back, &settings), "BCLR: Back -> BTN_BACK");
     runner.expectEq(InputManager::BTN_CONFIRM, mapButton(Button::Confirm, &settings), "BCLR: Confirm -> BTN_CONFIRM");
@@ -121,8 +121,8 @@ int main() {
 
   // === Front button mapping: LRBC (swapped) ===
   {
-    papyrix::Settings settings;
-    settings.frontButtonLayout = papyrix::Settings::FrontLRBC;
+    snapix::Settings settings;
+    settings.frontButtonLayout = snapix::Settings::FrontLRBC;
 
     runner.expectEq(InputManager::BTN_LEFT, mapButton(Button::Back, &settings), "LRBC: Back -> BTN_LEFT");
     runner.expectEq(InputManager::BTN_RIGHT, mapButton(Button::Confirm, &settings), "LRBC: Confirm -> BTN_RIGHT");
@@ -132,8 +132,8 @@ int main() {
 
   // === Side button mapping: PrevNext (default) ===
   {
-    papyrix::Settings settings;
-    settings.sideButtonLayout = papyrix::Settings::PrevNext;
+    snapix::Settings settings;
+    settings.sideButtonLayout = snapix::Settings::PrevNext;
 
     runner.expectEq(InputManager::BTN_UP, mapButton(Button::PageBack, &settings), "PrevNext: PageBack -> BTN_UP");
     runner.expectEq(InputManager::BTN_DOWN, mapButton(Button::PageForward, &settings),
@@ -142,8 +142,8 @@ int main() {
 
   // === Side button mapping: NextPrev (swapped) ===
   {
-    papyrix::Settings settings;
-    settings.sideButtonLayout = papyrix::Settings::NextPrev;
+    snapix::Settings settings;
+    settings.sideButtonLayout = snapix::Settings::NextPrev;
 
     runner.expectEq(InputManager::BTN_DOWN, mapButton(Button::PageBack, &settings), "NextPrev: PageBack -> BTN_DOWN");
     runner.expectEq(InputManager::BTN_UP, mapButton(Button::PageForward, &settings),
@@ -152,9 +152,9 @@ int main() {
 
   // === Combined: LRBC front + NextPrev side ===
   {
-    papyrix::Settings settings;
-    settings.frontButtonLayout = papyrix::Settings::FrontLRBC;
-    settings.sideButtonLayout = papyrix::Settings::NextPrev;
+    snapix::Settings settings;
+    settings.frontButtonLayout = snapix::Settings::FrontLRBC;
+    settings.sideButtonLayout = snapix::Settings::NextPrev;
 
     runner.expectEq(InputManager::BTN_LEFT, mapButton(Button::Back, &settings), "Combined: Back -> BTN_LEFT");
     runner.expectEq(InputManager::BTN_DOWN, mapButton(Button::PageBack, &settings),
@@ -163,16 +163,16 @@ int main() {
 
   // === Up/Down remapped by sideLayout ===
   {
-    papyrix::Settings settings;
-    settings.sideButtonLayout = papyrix::Settings::PrevNext;
+    snapix::Settings settings;
+    settings.sideButtonLayout = snapix::Settings::PrevNext;
 
     runner.expectEq(InputManager::BTN_UP, mapButton(Button::Up, &settings), "PrevNext: Up -> BTN_UP");
     runner.expectEq(InputManager::BTN_DOWN, mapButton(Button::Down, &settings), "PrevNext: Down -> BTN_DOWN");
   }
 
   {
-    papyrix::Settings settings;
-    settings.sideButtonLayout = papyrix::Settings::NextPrev;
+    snapix::Settings settings;
+    settings.sideButtonLayout = snapix::Settings::NextPrev;
 
     runner.expectEq(InputManager::BTN_DOWN, mapButton(Button::Up, &settings), "NextPrev: Up -> BTN_DOWN");
     runner.expectEq(InputManager::BTN_UP, mapButton(Button::Down, &settings), "NextPrev: Down -> BTN_UP");
@@ -180,9 +180,9 @@ int main() {
 
   // === Non-remapped buttons are unaffected ===
   {
-    papyrix::Settings settings;
-    settings.frontButtonLayout = papyrix::Settings::FrontLRBC;
-    settings.sideButtonLayout = papyrix::Settings::NextPrev;
+    snapix::Settings settings;
+    settings.frontButtonLayout = snapix::Settings::FrontLRBC;
+    settings.sideButtonLayout = snapix::Settings::NextPrev;
 
     runner.expectEq(InputManager::BTN_POWER, mapButton(Button::Power, &settings), "Power always -> BTN_POWER");
   }

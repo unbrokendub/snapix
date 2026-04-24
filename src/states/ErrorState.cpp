@@ -11,7 +11,7 @@
 
 #define TAG "ERROR"
 
-namespace papyrix {
+namespace snapix {
 
 ErrorState::ErrorState(GfxRenderer& renderer) : renderer_(renderer), needsRender_(true) {}
 
@@ -76,4 +76,4 @@ void ErrorState::render(Core& core) {
   core.display.markDirty();
 }
 
-}  // namespace papyrix
+}  // namespace snapix

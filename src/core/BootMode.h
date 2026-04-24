@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace papyrix {
+namespace snapix {
 
 // Boot modes for memory optimization
 enum class BootMode : uint8_t {
@@ -49,4 +49,4 @@ void clearTransition();
 // The e-ink display will retain this message during the reboot
 void showTransitionNotification(const char* message);
 
-}  // namespace papyrix
+}  // namespace snapix

@@ -1,8 +1,8 @@
 {
-  "name": "papyrix-tools",
+  "name": "snapix-tools",
   "version": "1.0.0",
   "type": "module",
-  "description": "Build tools for Papyrix e-paper reader",
+  "description": "Build tools for Snapix e-paper reader",
   "scripts": {
     "convert-fonts": "node convert-fonts.mjs",
     "convert-logo": "node convert-logo.mjs",

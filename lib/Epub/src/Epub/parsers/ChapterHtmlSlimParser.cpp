@@ -1062,7 +1062,7 @@ bool ChapterHtmlSlimParser::initParser() {
   }
 
   {
-    papyrix::spi::SharedBusLock busLock;
+    snapix::spi::SharedBusLock busLock;
     if (!SdMan.openFileForRead("EHP", filepath, file_)) {
       XML_ParserFree(xmlParser_);
       xmlParser_ = nullptr;
@@ -1120,7 +1120,7 @@ bool ChapterHtmlSlimParser::parseLoop() {
 
     size_t len;
     {
-      papyrix::spi::SharedBusLock busLock;
+      snapix::spi::SharedBusLock busLock;
       len = file_.read(static_cast<uint8_t*>(buf), kReadChunkSize);
     }
 
@@ -1250,7 +1250,7 @@ bool ChapterHtmlSlimParser::resumeParsing() {
 
   // Reopen file at saved position (closed on suspend to free file handle)
   {
-    papyrix::spi::SharedBusLock busLock;
+    snapix::spi::SharedBusLock busLock;
     if (!SdMan.openFileForRead("EHP", filepath, file_)) {
       LOG_ERR(TAG, "Failed to reopen file for resume");
       cleanupParser();
@@ -1448,7 +1448,7 @@ void ChapterHtmlSlimParser::makePages() {
 
 bool ChapterHtmlSlimParser::validateCachedBmp(const std::string& cachedBmpPath, uint16_t& width, uint16_t& height,
                                               std::string& failureReason) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     failureReason = "shared-bus-lock-unavailable";
     return false;
@@ -1590,7 +1590,7 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
   // runs at recursive-mutex depth > 1.  Deep nesting (depth 3) triggered
   // xTaskPriorityDisinherit asserts on single-core ESP32-C3.
   {
-    papyrix::spi::SharedBusLock preLock;
+    snapix::spi::SharedBusLock preLock;
     if (!preLock) {
       setRetryable("shared-bus-lock-unavailable", ImageFailureClass::AbortRequested);
       return result;
@@ -1704,7 +1704,7 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
   bool success = tryConvert(maxImageWidth, maxImageHeight, quickImageDecode_);
   if (!success && !shouldAbortImage() && !quickImageDecode_) {
     LOG_INF(TAG, "[CONTENT][IMAGE] retry quick src=%s", result.resolvedPath.c_str());
-    { papyrix::spi::SharedBusLock lk; SdMan.remove(result.cachedBmpPath.c_str()); }
+    { snapix::spi::SharedBusLock lk; SdMan.remove(result.cachedBmpPath.c_str()); }
     success = tryConvert(maxImageWidth, maxImageHeight, true);
   }
   if (!success && !shouldAbortImage()) {
@@ -1713,14 +1713,14 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
     if (fallbackWidth != maxImageWidth || fallbackHeight != maxImageHeight) {
       LOG_INF(TAG, "[CONTENT][IMAGE] retry reduced src=%s size=%dx%d", result.resolvedPath.c_str(), fallbackWidth,
               fallbackHeight);
-      { papyrix::spi::SharedBusLock lk; SdMan.remove(result.cachedBmpPath.c_str()); }
+      { snapix::spi::SharedBusLock lk; SdMan.remove(result.cachedBmpPath.c_str()); }
       success = tryConvert(fallbackWidth, fallbackHeight, true);
     }
   }
 
   // ── Phase 3: post-conversion cleanup (holds SPI lock) ─────────────
   {
-    papyrix::spi::SharedBusLock postLock;
+    snapix::spi::SharedBusLock postLock;
     SdMan.remove(tempPath.c_str());
 
     if (!success) {

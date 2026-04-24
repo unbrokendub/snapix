@@ -9,9 +9,9 @@
 
 class GfxRenderer;
 
-namespace papyrix {
+namespace snapix {
 
-class PapyrixWebServer;
+class SnapixWebServer;
 
 enum class NetworkScreen : uint8_t {
   ModeSelect,
@@ -48,7 +48,7 @@ class NetworkState : public State {
   ui::WebServerView serverView_ = {};
 
   // WebServer: heap-allocated ONLY when running
-  std::unique_ptr<PapyrixWebServer> server_;
+  std::unique_ptr<SnapixWebServer> server_;
 
   // State tracking
   char selectedSSID_[33];
@@ -75,4 +75,4 @@ class NetworkState : public State {
   void stopWebServer(Core& core);
 };
 
-}  // namespace papyrix
+}  // namespace snapix

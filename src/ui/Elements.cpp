@@ -5,7 +5,7 @@
 #include <cstring>
 #include <string>
 
-#include "core/PapyrixSettings.h"
+#include "core/SnapixSettings.h"
 
 namespace ui {
 
@@ -72,7 +72,7 @@ void enumValue(const GfxRenderer& r, const Theme& t, int y, const char* label, c
 }
 
 void buttonBar(const GfxRenderer& r, const Theme& t, const char* b1, const char* b2, const char* b3, const char* b4) {
-  if (frontButtonLayout_ == papyrix::Settings::FrontLRBC) {
+  if (frontButtonLayout_ == snapix::Settings::FrontLRBC) {
     r.drawButtonHints(t.uiFontId, b3, b4, b1, b2, t.primaryTextBlack);
   } else {
     r.drawButtonHints(t.uiFontId, b1, b2, b3, b4, t.primaryTextBlack);
@@ -80,7 +80,7 @@ void buttonBar(const GfxRenderer& r, const Theme& t, const char* b1, const char*
 }
 
 void buttonBar(const GfxRenderer& r, const Theme& t, const ButtonBar& buttons) {
-  if (frontButtonLayout_ == papyrix::Settings::FrontLRBC) {
+  if (frontButtonLayout_ == snapix::Settings::FrontLRBC) {
     r.drawButtonHints(t.uiFontId, buttons.labels[2], buttons.labels[3], buttons.labels[0], buttons.labels[1],
                       t.primaryTextBlack);
   } else {

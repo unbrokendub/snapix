@@ -1,59 +1,59 @@
 #include "MappedInputManager.h"
 
-#include "core/PapyrixSettings.h"
+#include "core/SnapixSettings.h"
 
 decltype(InputManager::BTN_BACK) MappedInputManager::mapButton(const Button button) const {
-  const auto frontLayout = settings_ ? static_cast<papyrix::Settings::FrontButtonLayout>(settings_->frontButtonLayout)
-                                     : papyrix::Settings::FrontBCLR;
-  const auto sideLayout = settings_ ? static_cast<papyrix::Settings::SideButtonLayout>(settings_->sideButtonLayout)
-                                    : papyrix::Settings::PrevNext;
+  const auto frontLayout = settings_ ? static_cast<snapix::Settings::FrontButtonLayout>(settings_->frontButtonLayout)
+                                     : snapix::Settings::FrontBCLR;
+  const auto sideLayout = settings_ ? static_cast<snapix::Settings::SideButtonLayout>(settings_->sideButtonLayout)
+                                    : snapix::Settings::PrevNext;
 
   switch (button) {
     case Button::Back:
       switch (frontLayout) {
-        case papyrix::Settings::FrontLRBC:
+        case snapix::Settings::FrontLRBC:
           return InputManager::BTN_LEFT;
-        case papyrix::Settings::FrontBCLR:
+        case snapix::Settings::FrontBCLR:
         default:
           return InputManager::BTN_BACK;
       }
     case Button::Confirm:
       switch (frontLayout) {
-        case papyrix::Settings::FrontLRBC:
+        case snapix::Settings::FrontLRBC:
           return InputManager::BTN_RIGHT;
-        case papyrix::Settings::FrontBCLR:
+        case snapix::Settings::FrontBCLR:
         default:
           return InputManager::BTN_CONFIRM;
       }
     case Button::Left:
       switch (frontLayout) {
-        case papyrix::Settings::FrontLRBC:
+        case snapix::Settings::FrontLRBC:
           return InputManager::BTN_BACK;
-        case papyrix::Settings::FrontBCLR:
+        case snapix::Settings::FrontBCLR:
         default:
           return InputManager::BTN_LEFT;
       }
     case Button::Right:
       switch (frontLayout) {
-        case papyrix::Settings::FrontLRBC:
+        case snapix::Settings::FrontLRBC:
           return InputManager::BTN_CONFIRM;
-        case papyrix::Settings::FrontBCLR:
+        case snapix::Settings::FrontBCLR:
         default:
           return InputManager::BTN_RIGHT;
       }
     case Button::Up:
       switch (sideLayout) {
-        case papyrix::Settings::NextPrev:
+        case snapix::Settings::NextPrev:
           return InputManager::BTN_DOWN;
-        case papyrix::Settings::PrevNext:
+        case snapix::Settings::PrevNext:
         default:
           return InputManager::BTN_UP;
       }
     case Button::Down:
       switch (sideLayout) {
-        case papyrix::Settings::NextPrev:
+        case snapix::Settings::NextPrev:
           return InputManager::BTN_UP;
-        case papyrix::Settings::PrevNext:
+        case snapix::Settings::PrevNext:
         default:
           return InputManager::BTN_DOWN;
       }
@@ -61,17 +61,17 @@ decltype(InputManager::BTN_BACK) MappedInputManager::mapButton(const Button butt
       return InputManager::BTN_POWER;
     case Button::PageBack:
       switch (sideLayout) {
-        case papyrix::Settings::NextPrev:
+        case snapix::Settings::NextPrev:
           return InputManager::BTN_DOWN;
-        case papyrix::Settings::PrevNext:
+        case snapix::Settings::PrevNext:
         default:
           return InputManager::BTN_UP;
       }
     case Button::PageForward:
       switch (sideLayout) {
-        case papyrix::Settings::NextPrev:
+        case snapix::Settings::NextPrev:
           return InputManager::BTN_UP;
-        case papyrix::Settings::PrevNext:
+        case snapix::Settings::PrevNext:
         default:
           return InputManager::BTN_DOWN;
       }

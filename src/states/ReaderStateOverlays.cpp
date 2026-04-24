@@ -34,7 +34,7 @@
 
 #define TAG "READER"
 
-namespace papyrix {
+namespace snapix {
 using reader::contentCachePath;
 using reader::epubSectionCachePath;
 using reader::kEpubInteractiveHotExtendBatchPages;
@@ -1236,5 +1236,5 @@ int ReaderState::bookmarkVisibleCount() const {
   return (renderer_.getScreenHeight() - startY - bottomMargin) / itemHeight;
 }
 
-}  // namespace papyrix
+}  // namespace snapix
 

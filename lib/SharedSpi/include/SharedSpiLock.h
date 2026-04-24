@@ -3,7 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-namespace papyrix::spi {
+namespace snapix::spi {
 
 SemaphoreHandle_t sharedBusMutex();
 
@@ -26,4 +26,4 @@ class SharedBusLock {
   bool acquired_ = false;
 };
 
-}  // namespace papyrix::spi
+}  // namespace snapix::spi

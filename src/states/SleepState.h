@@ -7,7 +7,7 @@
 class GfxRenderer;
 class Bitmap;
 
-namespace papyrix {
+namespace snapix {
 
 struct Core;
 
@@ -32,4 +32,4 @@ class SleepState : public State {
   void waitForPowerRelease() const;
 };
 
-}  // namespace papyrix
+}  // namespace snapix

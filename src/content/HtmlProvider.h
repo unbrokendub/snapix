@@ -7,7 +7,7 @@
 #include "../core/Result.h"
 #include "ContentTypes.h"
 
-namespace papyrix {
+namespace snapix {
 
 struct HtmlProvider {
   std::unique_ptr<Html> html;
@@ -33,4 +33,4 @@ struct HtmlProvider {
   const Html* getHtml() const { return html.get(); }
 };
 
-}  // namespace papyrix
+}  // namespace snapix

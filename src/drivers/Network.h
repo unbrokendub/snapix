@@ -5,7 +5,7 @@
 
 #include "../core/Result.h"
 
-namespace papyrix {
+namespace snapix {
 namespace drivers {
 
 // WiFi network info from scan (fixed-size, no heap)
@@ -53,4 +53,4 @@ class Network {
 };
 
 }  // namespace drivers
-}  // namespace papyrix
+}  // namespace snapix

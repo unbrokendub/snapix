@@ -155,8 +155,8 @@ int main() {
 
   // Test 14: Basic cache path
   {
-    std::string path = generateCachePath("/.papyrix", "/books/novel.txt");
-    runner.expectTrue(path.find("/.papyrix/txt_") == 0, "generateCachePath: has prefix");
+    std::string path = generateCachePath("/.snapix", "/books/novel.txt");
+    runner.expectTrue(path.find("/.snapix/txt_") == 0, "generateCachePath: has prefix");
     runner.expectTrue(path.length() > 14, "generateCachePath: has hash");
   }
 

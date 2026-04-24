@@ -6,7 +6,7 @@ namespace ui {
 
 constexpr const char* const AppMenuView::EXTRA_ITEMS[];
 
-void render(const GfxRenderer& r, const Theme& t, const AppMenuView& v, const papyrix::MiniApp* apps) {
+void render(const GfxRenderer& r, const Theme& t, const AppMenuView& v, const snapix::MiniApp* apps) {
   r.clearScreen(t.backgroundColor);
 
   title(r, t, t.screenMarginTop, "Apps");

@@ -1,7 +1,7 @@
 /**
  * Fb2.cpp
  *
- * FictionBook 2.0 XML e-book handler implementation for Papyrix Reader
+ * FictionBook 2.0 XML e-book handler implementation for Snapix Reader
  */
 
 #include "Fb2.h"
@@ -496,7 +496,7 @@ bool Fb2::loadMetaCache() {
     return false;
   }
 
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
 
   uint8_t version;
   if (!serialization::readPodChecked(file, version) || version != kMetaCacheVersion) {
@@ -564,7 +564,7 @@ bool Fb2::saveMetaCache() const {
     return false;
   }
 
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
 
   serialization::writePod(file, kMetaCacheVersion);
   serialization::writeString(file, title);
@@ -600,7 +600,7 @@ Fb2::TocItem Fb2::getTocItem(uint16_t index) const {
   FsFile file;
   if (!SdMan.openFileForRead("FB2", metaCachePath(), file)) return item;
 
-  papyrix::spi::SharedBusLock lk;
+  snapix::spi::SharedBusLock lk;
   file.seek(tocLut_[index]);
   if (!serialization::readString(file, item.title)) {
     file.close();

@@ -1,4 +1,4 @@
-# Makefile for Papyrix Reader firmware
+# Makefile for Snapix Reader firmware
 # Wraps PlatformIO commands for convenience
 
 .PHONY: all build build-release release upload upload-release flash flash-release \
@@ -75,13 +75,13 @@ ifndef VERSION
 endif
 ifdef NOTES
 	gh release create v$(VERSION) .pio/build/gh_release/firmware.bin \
-		--repo bigbag/papyrix-reader \
-		--title "Papyrix v$(VERSION)" \
+		--repo bigbag/snapix-reader \
+		--title "Snapix v$(VERSION)" \
 		--notes "$(NOTES)"
 else
 	gh release create v$(VERSION) .pio/build/gh_release/firmware.bin \
-		--repo bigbag/papyrix-reader \
-		--title "Papyrix v$(VERSION)" \
+		--repo bigbag/snapix-reader \
+		--title "Snapix v$(VERSION)" \
 		--generate-notes
 endif
 
@@ -155,7 +155,7 @@ endif
 ## Help:
 
 help: ## Show this help
-	@echo "Papyrix Reader - Build System"
+	@echo "Snapix Reader - Build System"
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""

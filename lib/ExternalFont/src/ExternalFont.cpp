@@ -143,7 +143,7 @@ bool ExternalFont::load(const char* filepath) {
   }
 
   {
-    papyrix::spi::SharedBusLock busLock;
+    snapix::spi::SharedBusLock busLock;
     if (!SdMan.openFileForRead("EXT_FONT", filepath, _fontFile)) {
       LOG_ERR(TAG, "Failed to open: %s", filepath);
       return false;
@@ -223,7 +223,7 @@ bool ExternalFont::readGlyphAtOffset(uint32_t offset, uint8_t* buffer) {
     return false;
   }
 
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     return false;
   }

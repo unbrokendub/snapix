@@ -30,9 +30,9 @@ static HWCDC& logSerial = Serial;
 void logPrintf(const char* level, const char* origin, const char* format, ...);
 
 #ifdef ENABLE_SERIAL_LOG
-#define PAPYRIX_SERIAL_LOG_ENABLED 1
+#define SNAPIX_SERIAL_LOG_ENABLED 1
 #else
-#define PAPYRIX_SERIAL_LOG_ENABLED 0
+#define SNAPIX_SERIAL_LOG_ENABLED 0
 #endif
 
 #ifdef ENABLE_SERIAL_LOG
@@ -62,7 +62,7 @@ void logPrintf(const char* level, const char* origin, const char* format, ...);
 class MySerialImpl : public Print {
  public:
   void begin(unsigned long baud) {
-#if PAPYRIX_SERIAL_LOG_ENABLED
+#if SNAPIX_SERIAL_LOG_ENABLED
     logSerial.begin(baud);
 #else
     (void)baud;
@@ -70,7 +70,7 @@ class MySerialImpl : public Print {
   }
 
   operator bool() const {
-#if PAPYRIX_SERIAL_LOG_ENABLED
+#if SNAPIX_SERIAL_LOG_ENABLED
     return logSerial;
 #else
     return false;

@@ -301,8 +301,8 @@ bool json_find_bool(json_parser_t* p, const char* key, bool* out) {
 
 void calibre_device_config_init(calibre_device_config_t* config) {
   memset(config, 0, sizeof(*config));
-  calibre_strlcpy(config->device_name, "Papyrix Reader", sizeof(config->device_name));
-  calibre_strlcpy(config->manufacturer, "Papyrix", sizeof(config->manufacturer));
+  calibre_strlcpy(config->device_name, "Snapix Reader", sizeof(config->device_name));
+  calibre_strlcpy(config->manufacturer, "Snapix", sizeof(config->manufacturer));
   calibre_strlcpy(config->model, "X4", sizeof(config->model));
   calibre_gen_uuid(config->device_store_uuid, sizeof(config->device_store_uuid));
   config->cache_uses_lpath = 1;

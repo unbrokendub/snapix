@@ -158,8 +158,8 @@ int main() {
   // ============================================
 
   {
-    std::string path = generateCachePath("/.papyrix", "/books/page.html");
-    runner.expectTrue(path.find("/.papyrix/html_") == 0, "generateCachePath: has html_ prefix");
+    std::string path = generateCachePath("/.snapix", "/books/page.html");
+    runner.expectTrue(path.find("/.snapix/html_") == 0, "generateCachePath: has html_ prefix");
     runner.expectTrue(path.length() > 15, "generateCachePath: has hash");
   }
 

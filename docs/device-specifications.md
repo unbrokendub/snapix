@@ -1,6 +1,6 @@
 # Xteink X4 Device Specifications
 
-Technical documentation for the Xteink X4 e-reader hardware running Papyrix firmware.
+Technical documentation for the Xteink X4 e-reader hardware running Snapix firmware.
 
 ---
 
@@ -333,7 +333,7 @@ Located in `open-x4-sdk/libs/`:
 
 ```
 /
-├── .papyrix/                 # System and cache directory
+├── .snapix/                 # System and cache directory
 │   ├── settings.bin          # User settings
 │   ├── state.bin             # Application state
 │   ├── wifi.bin              # WiFi credentials

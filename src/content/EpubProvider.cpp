@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace papyrix {
+namespace snapix {
 
 Result<void> EpubProvider::open(const char* path, const char* cacheDir) {
   close();
@@ -66,4 +66,4 @@ Result<TocEntry> EpubProvider::getTocEntry(uint16_t index) const {
   return Ok(entry);
 }
 
-}  // namespace papyrix
+}  // namespace snapix

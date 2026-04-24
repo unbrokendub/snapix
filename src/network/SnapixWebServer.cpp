@@ -1,4 +1,4 @@
-#include "PapyrixWebServer.h"
+#include "SnapixWebServer.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -176,14 +176,14 @@ static String normalizeFilenameNFC(const String& input) {
   return out;
 }
 
-namespace papyrix {
+namespace snapix {
 
 static void sendGzipHtml(WebServer* server, const char* data, size_t len) {
   server->sendHeader("Content-Encoding", "gzip");
   server->send_P(200, "text/html", data, len);
 }
 
-bool PapyrixWebServer::flushUploadBuffer() {
+bool SnapixWebServer::flushUploadBuffer() {
   if (upload_.bufferPos > 0 && upload_.file) {
     const size_t written = upload_.file.write(upload_.buffer.data(), upload_.bufferPos);
     if (written != upload_.bufferPos) {
@@ -195,11 +195,11 @@ bool PapyrixWebServer::flushUploadBuffer() {
   return true;
 }
 
-PapyrixWebServer::PapyrixWebServer() = default;
+SnapixWebServer::SnapixWebServer() = default;
 
-PapyrixWebServer::~PapyrixWebServer() { stop(); }
+SnapixWebServer::~SnapixWebServer() { stop(); }
 
-void PapyrixWebServer::begin() {
+void SnapixWebServer::begin() {
   if (running_) {
     LOG_DBG(TAG, "Server already running");
     return;
@@ -243,7 +243,7 @@ void PapyrixWebServer::begin() {
   LOG_INF(TAG, "Server started at http://%s/", ipAddr.c_str());
 }
 
-void PapyrixWebServer::stop() {
+void SnapixWebServer::stop() {
   if (!running_ || !server_) {
     return;
   }
@@ -273,30 +273,30 @@ void PapyrixWebServer::stop() {
   LOG_INF(TAG, "Server stopped (free heap: %d)", ESP.getFreeHeap());
 }
 
-void PapyrixWebServer::handleClient() {
+void SnapixWebServer::handleClient() {
   if (!running_ || !server_) {
     return;
   }
   server_->handleClient();
 }
 
-void PapyrixWebServer::handleRoot() { sendGzipHtml(server_.get(), AppPageHtml, AppPageHtmlCompressedSize); }
+void SnapixWebServer::handleRoot() { sendGzipHtml(server_.get(), AppPageHtml, AppPageHtmlCompressedSize); }
 
-void PapyrixWebServer::handleNotFound() { server_->send(404, "text/plain", "404 Not Found"); }
+void SnapixWebServer::handleNotFound() { server_->send(404, "text/plain", "404 Not Found"); }
 
-void PapyrixWebServer::handleStatus() {
+void SnapixWebServer::handleStatus() {
   String ipAddr = apMode_ ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
 
   char json[256];
   snprintf(json, sizeof(json),
            "{\"version\":\"%s\",\"ip\":\"%s\",\"mode\":\"%s\",\"rssi\":%d,\"freeHeap\":%u,\"uptime\":%lu}",
-           PAPYRIX_VERSION, ipAddr.c_str(), apMode_ ? "AP" : "STA", apMode_ ? 0 : WiFi.RSSI(), ESP.getFreeHeap(),
+           SNAPIX_VERSION, ipAddr.c_str(), apMode_ ? "AP" : "STA", apMode_ ? 0 : WiFi.RSSI(), ESP.getFreeHeap(),
            millis() / 1000);
 
   server_->send(200, "application/json", json);
 }
 
-void PapyrixWebServer::handleFileListData() {
+void SnapixWebServer::handleFileListData() {
   String currentPath = "/";
   if (server_->hasArg("path")) {
     currentPath = server_->arg("path");
@@ -361,7 +361,7 @@ void PapyrixWebServer::handleFileListData() {
   server_->sendContent("");
 }
 
-void PapyrixWebServer::handleUpload() {
+void SnapixWebServer::handleUpload() {
   if (!running_ || !server_) return;
 
   HTTPUpload& upload = server_->upload();
@@ -471,7 +471,7 @@ void PapyrixWebServer::handleUpload() {
   }
 }
 
-void PapyrixWebServer::handleUploadPost() {
+void SnapixWebServer::handleUploadPost() {
   if (upload_.success) {
     server_->send(200, "text/plain", "File uploaded: " + upload_.fileName);
   } else {
@@ -480,7 +480,7 @@ void PapyrixWebServer::handleUploadPost() {
   }
 }
 
-void PapyrixWebServer::handleCreateFolder() {
+void SnapixWebServer::handleCreateFolder() {
   if (!server_->hasArg("name")) {
     server_->send(400, "text/plain", "Missing folder name");
     return;
@@ -520,7 +520,7 @@ void PapyrixWebServer::handleCreateFolder() {
   }
 }
 
-void PapyrixWebServer::handleDelete() {
+void SnapixWebServer::handleDelete() {
   if (!server_->hasArg("path")) {
     server_->send(400, "text/plain", "Missing path");
     return;
@@ -576,7 +576,7 @@ void PapyrixWebServer::handleDelete() {
   }
 }
 
-void PapyrixWebServer::handleDownload() {
+void SnapixWebServer::handleDownload() {
   if (!server_->hasArg("path")) {
     server_->send(400, "text/plain", "Missing path");
     return;
@@ -618,7 +618,7 @@ void PapyrixWebServer::handleDownload() {
   file.close();
 }
 
-void PapyrixWebServer::handleRename() {
+void SnapixWebServer::handleRename() {
   if (!server_->hasArg("path") || !server_->hasArg("newName")) {
     server_->send(400, "text/plain", "Missing path or newName");
     return;
@@ -671,4 +671,4 @@ void PapyrixWebServer::handleRename() {
   }
 }
 
-}  // namespace papyrix
+}  // namespace snapix

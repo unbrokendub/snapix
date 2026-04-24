@@ -7,14 +7,14 @@
 
 #include "../ThemeManager.h"
 #include "Core.h"
-#include "PapyrixSettings.h"
+#include "SnapixSettings.h"
 
 // Access global renderer from main.cpp
 extern GfxRenderer renderer;
 
 #define TAG "BOOT"
 
-namespace papyrix {
+namespace snapix {
 
 // Access global core from main.cpp
 extern Core core;
@@ -165,4 +165,4 @@ void showTransitionNotification(const char* message) {
   LOG_DBG(TAG, "Displayed notification: %s", message);
 }
 
-}  // namespace papyrix
+}  // namespace snapix

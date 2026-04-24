@@ -5,7 +5,7 @@
 
 #define TAG "RDR_NAV"
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 void ReaderNavigationController::resetSession() {
   holdNavigated_ = false;
@@ -80,4 +80,4 @@ bool ReaderNavigationController::tryConsumeQueuedTurn(const bool workerRunning, 
   return true;
 }
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

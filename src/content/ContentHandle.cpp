@@ -10,7 +10,7 @@
 #include <cstring>  // For memset
 #include <new>      // For placement new
 
-namespace papyrix {
+namespace snapix {
 
 // Static empty metadata
 ContentMetadata ContentHandle::emptyMetadata_ = {};
@@ -389,4 +389,4 @@ HtmlProvider* ContentHandle::asHtml() { return type == ContentType::Html ? &html
 
 const HtmlProvider* ContentHandle::asHtml() const { return type == ContentType::Html ? &html : nullptr; }
 
-}  // namespace papyrix
+}  // namespace snapix

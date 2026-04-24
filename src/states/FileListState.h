@@ -10,7 +10,7 @@
 
 class GfxRenderer;
 
-namespace papyrix {
+namespace snapix {
 
 // FileListState - browse and select files
 // Uses dynamic vector for unlimited file support with pagination
@@ -76,4 +76,4 @@ class FileListState : public State {
   bool isAtRoot() const { return strcmp(currentDir_, "/") == 0; }
 };
 
-}  // namespace papyrix
+}  // namespace snapix

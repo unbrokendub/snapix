@@ -164,7 +164,7 @@ bool ThemeManager::saveToFile(const char* path, const Theme& theme) {
   FsFile file = SdMan.open(path, O_WRONLY | O_CREAT | O_TRUNC);
   if (!file) return false;
 
-  file.println("# Papyrix Theme Configuration");
+  file.println("# Snapix Theme Configuration");
   file.println("# Edit values and restart device to apply");
   file.println();
 

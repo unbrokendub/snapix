@@ -6,12 +6,12 @@
 #include <memory>
 #include <vector>
 
-namespace papyrix {
+namespace snapix {
 
-class PapyrixWebServer {
+class SnapixWebServer {
  public:
-  PapyrixWebServer();
-  ~PapyrixWebServer();
+  SnapixWebServer();
+  ~SnapixWebServer();
 
   void begin();
   void stop();
@@ -55,4 +55,4 @@ class PapyrixWebServer {
   void handleRename();
 };
 
-}  // namespace papyrix
+}  // namespace snapix

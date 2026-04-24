@@ -5,7 +5,7 @@
 
 class Page;
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 struct PositionState {
   uint32_t currentPage = 0;
@@ -87,4 +87,4 @@ struct PendingRefreshState {
   }
 };
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

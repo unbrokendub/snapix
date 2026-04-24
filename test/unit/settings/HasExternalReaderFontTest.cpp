@@ -12,7 +12,7 @@ struct Theme {
   char readerFontFamilyLarge[32];
 };
 
-namespace papyrix {
+namespace snapix {
 struct Settings {
   enum FontSize : uint8_t { FontXSmall = 0, FontSmall = 1, FontMedium = 2, FontLarge = 3 };
 
@@ -37,7 +37,7 @@ struct Settings {
     return family && *family;
   }
 };
-}  // namespace papyrix
+}  // namespace snapix
 
 static Theme makeTheme(const char* xsmall = "", const char* small = "", const char* medium = "",
                         const char* large = "") {
@@ -55,67 +55,67 @@ int main() {
   // === No external fonts (all empty) ===
   {
     Theme theme = makeTheme();
-    papyrix::Settings settings;
+    snapix::Settings settings;
 
-    settings.fontSize = papyrix::Settings::FontXSmall;
+    settings.fontSize = snapix::Settings::FontXSmall;
     runner.expectFalse(settings.hasExternalReaderFont(theme), "XSmall: empty family returns false");
 
-    settings.fontSize = papyrix::Settings::FontSmall;
+    settings.fontSize = snapix::Settings::FontSmall;
     runner.expectFalse(settings.hasExternalReaderFont(theme), "Small: empty family returns false");
 
-    settings.fontSize = papyrix::Settings::FontMedium;
+    settings.fontSize = snapix::Settings::FontMedium;
     runner.expectFalse(settings.hasExternalReaderFont(theme), "Medium: empty family returns false");
 
-    settings.fontSize = papyrix::Settings::FontLarge;
+    settings.fontSize = snapix::Settings::FontLarge;
     runner.expectFalse(settings.hasExternalReaderFont(theme), "Large: empty family returns false");
   }
 
   // === All external fonts set ===
   {
     Theme theme = makeTheme("NotoSans", "NotoSans", "NotoSans", "NotoSans");
-    papyrix::Settings settings;
+    snapix::Settings settings;
 
-    settings.fontSize = papyrix::Settings::FontXSmall;
+    settings.fontSize = snapix::Settings::FontXSmall;
     runner.expectTrue(settings.hasExternalReaderFont(theme), "XSmall: non-empty family returns true");
 
-    settings.fontSize = papyrix::Settings::FontSmall;
+    settings.fontSize = snapix::Settings::FontSmall;
     runner.expectTrue(settings.hasExternalReaderFont(theme), "Small: non-empty family returns true");
 
-    settings.fontSize = papyrix::Settings::FontMedium;
+    settings.fontSize = snapix::Settings::FontMedium;
     runner.expectTrue(settings.hasExternalReaderFont(theme), "Medium: non-empty family returns true");
 
-    settings.fontSize = papyrix::Settings::FontLarge;
+    settings.fontSize = snapix::Settings::FontLarge;
     runner.expectTrue(settings.hasExternalReaderFont(theme), "Large: non-empty family returns true");
   }
 
   // === Only some sizes have external fonts ===
   {
     Theme theme = makeTheme("", "", "NotoSans", "");
-    papyrix::Settings settings;
+    snapix::Settings settings;
 
-    settings.fontSize = papyrix::Settings::FontXSmall;
+    settings.fontSize = snapix::Settings::FontXSmall;
     runner.expectFalse(settings.hasExternalReaderFont(theme), "XSmall: no external font when only Medium set");
 
-    settings.fontSize = papyrix::Settings::FontSmall;
+    settings.fontSize = snapix::Settings::FontSmall;
     runner.expectFalse(settings.hasExternalReaderFont(theme), "Small: no external font when only Medium set");
 
-    settings.fontSize = papyrix::Settings::FontMedium;
+    settings.fontSize = snapix::Settings::FontMedium;
     runner.expectTrue(settings.hasExternalReaderFont(theme), "Medium: has external font");
 
-    settings.fontSize = papyrix::Settings::FontLarge;
+    settings.fontSize = snapix::Settings::FontLarge;
     runner.expectFalse(settings.hasExternalReaderFont(theme), "Large: no external font when only Medium set");
   }
 
   // === Default fontSize is FontMedium ===
   {
-    papyrix::Settings settings;
-    runner.expectEq(uint8_t(papyrix::Settings::FontMedium), settings.fontSize, "default fontSize is FontMedium");
+    snapix::Settings settings;
+    runner.expectEq(uint8_t(snapix::Settings::FontMedium), settings.fontSize, "default fontSize is FontMedium");
   }
 
   // === Unknown fontSize falls through to Small (default case) ===
   {
     Theme theme = makeTheme("", "ThaiFont", "", "");
-    papyrix::Settings settings;
+    snapix::Settings settings;
     settings.fontSize = 99;  // invalid value
     runner.expectTrue(settings.hasExternalReaderFont(theme), "invalid fontSize falls to default (Small)");
   }

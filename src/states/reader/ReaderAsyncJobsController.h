@@ -12,7 +12,7 @@
 #include "ReaderSupport.h"
 #include "ReaderTypes.h"
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 class ReaderAsyncJobsController {
  public:
@@ -165,4 +165,4 @@ class ReaderAsyncJobsController {
   PendingRefreshState pendingRefresh_;
 };
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

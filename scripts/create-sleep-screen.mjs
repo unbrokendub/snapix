@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Convert images to sleep screen format for Papyrix e-paper display.
+ * Convert images to sleep screen format for Snapix e-paper display.
  *
  * Converts PNG, JPG, BMP images to grayscale BMP format compatible
- * with the Papyrix firmware. Supports 2, 4, or 8 bit output depth.
+ * with the Snapix firmware. Supports 2, 4, or 8 bit output depth.
  *
  * Usage:
  *   node create-sleep-screen.mjs <input> <output> [options]
@@ -272,7 +272,7 @@ async function main() {
 
   if (values.help || positionals.length < 2) {
     console.log(`
-Convert images to Papyrix sleep screen format
+Convert images to Snapix sleep screen format
 
 Usage:
   node create-sleep-screen.mjs <input> <output> [options]

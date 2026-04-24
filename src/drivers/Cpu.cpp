@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-namespace papyrix {
+namespace snapix {
 namespace drivers {
 
 static constexpr uint8_t kIdleFreqMhz = 10;
@@ -31,4 +31,4 @@ bool Cpu::isThrottled() const { return throttled_; }
 uint8_t Cpu::loopDelayMs() const { return throttled_ ? kIdleLoopDelayMs : kActiveLoopDelayMs; }
 
 }  // namespace drivers
-}  // namespace papyrix
+}  // namespace snapix

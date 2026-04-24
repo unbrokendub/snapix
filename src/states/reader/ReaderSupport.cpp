@@ -7,18 +7,18 @@
 #include <cstdarg>
 #include <cstdio>
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 namespace {
-#ifndef PAPYRIX_PERF_LOG
-#define PAPYRIX_PERF_LOG 0
+#ifndef SNAPIX_PERF_LOG
+#define SNAPIX_PERF_LOG 0
 #endif
 }  // namespace
 
 uint32_t perfMsNow() { return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL); }
 
 void perfLog(const char* origin, const char* phase, const uint32_t startedMs, const char* fmt, ...) {
-#if PAPYRIX_PERF_LOG
+#if SNAPIX_PERF_LOG
   char suffix[128] = "";
   if (fmt) {
     va_list args;
@@ -63,4 +63,4 @@ bool isHeapCritical(const HeapState& heap) { return heap.freeBytes < 28 * 1024 |
 
 bool isHeapTight(const HeapState& heap) { return heap.freeBytes < 40 * 1024 || heap.largestBlock < 20 * 1024; }
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

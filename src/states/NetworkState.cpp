@@ -8,17 +8,17 @@
 
 #include "../config.h"
 #include "../core/Core.h"
-#include "../network/PapyrixWebServer.h"
+#include "../network/SnapixWebServer.h"
 #include "../network/WifiCredentialStore.h"
 #include "../ui/Elements.h"
 #include "ThemeManager.h"
 
 #define TAG "NET_STATE"
 
-namespace papyrix {
+namespace snapix {
 
 namespace {
-constexpr const char* AP_SSID = "Papyrix";
+constexpr const char* AP_SSID = "Snapix";
 }  // namespace
 
 NetworkState::NetworkState(GfxRenderer& renderer)
@@ -572,7 +572,7 @@ void NetworkState::startWebServer(Core& core) {
   }
 
   if (!server_) {
-    server_.reset(new PapyrixWebServer());
+    server_.reset(new SnapixWebServer());
     if (!server_) {
       LOG_ERR(TAG, "Failed to allocate web server");
       goBack_ = true;
@@ -607,4 +607,4 @@ void NetworkState::stopWebServer(Core& /* core */) {
   serverView_.setStopped();
 }
 
-}  // namespace papyrix
+}  // namespace snapix

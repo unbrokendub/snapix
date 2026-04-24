@@ -1,4 +1,4 @@
-// Tests for the buffered write algorithm used in PapyrixWebServer upload handling.
+// Tests for the buffered write algorithm used in SnapixWebServer upload handling.
 // The core logic: data arrives in chunks, gets accumulated in a 4KB buffer,
 // and flushed to disk when full. This avoids many small SD card writes.
 
@@ -26,7 +26,7 @@ struct UploadBuffer {
   }
 };
 
-// Mirrors PapyrixWebServer::flushUploadBuffer()
+// Mirrors SnapixWebServer::flushUploadBuffer()
 bool flushBuffer(UploadBuffer& state) {
   if (state.bufferPos > 0 && state.file) {
     if (state.failNextWrite) {

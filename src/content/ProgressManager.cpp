@@ -11,7 +11,7 @@
 
 #define TAG "PROGRESS"
 
-namespace papyrix {
+namespace snapix {
 
 namespace {
 constexpr uint8_t kFb2SectionedMarker = 0x80;
@@ -170,4 +170,4 @@ ProgressManager::Progress ProgressManager::validate(Core& core, ContentType type
   return validated;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

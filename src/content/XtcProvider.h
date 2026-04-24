@@ -7,7 +7,7 @@
 #include "../core/Result.h"
 #include "ContentTypes.h"
 
-namespace papyrix {
+namespace snapix {
 
 // XtcProvider wraps the XtcParser
 struct XtcProvider {
@@ -39,4 +39,4 @@ struct XtcProvider {
   const xtc::XtcParser& getParser() const { return parser; }
 };
 
-}  // namespace papyrix
+}  // namespace snapix

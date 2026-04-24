@@ -6,7 +6,7 @@
 // Global display instance reference (defined in main.cpp)
 extern EInkDisplay& display;
 
-namespace papyrix {
+namespace snapix {
 namespace drivers {
 
 Result<void> Display::init() {
@@ -77,4 +77,4 @@ void Display::wake() {
 EInkDisplay& Display::raw() { return display; }
 
 }  // namespace drivers
-}  // namespace papyrix
+}  // namespace snapix

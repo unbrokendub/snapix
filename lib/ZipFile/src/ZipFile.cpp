@@ -465,7 +465,7 @@ int ZipFile::findFirstExisting(const char* const* paths, int pathCount) {
 }
 
 uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const bool trailingNullByte) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     return nullptr;
   }
@@ -602,7 +602,7 @@ const char* ZipFile::streamReadResultToString(const StreamReadResult result) {
 ZipFile::StreamReadResult ZipFile::readFileToStreamDetailed(const char* filename, Print& out, const size_t chunkSize,
                                                             uint8_t* dictBuffer,
                                                             const std::function<bool()>& shouldAbort) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     return StreamReadResult::AllocFailed;
   }

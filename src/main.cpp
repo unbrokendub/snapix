@@ -43,7 +43,7 @@
 #include "core/CrashDebug.h"
 #include "core/Core.h"
 #include "core/StateMachine.h"
-#include "images/PapyrixLogo.h"
+#include "images/SnapixLogo.h"
 #include "states/AppLauncherState.h"
 #include "states/CalibreSyncState.h"
 #include "states/ErrorState.h"
@@ -84,27 +84,27 @@ EInkDisplay& display = einkDisplay;
 MappedInputManager& mappedInput = mappedInputManager;
 
 // Core system
-namespace papyrix {
+namespace snapix {
 Core core;
 }
 
 static void serviceInputDuringDisplayWait() {
   inputManager.update();
-  papyrix::core.input.poll();
+  snapix::core.input.poll();
 }
 
 // State instances (pre-allocated, no heap per transition)
-static papyrix::StartupState startupState;
-static papyrix::HomeState homeState(renderer);
-static papyrix::FileListState fileListState(renderer);
-static papyrix::ReaderState readerState(renderer);
-static papyrix::SettingsState settingsState(renderer);
-static papyrix::NetworkState networkState(renderer);
-static papyrix::CalibreSyncState calibreSyncState(renderer);
-static papyrix::AppLauncherState appLauncherState(renderer);
-static papyrix::SleepState sleepState(renderer);
-static papyrix::ErrorState errorState(renderer);
-static papyrix::StateMachine stateMachine;
+static snapix::StartupState startupState;
+static snapix::HomeState homeState(renderer);
+static snapix::FileListState fileListState(renderer);
+static snapix::ReaderState readerState(renderer);
+static snapix::SettingsState settingsState(renderer);
+static snapix::NetworkState networkState(renderer);
+static snapix::CalibreSyncState calibreSyncState(renderer);
+static snapix::AppLauncherState appLauncherState(renderer);
+static snapix::SleepState sleepState(renderer);
+static snapix::ErrorState errorState(renderer);
+static snapix::StateMachine stateMachine;
 
 RTC_DATA_ATTR uint16_t rtcPowerButtonDurationMs = 400;
 
@@ -174,7 +174,7 @@ void verifyWakeupLongPress(esp_reset_reason_t resetReason) {
   // Uses settings directly (not RTC variable) so it works even after a full power cycle
   // where RTC memory is lost. Needed because inputManager.isPressed() may take up to
   // ~500ms to return the correct state after wake-up.
-  if (papyrix::core.settings.shortPwrBtn == papyrix::Settings::PowerSleep) {
+  if (snapix::core.settings.shortPwrBtn == snapix::Settings::PowerSleep) {
     LOG_DBG(TAG, "Skipping wakeup verification (short press mode)");
     return;
   }
@@ -182,7 +182,7 @@ void verifyWakeupLongPress(esp_reset_reason_t resetReason) {
   // Give the user up to 1000ms to start holding the power button, and must hold for the configured duration
   const auto start = millis();
   bool abort = false;
-  const uint16_t requiredPressDuration = papyrix::core.settings.getPowerButtonDuration();
+  const uint16_t requiredPressDuration = snapix::core.settings.getPowerButtonDuration();
 
   inputManager.update();
   // Verify the user has actually pressed
@@ -214,7 +214,7 @@ bool verifyManagedSleepWakeLongPress() {
   // Always require a deliberate long press to wake from managed sleep,
   // regardless of the short power-button action configured for runtime use.
   const uint16_t requiredPressDuration =
-      papyrix::core.settings.getPowerButtonDuration() < 400 ? 400 : papyrix::core.settings.getPowerButtonDuration();
+      snapix::core.settings.getPowerButtonDuration() < 400 ? 400 : snapix::core.settings.getPowerButtonDuration();
   const auto start = millis();
 
   inputManager.update();
@@ -250,15 +250,15 @@ bool waitForPowerRelease(const unsigned long timeoutMs = 0) {
 }
 
 // Register only the reader font for the active size (saves ~4.5KB in READER mode)
-void setupReaderFontForSize(papyrix::Settings::FontSize fontSize) {
+void setupReaderFontForSize(snapix::Settings::FontSize fontSize) {
   switch (fontSize) {
-    case papyrix::Settings::FontXSmall:
+    case snapix::Settings::FontXSmall:
       renderer.insertFont(READER_FONT_ID_XSMALL, readerFontFamilyXSmall());
       break;
-    case papyrix::Settings::FontMedium:
+    case snapix::Settings::FontMedium:
       renderer.insertFont(READER_FONT_ID_MEDIUM, readerFontFamilyMedium());
       break;
-    case papyrix::Settings::FontLarge:
+    case snapix::Settings::FontLarge:
       renderer.insertFont(READER_FONT_ID_LARGE, readerFontFamilyLarge());
       break;
     default:  // FontSmall
@@ -281,7 +281,7 @@ void setupDisplayAndFonts(bool allReaderSizes = true, bool preservePanelState = 
     renderer.insertFont(READER_FONT_ID_MEDIUM, readerFontFamilyMedium());
     renderer.insertFont(READER_FONT_ID_LARGE, readerFontFamilyLarge());
   } else {
-    setupReaderFontForSize(static_cast<papyrix::Settings::FontSize>(papyrix::core.settings.fontSize));
+    setupReaderFontForSize(static_cast<snapix::Settings::FontSize>(snapix::core.settings.fontSize));
   }
   renderer.insertFont(UI_FONT_ID, uiFontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
@@ -291,12 +291,12 @@ void setupDisplayAndFonts(bool allReaderSizes = true, bool preservePanelState = 
 }
 
 void prepareTransitionFastStartBaseline() {
-  const char* message = papyrix::getTransitionNotificationMessage();
+  const char* message = snapix::getTransitionNotificationMessage();
   if (!message || message[0] == '\0') {
     return;
   }
 
-  papyrix::prepareTransitionNotificationFrame(message);
+  snapix::prepareTransitionNotificationFrame(message);
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
   einkDisplay.syncCurrentFrameAsPrevious();
 #endif
@@ -308,8 +308,8 @@ void prepareLightSleepWakeBaseline() {
   const auto pageHeight = renderer.getScreenHeight();
 
   renderer.clearScreen(0xFF);
-  renderer.drawImage(PapyrixLogo, (pageWidth + 128) / 2, (pageHeight - 128) / 2, 128, 128);
-  renderer.drawCenteredText(THEME.uiFontId, pageHeight / 2 + 70, "Papyrix", true, BOLD);
+  renderer.drawImage(SnapixLogo, (pageWidth + 128) / 2, (pageHeight - 128) / 2, 128, 128);
+  renderer.drawCenteredText(THEME.uiFontId, pageHeight / 2 + 70, "Snapix", true, BOLD);
   renderer.drawCenteredText(THEME.smallFontId, pageHeight / 2 + 110, "SLEEPING", true);
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
   einkDisplay.syncCurrentFrameAsPrevious();
@@ -347,18 +347,18 @@ void applyThemeFonts() {
   int* targetFontId = nullptr;
   int builtinFontId = 0;
 
-  switch (papyrix::core.settings.fontSize) {
-    case papyrix::Settings::FontXSmall:
+  switch (snapix::core.settings.fontSize) {
+    case snapix::Settings::FontXSmall:
       fontFamilyName = theme.readerFontFamilyXSmall;
       targetFontId = &theme.readerFontIdXSmall;
       builtinFontId = READER_FONT_ID_XSMALL;
       break;
-    case papyrix::Settings::FontMedium:
+    case snapix::Settings::FontMedium:
       fontFamilyName = theme.readerFontFamilyMedium;
       targetFontId = &theme.readerFontIdMedium;
       builtinFontId = READER_FONT_ID_MEDIUM;
       break;
-    case papyrix::Settings::FontLarge:
+    case snapix::Settings::FontLarge:
       fontFamilyName = theme.readerFontFamilyLarge;
       targetFontId = &theme.readerFontIdLarge;
       builtinFontId = READER_FONT_ID_LARGE;
@@ -391,12 +391,12 @@ void showErrorScreen(const char* message) {
 }
 
 // Track current boot mode for loop behavior
-static papyrix::BootMode currentBootMode = papyrix::BootMode::UI;
+static snapix::BootMode currentBootMode = snapix::BootMode::UI;
 
 // Early initialization - common to both boot modes
 // Returns false if critical initialization failed
 bool earlyInit() {
-#if PAPYRIX_SERIAL_LOG_ENABLED
+#if SNAPIX_SERIAL_LOG_ENABLED
   // Only start serial if USB connected
   pinMode(UART0_RXD, INPUT);
   if (isUsbConnected()) {
@@ -422,16 +422,16 @@ bool earlyInit() {
 
   // Load settings before wakeup verification - without this, a full power cycle
   // (no USB) resets RTC memory and the short power button setting is ignored
-  papyrix::core.settings.loadFromFile();
-  rtcPowerButtonDurationMs = papyrix::core.settings.getPowerButtonDuration();
+  snapix::core.settings.loadFromFile();
+  rtcPowerButtonDurationMs = snapix::core.settings.getPowerButtonDuration();
 
   const auto wakeup = getWakeupInfo();
-  papyrix::crashdebug::logBootInfo(wakeup.resetReason);
-  const bool pendingSleepWake = papyrix::core.settings.pendingSleepWake != 0;
+  snapix::crashdebug::logBootInfo(wakeup.resetReason);
+  const bool pendingSleepWake = snapix::core.settings.pendingSleepWake != 0;
   const bool resumedFromManagedSleep = pendingSleepWake && wakeup.isPowerButton;
 
   wokeFromPowerButtonSleep = false;
-  papyrix::core.wokeFromSleep = false;
+  snapix::core.wokeFromSleep = false;
 
   if (resumedFromManagedSleep) {
     if (!verifyManagedSleepWakeLongPress()) {
@@ -441,17 +441,17 @@ bool earlyInit() {
       esp_deep_sleep_start();
     }
 
-    papyrix::core.settings.pendingSleepWake = 0;
-    if (!papyrix::core.settings.saveToFile()) {
+    snapix::core.settings.pendingSleepWake = 0;
+    if (!snapix::core.settings.saveToFile()) {
       LOG_ERR(TAG, "Failed clearing pending sleep wake flag");
     }
 
     wokeFromPowerButtonSleep = true;
-    papyrix::core.wokeFromSleep = true;
+    snapix::core.wokeFromSleep = true;
   } else {
     if (pendingSleepWake) {
-      papyrix::core.settings.pendingSleepWake = 0;
-      if (!papyrix::core.settings.saveToFile()) {
+      snapix::core.settings.pendingSleepWake = 0;
+      if (!snapix::core.settings.saveToFile()) {
         LOG_ERR(TAG, "Failed clearing stale pending sleep wake flag");
       }
     }
@@ -461,7 +461,7 @@ bool earlyInit() {
     verifyWakeupLongPress(wakeup.resetReason);
   }
 
-  LOG_INF(TAG, "Starting Papyrix version " PAPYRIX_VERSION);
+  LOG_INF(TAG, "Starting Snapix version " SNAPIX_VERSION);
 
   // Initialize battery ADC pin with proper attenuation for 0-3.3V range
   analogSetPinAttenuation(BAT_GPIO0, ADC_11db);
@@ -486,12 +486,12 @@ bool earlyInit() {
 void initUIMode() {
   LOG_INF(TAG, "Initializing UI mode");
   LOG_DBG(TAG, "[UI mode] Free heap: %lu, Max block: %lu", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-  const auto& preInitTransition = papyrix::getTransition();
-  const bool preservePanelState = !papyrix::core.settings.transitionFullRefresh && papyrix::hasTransitionNotification();
+  const auto& preInitTransition = snapix::getTransition();
+  const bool preservePanelState = !snapix::core.settings.transitionFullRefresh && snapix::hasTransitionNotification();
 
   // Initialize theme and font managers (full)
   FONT_MANAGER.init(renderer);
-  THEME_MANAGER.loadTheme(papyrix::core.settings.themeName);
+  THEME_MANAGER.loadTheme(snapix::core.settings.themeName);
   THEME_MANAGER.createDefaultThemeFiles();
   LOG_INF(TAG, "Theme loaded: %s", THEME_MANAGER.currentThemeName());
 
@@ -499,15 +499,15 @@ void initUIMode() {
   applyThemeFonts();
   if (preservePanelState) {
     prepareTransitionFastStartBaseline();
-  } else if (wokeFromPowerButtonSleep && papyrix::core.settings.sleepScreen == papyrix::Settings::SleepLight) {
+  } else if (wokeFromPowerButtonSleep && snapix::core.settings.sleepScreen == snapix::Settings::SleepLight) {
     prepareLightSleepWakeBaseline();
   }
 
   // Show boot splash only on cold boot (not mode transition)
   if (!preInitTransition.isValid() && !wokeFromPowerButtonSleep) {
     ui::BootView bootView;
-    bootView.setLogo(PapyrixLogo, 128, 128);
-    bootView.setVersion(PAPYRIX_VERSION);
+    bootView.setLogo(SnapixLogo, 128, 128);
+    bootView.setVersion(SNAPIX_VERSION);
     bootView.setStatus("BOOTING");
     ui::render(renderer, THEME, bootView);
   }
@@ -525,46 +525,46 @@ void initUIMode() {
   stateMachine.registerState(&errorState);
 
   // Initialize core
-  auto result = papyrix::core.init();
+  auto result = snapix::core.init();
   if (!result.ok()) {
-    LOG_ERR(TAG, "Init failed: %s", papyrix::errorToString(result.err));
+    LOG_ERR(TAG, "Init failed: %s", snapix::errorToString(result.err));
     showErrorScreen("Core init failed");
     return;
   }
 
   LOG_INF(TAG, "State machine starting (UI mode)");
-  mappedInputManager.setSettings(&papyrix::core.settings);
-  ui::setFrontButtonLayout(papyrix::core.settings.frontButtonLayout);
+  mappedInputManager.setSettings(&snapix::core.settings);
+  ui::setFrontButtonLayout(snapix::core.settings.frontButtonLayout);
   einkDisplay.setWaitHook(serviceInputDuringDisplayWait);
 
   // Determine initial state - check for return from reader mode
-  papyrix::StateId initialState = papyrix::StateId::Home;
-  const auto& transition = papyrix::getTransition();
+  snapix::StateId initialState = snapix::StateId::Home;
+  const auto& transition = snapix::getTransition();
 
-  if (transition.isValid() && transition.mode == papyrix::BootMode::READER) {
-    initialState = papyrix::StateId::Reader;
-    strncpy(papyrix::core.buf.path, transition.bookPath, sizeof(papyrix::core.buf.path) - 1);
-    papyrix::core.buf.path[sizeof(papyrix::core.buf.path) - 1] = '\0';
-    papyrix::core.pendingDirectReaderTransition = true;
-    papyrix::core.pendingReaderReturnState =
-        (transition.returnTo == papyrix::ReturnTo::FILE_MANAGER) ? papyrix::StateId::FileList : papyrix::StateId::Home;
-    LOG_INF(TAG, "Starting directly in Reader via UI mode: %s", papyrix::core.buf.path);
-  } else if (transition.returnTo == papyrix::ReturnTo::FILE_MANAGER) {
-    initialState = papyrix::StateId::FileList;
+  if (transition.isValid() && transition.mode == snapix::BootMode::READER) {
+    initialState = snapix::StateId::Reader;
+    strncpy(snapix::core.buf.path, transition.bookPath, sizeof(snapix::core.buf.path) - 1);
+    snapix::core.buf.path[sizeof(snapix::core.buf.path) - 1] = '\0';
+    snapix::core.pendingDirectReaderTransition = true;
+    snapix::core.pendingReaderReturnState =
+        (transition.returnTo == snapix::ReturnTo::FILE_MANAGER) ? snapix::StateId::FileList : snapix::StateId::Home;
+    LOG_INF(TAG, "Starting directly in Reader via UI mode: %s", snapix::core.buf.path);
+  } else if (transition.returnTo == snapix::ReturnTo::FILE_MANAGER) {
+    initialState = snapix::StateId::FileList;
     LOG_INF(TAG, "Returning to FileList from Reader");
   } else {
     LOG_INF(TAG, "Starting at Home");
   }
 
-  stateMachine.init(papyrix::core, initialState);
+  stateMachine.init(snapix::core, initialState);
 
   // Discard button events generated during state entry (e.g. power button
   // release captured during the loading-banner display wait on wake from sleep).
-  papyrix::core.events.clear();
+  snapix::core.events.clear();
 
   // Force initial render
   LOG_DBG(TAG, "Forcing initial render");
-  stateMachine.update(papyrix::core);
+  stateMachine.update(snapix::core);
 
   LOG_DBG(TAG, "[UI mode] After init - Free heap: %lu, Max block: %lu", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 }
@@ -576,14 +576,14 @@ void initReaderMode() {
 
   // Detect content type early to decide if we need custom fonts
   // XTC/XTCH files contain pre-rendered bitmaps and don't need fonts for page rendering
-  const auto& transition = papyrix::getTransition();
-  papyrix::ContentType contentType = papyrix::detectContentType(transition.bookPath);
-  bool needsCustomFonts = (contentType != papyrix::ContentType::Xtc);
-  const bool preservePanelState = !papyrix::core.settings.transitionFullRefresh && papyrix::hasTransitionNotification();
+  const auto& transition = snapix::getTransition();
+  snapix::ContentType contentType = snapix::detectContentType(transition.bookPath);
+  bool needsCustomFonts = (contentType != snapix::ContentType::Xtc);
+  const bool preservePanelState = !snapix::core.settings.transitionFullRefresh && snapix::hasTransitionNotification();
 
   // Initialize theme and font managers (minimal - no cache)
   FONT_MANAGER.init(renderer);
-  THEME_MANAGER.loadTheme(papyrix::core.settings.themeName);
+  THEME_MANAGER.loadTheme(snapix::core.settings.themeName);
   // Skip createDefaultThemeFiles() - not needed in reader mode
   LOG_INF(TAG, "Theme loaded: %s (reader mode)", THEME_MANAGER.currentThemeName());
 
@@ -596,7 +596,7 @@ void initReaderMode() {
   }
   if (preservePanelState) {
     prepareTransitionFastStartBaseline();
-  } else if (wokeFromPowerButtonSleep && papyrix::core.settings.sleepScreen == papyrix::Settings::SleepLight) {
+  } else if (wokeFromPowerButtonSleep && snapix::core.settings.sleepScreen == snapix::Settings::SleepLight) {
     prepareLightSleepWakeBaseline();
   }
 
@@ -606,23 +606,23 @@ void initReaderMode() {
   stateMachine.registerState(&errorState);
 
   // Initialize core
-  auto result = papyrix::core.init();
+  auto result = snapix::core.init();
   if (!result.ok()) {
-    LOG_ERR(TAG, "Init failed: %s", papyrix::errorToString(result.err));
+    LOG_ERR(TAG, "Init failed: %s", snapix::errorToString(result.err));
     showErrorScreen("Core init failed");
     return;
   }
 
   LOG_INF(TAG, "State machine starting (READER mode)");
-  mappedInputManager.setSettings(&papyrix::core.settings);
-  ui::setFrontButtonLayout(papyrix::core.settings.frontButtonLayout);
+  mappedInputManager.setSettings(&snapix::core.settings);
+  ui::setFrontButtonLayout(snapix::core.settings.frontButtonLayout);
   einkDisplay.setWaitHook(serviceInputDuringDisplayWait);
 
   if (transition.bookPath[0] != '\0') {
     // Copy path to shared buffer for ReaderState to consume
-    strncpy(papyrix::core.buf.path, transition.bookPath, sizeof(papyrix::core.buf.path) - 1);
-    papyrix::core.buf.path[sizeof(papyrix::core.buf.path) - 1] = '\0';
-    LOG_INF(TAG, "Opening book: %s", papyrix::core.buf.path);
+    strncpy(snapix::core.buf.path, transition.bookPath, sizeof(snapix::core.buf.path) - 1);
+    snapix::core.buf.path[sizeof(snapix::core.buf.path) - 1] = '\0';
+    LOG_INF(TAG, "Opening book: %s", snapix::core.buf.path);
   } else {
     // No book path - fall back to UI mode to avoid boot loop
     LOG_ERR(TAG, "No book path in transition, falling back to UI");
@@ -630,15 +630,15 @@ void initReaderMode() {
     return;
   }
 
-  stateMachine.init(papyrix::core, papyrix::StateId::Reader);
+  stateMachine.init(snapix::core, snapix::StateId::Reader);
 
   // Discard button events generated during state entry (e.g. power button
   // release captured during the loading-banner display wait on wake from sleep).
-  papyrix::core.events.clear();
+  snapix::core.events.clear();
 
   // Force initial render
   LOG_DBG(TAG, "Forcing initial render");
-  stateMachine.update(papyrix::core);
+  stateMachine.update(snapix::core);
 
   LOG_DBG(TAG, "[READER mode] After init - Free heap: %lu, Max block: %lu", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 }
@@ -650,11 +650,11 @@ void setup() {
   }
 
   // Detect boot mode from RTC memory or settings
-  currentBootMode = papyrix::detectBootMode();
+  currentBootMode = snapix::detectBootMode();
 
-  if (currentBootMode == papyrix::BootMode::READER && !papyrix::core.settings.transitionFullRefresh) {
+  if (currentBootMode == snapix::BootMode::READER && !snapix::core.settings.transitionFullRefresh) {
     initUIMode();
-  } else if (currentBootMode == papyrix::BootMode::READER) {
+  } else if (currentBootMode == snapix::BootMode::READER) {
     initReaderMode();
   } else {
     initUIMode();
@@ -669,8 +669,8 @@ void setup() {
     waitForPowerRelease();
   }
   inputManager.update();
-  papyrix::core.input.resyncState();
-  papyrix::core.events.clear();
+  snapix::core.input.resyncState();
+  snapix::core.events.clear();
 }
 
 void loop() {
@@ -680,27 +680,27 @@ void loop() {
 
   inputManager.update();
 
-  if (!papyrix::core.cpu.isThrottled() && millis() - lastMemPrint >= 10000) {
+  if (!snapix::core.cpu.isThrottled() && millis() - lastMemPrint >= 10000) {
     LOG_DBG(TAG,
             "Free: %d bytes, Total: %d bytes, Min Free: %d bytes, MaxAlloc: %d bytes, EventQ: size=%u high=%u dropped=%lu",
             ESP.getFreeHeap(), ESP.getHeapSize(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
-            static_cast<unsigned>(papyrix::core.events.size()), static_cast<unsigned>(papyrix::core.events.highWaterMark()),
-            static_cast<unsigned long>(papyrix::core.events.droppedCount()));
+            static_cast<unsigned>(snapix::core.events.size()), static_cast<unsigned>(snapix::core.events.highWaterMark()),
+            static_cast<unsigned long>(snapix::core.events.droppedCount()));
     lastMemPrint = millis();
   }
 
   // Poll input and push events to queue
-  papyrix::core.input.poll();
+  snapix::core.input.poll();
 
   // Auto-sleep after inactivity
-  const auto autoSleepTimeout = papyrix::core.settings.getAutoSleepTimeoutMs();
-  const bool wifiActive = papyrix::core.network.isConnected() || papyrix::core.network.isAPMode();
+  const auto autoSleepTimeout = snapix::core.settings.getAutoSleepTimeoutMs();
+  const bool wifiActive = snapix::core.network.isConnected() || snapix::core.network.isAPMode();
   if (wifiActive) {
-    papyrix::core.input.resetIdleTimer();
+    snapix::core.input.resetIdleTimer();
   }
-  if (autoSleepTimeout > 0 && papyrix::core.input.idleTimeMs() >= autoSleepTimeout) {
+  if (autoSleepTimeout > 0 && snapix::core.input.idleTimeMs() >= autoSleepTimeout) {
     LOG_INF(TAG, "Auto-sleep after %lu ms idle", autoSleepTimeout);
-    stateMachine.init(papyrix::core, papyrix::StateId::Sleep);
+    stateMachine.init(snapix::core, snapix::StateId::Sleep);
     return;
   }
 
@@ -716,8 +716,8 @@ void loop() {
       if (powerHeldSinceMs == 0 || loopGap > 100) {
         powerHeldSinceMs = loopStartTime;
       }
-      if (loopStartTime - powerHeldSinceMs > papyrix::core.settings.getPowerButtonDuration()) {
-        stateMachine.init(papyrix::core, papyrix::StateId::Sleep);
+      if (loopStartTime - powerHeldSinceMs > snapix::core.settings.getPowerButtonDuration()) {
+        stateMachine.init(snapix::core, snapix::StateId::Sleep);
         return;
       }
     } else {
@@ -730,17 +730,17 @@ void loop() {
   // so rendering always happens at full CPU/SPI speed after wake.
   // Idea: CrossPoint HalPowerManager by @ngxson (https://github.com/ngxson)
   static constexpr unsigned long kIdlePowerSavingMs = 3000;
-  if (currentBootMode == papyrix::BootMode::READER) {
-    if (papyrix::core.input.idleTimeMs() >= kIdlePowerSavingMs) {
-      papyrix::core.cpu.throttle();
+  if (currentBootMode == snapix::BootMode::READER) {
+    if (snapix::core.input.idleTimeMs() >= kIdlePowerSavingMs) {
+      snapix::core.cpu.throttle();
     } else {
-      papyrix::core.cpu.unthrottle();
+      snapix::core.cpu.unthrottle();
     }
   }
 
   // Update state machine (handles transitions and rendering)
   const unsigned long activityStartTime = millis();
-  stateMachine.update(papyrix::core);
+  stateMachine.update(snapix::core);
   const unsigned long activityDuration = millis() - activityStartTime;
 
   const unsigned long loopDuration = millis() - loopStartTime;
@@ -754,5 +754,5 @@ void loop() {
   // Add delay at the end of the loop to prevent tight spinning
   // Increase delay after idle to save power (~4x less CPU load)
   // Idea: https://github.com/crosspoint-reader/crosspoint-reader/commit/0991782 by @ngxson (https://github.com/ngxson)
-  delay(papyrix::core.cpu.loopDelayMs());
+  delay(snapix::core.cpu.loopDelayMs());
 }

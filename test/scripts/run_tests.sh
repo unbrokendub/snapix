@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIN_DIR="$PROJECT_ROOT/test/build/bin"
 
-echo "=== Running Papyrix Unit Tests ==="
+echo "=== Running Snapix Unit Tests ==="
 echo "Binary directory: $BIN_DIR"
 echo ""
 

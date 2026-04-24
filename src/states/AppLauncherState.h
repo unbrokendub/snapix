@@ -7,7 +7,7 @@
 
 class GfxRenderer;
 
-namespace papyrix {
+namespace snapix {
 
 class AppLauncherState : public State {
  public:
@@ -37,4 +37,4 @@ class AppLauncherState : public State {
   void hideOverlay();
 };
 
-}  // namespace papyrix
+}  // namespace snapix

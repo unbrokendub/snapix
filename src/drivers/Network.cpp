@@ -12,7 +12,7 @@
 
 #define TAG "NETWORK"
 
-namespace papyrix {
+namespace snapix {
 namespace drivers {
 
 namespace {
@@ -310,4 +310,4 @@ void Network::getAPIP(char* buffer, size_t bufferSize) const {
 }
 
 }  // namespace drivers
-}  // namespace papyrix
+}  // namespace snapix

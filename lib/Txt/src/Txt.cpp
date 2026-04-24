@@ -1,7 +1,7 @@
 /**
  * Txt.cpp
  *
- * Plain text file handler implementation for Papyrix Reader
+ * Plain text file handler implementation for Snapix Reader
  */
 
 #include "Txt.h"

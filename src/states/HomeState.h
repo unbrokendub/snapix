@@ -8,7 +8,7 @@
 
 class GfxRenderer;
 
-namespace papyrix {
+namespace snapix {
 
 class HomeState : public State {
  public:
@@ -53,4 +53,4 @@ class HomeState : public State {
   void freeCoverThumbnail();
 };
 
-}  // namespace papyrix
+}  // namespace snapix

@@ -18,7 +18,7 @@
 #include "MappedInputManager.h"
 #include "ThemeManager.h"
 
-namespace papyrix {
+namespace snapix {
 
 SettingsState::SettingsState(GfxRenderer& renderer)
     : renderer_(renderer),
@@ -482,15 +482,15 @@ void SettingsState::handleConfirm(Core& core) {
           // Clear Book Cache
           ui::centeredMessage(renderer_, THEME, THEME.uiFontId, "Clearing cache...");
 
-          const auto exists = core.storage.exists(PAPYRIX_CACHE_DIR);
+          const auto exists = core.storage.exists(SNAPIX_CACHE_DIR);
           const bool hadCache = exists.ok() && *exists;
-          const auto result = hadCache ? core.storage.rmdir(PAPYRIX_CACHE_DIR) : Ok();
+          const auto result = hadCache ? core.storage.rmdir(SNAPIX_CACHE_DIR) : Ok();
 
           // Recreate the empty base cache directory so downstream code
           // (setupCacheDir, PageCache) can mkdir subdirectories without
           // needing to recreate every parent from scratch.
           if (hadCache && result.ok()) {
-            core.storage.mkdir(PAPYRIX_CACHE_DIR);
+            core.storage.mkdir(SNAPIX_CACHE_DIR);
           }
 
           const char* msg = !hadCache       ? "No cache to clear"
@@ -519,7 +519,7 @@ void SettingsState::handleConfirm(Core& core) {
           ui::centeredMessage(renderer_, THEME, THEME.uiFontId, "Resetting device...");
 
           LittleFS.format();
-          core.storage.rmdir(PAPYRIX_DIR);
+          core.storage.rmdir(SNAPIX_DIR);
 
           ui::centeredMessage(renderer_, THEME, THEME.uiFontId, "Done. Restarting...");
           vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -721,7 +721,7 @@ void SettingsState::populateSystemInfo() {
   infoView_.clear();
 
   // Firmware version
-  infoView_.addField("Version", PAPYRIX_VERSION);
+  infoView_.addField("Version", SNAPIX_VERSION);
 
   // Uptime
   const unsigned long uptimeSeconds = millis() / 1000;
@@ -794,4 +794,4 @@ void SettingsState::clearCache(int type, Core& core) {
   }
 }
 
-}  // namespace papyrix
+}  // namespace snapix

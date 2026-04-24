@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Device Simulator - Simulates Papyrix E-Reader Device
+ * Device Simulator - Simulates Snapix E-Reader Device
  *
  * This simulates a REAL e-reader device connecting to Calibre:
  * - Broadcasts "hello" on UDP to discover Calibre server
@@ -55,7 +55,7 @@ class DeviceSimulator {
   constructor(options = {}) {
     this.calibreHost = options.host || null;
     this.calibrePort = options.port || DEFAULT_PORT;
-    this.deviceName = "Papyrix Reader";
+    this.deviceName = "Snapix Reader";
     this.deviceId = crypto.randomUUID();
 
     this.socket = null;
@@ -82,7 +82,7 @@ class DeviceSimulator {
 
   async start() {
     console.log(`\n╔════════════════════════════════════════════════════════════╗`);
-    console.log(`║            Papyrix Device Simulator                        ║`);
+    console.log(`║            Snapix Device Simulator                        ║`);
     console.log(`╚════════════════════════════════════════════════════════════╝\n`);
 
     if (this.calibreHost) {
@@ -232,7 +232,7 @@ class DeviceSimulator {
       case OPCODES.GET_DEVICE_INFORMATION:
         this.send(OPCODES.OK, {
           device_info: { device_store_uuid: this.deviceId, device_name: this.deviceName },
-          device_version: "Papyrix 1.0",
+          device_version: "Snapix 1.0",
           version: "1.0",
         });
         break;
@@ -319,9 +319,9 @@ class DeviceSimulator {
       cacheUsesLpaths: true,
       canAcceptLibraryInfo: true,
       canUseCachedMetadata: true,
-      deviceKind: "Papyrix E-Ink Reader",
+      deviceKind: "Snapix E-Ink Reader",
       deviceName: this.deviceName,
-      appName: "Papyrix Reader",
+      appName: "Snapix Reader",
       ccVersionNumber: 128,
       passwordHash: "",
       useUuidFileNames: false,
@@ -440,7 +440,7 @@ async function main() {
     else if (args[i] === "--port" || args[i] === "-p") port = parseInt(args[++i], 10);
     else if (args[i] === "--help" || args[i] === "-h") {
       console.log(`
-Device Simulator - Simulates Papyrix E-Reader
+Device Simulator - Simulates Snapix E-Reader
 
 Usage:
   node device-simulator.mjs [options]

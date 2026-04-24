@@ -11,7 +11,7 @@
  * - Streaming file reception with minimal RAM usage
  * - Book metadata handling
  *
- * @author Papyrix Project
+ * @author Snapix Project
  * @license MIT
  */
 

@@ -10,12 +10,12 @@
 
 #define TAG "WIFI_CRED"
 
-namespace papyrix {
+namespace snapix {
 
 namespace {
 constexpr uint8_t WIFI_FILE_VERSION = 1;
 
-// Obfuscation key - "Papyrix" in ASCII (not cryptographic, just prevents casual reading)
+// Obfuscation key - "Snapix" in ASCII (not cryptographic, just prevents casual reading)
 constexpr uint8_t OBFUSCATION_KEY[] = {0x50, 0x61, 0x70, 0x79, 0x72, 0x69, 0x78};
 constexpr size_t KEY_LENGTH = sizeof(OBFUSCATION_KEY);
 }  // namespace
@@ -32,10 +32,10 @@ void WifiCredentialStore::obfuscate(char* data, size_t len) const {
 }
 
 bool WifiCredentialStore::saveToFile() const {
-  SdMan.mkdir(PAPYRIX_DIR);
+  SdMan.mkdir(SNAPIX_DIR);
 
   FsFile file;
-  if (!SdMan.openFileForWrite("WCS", PAPYRIX_WIFI_FILE, file)) {
+  if (!SdMan.openFileForWrite("WCS", SNAPIX_WIFI_FILE, file)) {
     LOG_ERR(TAG, "Failed to open wifi.bin for write");
     return false;
   }
@@ -67,7 +67,7 @@ bool WifiCredentialStore::saveToFile() const {
 
 bool WifiCredentialStore::loadFromFile() {
   FsFile file;
-  if (!SdMan.openFileForRead("WCS", PAPYRIX_WIFI_FILE, file)) {
+  if (!SdMan.openFileForRead("WCS", SNAPIX_WIFI_FILE, file)) {
     return false;
   }
 
@@ -193,4 +193,4 @@ void WifiCredentialStore::clearAll() {
   LOG_INF(TAG, "Cleared all credentials");
 }
 
-}  // namespace papyrix
+}  // namespace snapix

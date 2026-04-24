@@ -155,7 +155,7 @@ static void usage() {
   fprintf(stderr, "  --no-statusbar   Use full viewport height (no status bar margin)\n");
   fprintf(stderr, "  --cjk-font PATH  Load external CJK font (.bin) for text width measurement\n");
   fprintf(stderr, "  --cache-dump     Dump text from existing device cache directory\n");
-  fprintf(stderr, "  output_dir defaults to /tmp/papyrix-cache/\n");
+  fprintf(stderr, "  output_dir defaults to /tmp/snapix-cache/\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -231,7 +231,7 @@ int main(int argc, char* argv[]) {
   }
 
   const std::string filepath = argv[argIdx];
-  const std::string outputDir = argIdx + 1 < argc ? argv[argIdx + 1] : "/tmp/papyrix-cache";
+  const std::string outputDir = argIdx + 1 < argc ? argv[argIdx + 1] : "/tmp/snapix-cache";
 
   ContentType type = detectType(filepath);
   if (type == UNKNOWN) {

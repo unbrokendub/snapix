@@ -3,7 +3,7 @@
 # dependencies = ["freetype-py"]
 # ///
 """
-Font converter for Papyrix e-reader.
+Font converter for Snapix e-reader.
 
 Converts TTF/OTF fonts to:
 - C header files (.h) for builtin fonts
@@ -468,7 +468,7 @@ def write_epdfont(output_path, data):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert TTF/OTF fonts to Papyrix format (.epdfont or C header)",
+        description="Convert TTF/OTF fonts to Snapix format (.epdfont or C header)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

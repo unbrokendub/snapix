@@ -1,4 +1,4 @@
-module papyrix-fontconvert-bin
+module snapix-fontconvert-bin
 
 go 1.21
 

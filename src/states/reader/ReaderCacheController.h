@@ -18,11 +18,11 @@ class Page;
 class PageCache;
 struct RenderConfig;
 
-namespace papyrix {
+namespace snapix {
 class Core;
 }
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 class ReaderCacheController {
  public:
@@ -122,4 +122,4 @@ class ReaderCacheController {
   WarmPageSlot renderOverridePage_;
 };
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

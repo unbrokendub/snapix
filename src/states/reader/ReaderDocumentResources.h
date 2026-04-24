@@ -8,7 +8,7 @@
 
 class GfxRenderer;
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 class ReaderDocumentResources {
  public:
@@ -74,4 +74,4 @@ class ReaderDocumentResources {
   std::atomic<const char*> ownerReason_{nullptr};
 };
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <functional>
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 class ReaderNavigationController {
  public:
@@ -42,4 +42,4 @@ class ReaderNavigationController {
   bool deferredTurnIdleLogged_ = false;
 };
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

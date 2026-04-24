@@ -1,7 +1,7 @@
 /**
  * Markdown.cpp
  *
- * Markdown file handler implementation for Papyrix Reader
+ * Markdown file handler implementation for Snapix Reader
  */
 
 #include "Markdown.h"

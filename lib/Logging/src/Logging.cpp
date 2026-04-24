@@ -1,7 +1,7 @@
 #include "Logging.h"
 
 void logPrintf(const char* level, const char* origin, const char* format, ...) {
-#if !PAPYRIX_SERIAL_LOG_ENABLED
+#if !SNAPIX_SERIAL_LOG_ENABLED
   (void)level;
   (void)origin;
   (void)format;
@@ -35,7 +35,7 @@ void logPrintf(const char* level, const char* origin, const char* format, ...) {
 MySerialImpl MySerialImpl::instance;
 
 size_t MySerialImpl::printf(const char* format, ...) {
-#if !PAPYRIX_SERIAL_LOG_ENABLED
+#if !SNAPIX_SERIAL_LOG_ENABLED
   (void)format;
   return 0;
 #else
@@ -52,7 +52,7 @@ size_t MySerialImpl::printf(const char* format, ...) {
 }
 
 size_t MySerialImpl::write(uint8_t b) {
-#if PAPYRIX_SERIAL_LOG_ENABLED
+#if SNAPIX_SERIAL_LOG_ENABLED
   return logSerial.write(b);
 #else
   (void)b;
@@ -61,7 +61,7 @@ size_t MySerialImpl::write(uint8_t b) {
 }
 
 size_t MySerialImpl::write(const uint8_t* buffer, size_t size) {
-#if PAPYRIX_SERIAL_LOG_ENABLED
+#if SNAPIX_SERIAL_LOG_ENABLED
   return logSerial.write(buffer, size);
 #else
   (void)buffer;
@@ -70,7 +70,7 @@ size_t MySerialImpl::write(const uint8_t* buffer, size_t size) {
 }
 
 void MySerialImpl::flush() {
-#if PAPYRIX_SERIAL_LOG_ENABLED
+#if SNAPIX_SERIAL_LOG_ENABLED
   logSerial.flush();
 #endif
 }

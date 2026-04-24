@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <utility>
 
-namespace papyrix {
+namespace snapix {
 
 enum class Error : uint8_t {
   None = 0,
@@ -70,7 +70,7 @@ inline Result<void> ErrVoid(Error e) { return {e}; }
 
 const char* errorToString(Error e);
 
-}  // namespace papyrix
+}  // namespace snapix
 
 // Helper macros for unique variable names (uses __LINE__ for uniqueness)
 #define TRY_PASTE_(a, b) a##b
@@ -79,10 +79,10 @@ const char* errorToString(Error e);
 #define TRY(expr)                                                                                            \
   do {                                                                                                       \
     auto TRY_PASTE(_try_res_, __LINE__) = (expr);                                                            \
-    if (!TRY_PASTE(_try_res_, __LINE__).ok()) return ::papyrix::ErrVoid(TRY_PASTE(_try_res_, __LINE__).err); \
+    if (!TRY_PASTE(_try_res_, __LINE__).ok()) return ::snapix::ErrVoid(TRY_PASTE(_try_res_, __LINE__).err); \
   } while (0)
 
 #define TRY_VAL(var, expr)                                               \
   auto _result_##var = (expr);                                           \
-  if (!_result_##var.ok()) return ::papyrix::ErrVoid(_result_##var.err); \
+  if (!_result_##var.ok()) return ::snapix::ErrVoid(_result_##var.err); \
   auto var = std::move(*_result_##var)

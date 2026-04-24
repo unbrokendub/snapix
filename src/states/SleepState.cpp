@@ -26,14 +26,14 @@
 #include "../ThemeManager.h"
 #include "../config.h"
 #include "../core/Core.h"
-#include "../images/PapyrixLogo.h"
+#include "../images/SnapixLogo.h"
 
 extern InputManager inputManager;
 extern uint16_t rtcPowerButtonDurationMs;
 
 #define TAG "SLEEP"
 
-namespace papyrix {
+namespace snapix {
 
 SleepState::SleepState(GfxRenderer& renderer) : renderer_(renderer) {}
 
@@ -139,8 +139,8 @@ void SleepState::renderDefaultSleepScreen(const Core& core) const {
   // Fixed colors (white bg, black text) — independent of active theme.
   // invertScreen() below handles dark/light based on sleep setting only.
   renderer_.clearScreen(0xFF);
-  renderer_.drawImage(PapyrixLogo, (pageWidth + 128) / 2, (pageHeight - 128) / 2, 128, 128);
-  renderer_.drawCenteredText(THEME.uiFontId, pageHeight / 2 + 70, "Papyrix", true, BOLD);
+  renderer_.drawImage(SnapixLogo, (pageWidth + 128) / 2, (pageHeight - 128) / 2, 128, 128);
+  renderer_.drawCenteredText(THEME.uiFontId, pageHeight / 2 + 70, "Snapix", true, BOLD);
   renderer_.drawCenteredText(THEME.smallFontId, pageHeight / 2 + 110, "SLEEPING", true);
 
   // Make sleep screen dark unless light is selected in settings
@@ -231,32 +231,32 @@ void SleepState::renderCoverSleepScreen(Core& core) const {
 
   // Generate cover BMP based on file type (creates temporary wrapper to generate cover)
   if (FsHelpers::isXtcFile(bookPath)) {
-    Xtc xtc(bookPath, PAPYRIX_CACHE_DIR);
+    Xtc xtc(bookPath, SNAPIX_CACHE_DIR);
     if (xtc.load() && xtc.generateCoverBmp()) {
       coverBmpPath = xtc.getCoverBmpPath();
     }
   } else if (FsHelpers::isTxtFile(bookPath)) {
-    Txt txt(bookPath, PAPYRIX_CACHE_DIR);
+    Txt txt(bookPath, SNAPIX_CACHE_DIR);
     if (txt.load() && txt.generateCoverBmp(true)) {
       coverBmpPath = txt.getCoverBmpPath();
     }
   } else if (FsHelpers::isMarkdownFile(bookPath)) {
-    Markdown md(bookPath, PAPYRIX_CACHE_DIR);
+    Markdown md(bookPath, SNAPIX_CACHE_DIR);
     if (md.load() && md.generateCoverBmp(true)) {
       coverBmpPath = md.getCoverBmpPath();
     }
   } else if (FsHelpers::isEpubFile(bookPath)) {
-    Epub epub(bookPath, PAPYRIX_CACHE_DIR);
+    Epub epub(bookPath, SNAPIX_CACHE_DIR);
     if (epub.load() && epub.generateCoverBmp(true)) {
       coverBmpPath = epub.getCoverBmpPath();
     }
   } else if (FsHelpers::isFb2File(bookPath)) {
-    Fb2 fb2(bookPath, PAPYRIX_CACHE_DIR);
+    Fb2 fb2(bookPath, SNAPIX_CACHE_DIR);
     if (fb2.load() && fb2.generateCoverBmp(true)) {
       coverBmpPath = fb2.getCoverBmpPath();
     }
   } else if (FsHelpers::isHtmlFile(bookPath)) {
-    Html html(bookPath, PAPYRIX_CACHE_DIR);
+    Html html(bookPath, SNAPIX_CACHE_DIR);
     if (html.load() && html.generateCoverBmp(true)) {
       coverBmpPath = html.getCoverBmpPath();
     }
@@ -322,4 +322,4 @@ void SleepState::waitForPowerRelease() const {
   }
 }
 
-}  // namespace papyrix
+}  // namespace snapix

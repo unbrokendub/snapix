@@ -24,7 +24,7 @@
 
 #define TAG "READER"
 
-namespace papyrix {
+namespace snapix {
 using reader::contentCachePath;
 using reader::epubSectionCachePath;
 using reader::fb2SectionCachePath;
@@ -529,4 +529,4 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
   }
 }
 
-}  // namespace papyrix
+}  // namespace snapix

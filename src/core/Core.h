@@ -7,11 +7,11 @@
 #include "../drivers/Network.h"
 #include "../drivers/Storage.h"
 #include "EventQueue.h"
-#include "PapyrixSettings.h"
+#include "SnapixSettings.h"
 #include "Result.h"
 #include "Types.h"
 
-namespace papyrix {
+namespace snapix {
 
 struct Core {
   // === Drivers (thin wrappers, no heap) ===
@@ -57,4 +57,4 @@ struct Core {
 // Global core instance (defined in main.cpp)
 extern Core core;
 
-}  // namespace papyrix
+}  // namespace snapix

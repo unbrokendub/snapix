@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string>
 
-namespace papyrix::reader {
+namespace snapix::reader {
 
 struct HeapState {
   size_t freeBytes = 0;
@@ -43,4 +43,4 @@ HeapState readHeapState();
 bool isHeapCritical(const HeapState& heap);
 bool isHeapTight(const HeapState& heap);
 
-}  // namespace papyrix::reader
+}  // namespace snapix::reader

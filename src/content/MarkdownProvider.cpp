@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace papyrix {
+namespace snapix {
 
 Result<void> MarkdownProvider::open(const char* path, const char* cacheDir) {
   close();
@@ -55,4 +55,4 @@ uint32_t MarkdownProvider::pageCount() const {
   return (fileSize + BYTES_PER_PAGE - 1) / BYTES_PER_PAGE;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

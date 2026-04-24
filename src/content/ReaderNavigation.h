@@ -6,7 +6,7 @@
 
 class PageCache;
 
-namespace papyrix {
+namespace snapix {
 
 // ReaderNavigation - Handles page traversal logic for different content types
 // Separates navigation logic from state management for better testability
@@ -42,4 +42,4 @@ class ReaderNavigation {
   static bool needsCacheExtension(const PageCache* cache, int sectionPage);
 };
 
-}  // namespace papyrix
+}  // namespace snapix

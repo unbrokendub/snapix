@@ -1,10 +1,10 @@
 # Architecture
 
-This document describes the internal architecture and subsystems of Papyrix.
+This document describes the internal architecture and subsystems of Snapix.
 
 ## Overview
 
-Papyrix is organized around a **state machine** architecture with **singleton managers** and **content providers** for multi-format ebook support. The system is optimized for the ESP32-C3's ~380KB RAM constraint.
+Snapix is organized around a **state machine** architecture with **singleton managers** and **content providers** for multi-format ebook support. The system is optimized for the ESP32-C3's ~380KB RAM constraint.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -27,7 +27,7 @@ Papyrix is organized around a **state machine** architecture with **singleton ma
 
 ## State Machine
 
-Papyrix uses a finite state machine (FSM) with pre-allocated state instances. This avoids heap allocation during state transitions, preventing memory fragmentation.
+Snapix uses a finite state machine (FSM) with pre-allocated state instances. This avoids heap allocation during state transitions, preventing memory fragmentation.
 
 ### States
 
@@ -60,7 +60,7 @@ States use `StateTransition` to navigate between screens:
 
 ### Dual-Boot System
 
-To maximize available RAM in reader mode, Papyrix implements a dual-boot system:
+To maximize available RAM in reader mode, Snapix implements a dual-boot system:
 
 - **UI Mode**: Full feature set with all 10 states, theme switching, multiple font sizes
 - **Reader Mode**: Minimal reader with only Reader/Sleep/Error states, single font size
@@ -103,13 +103,13 @@ Saves and restores reading position per book:
 - Section page (page within chapter)
 - Flat page (XTC absolute page)
 
-Cache location: `/.papyrix/<format>_<hash>/progress.bin`
+Cache location: `/.snapix/<format>_<hash>/progress.bin`
 
 ---
 
 ## Memory Management
 
-The ESP32-C3 has ~380KB usable RAM with ~100-150KB available after system overhead. Papyrix employs several strategies:
+The ESP32-C3 has ~380KB usable RAM with ~100-150KB available after system overhead. Snapix employs several strategies:
 
 ### Allocation Strategies
 
@@ -243,7 +243,7 @@ EPUB Load → ContentOpfParser → CssParser → ChapterHtmlSlimParser → Page
 
 ### Line Breaking Algorithm
 
-Papyrix uses the **Knuth-Plass algorithm** for optimal line breaking, the same algorithm used by TeX. This produces higher-quality justified text than greedy algorithms.
+Snapix uses the **Knuth-Plass algorithm** for optimal line breaking, the same algorithm used by TeX. This produces higher-quality justified text than greedy algorithms.
 
 **Hyphenation**: The Liang algorithm (also from TeX) finds valid hyphenation points within words. Language is auto-detected from EPUB metadata (`<dc:language>`) and falls back to English. Supported languages: German, English, Spanish, French, Italian, Russian, Ukrainian. Binary trie patterns are sourced from [typst/hypher](https://github.com/typst/hypher).
 
@@ -281,7 +281,7 @@ Lines exceeding page width get infinite penalty. Oversized words that can't fit 
 
 ## Multi-Script Support
 
-Papyrix supports multiple writing systems through script detection and specialized rendering.
+Snapix supports multiple writing systems through script detection and specialized rendering.
 
 ### ScriptDetector
 
@@ -362,7 +362,7 @@ EPUB images (JPEG/PNG/BMP) are converted to BMP and cached to SD card. Data URIs
 
 ## UI System
 
-Papyrix uses a view-based UI architecture with reusable elements and state-driven rendering.
+Snapix uses a view-based UI architecture with reusable elements and state-driven rendering.
 
 ### Directory Structure
 
@@ -463,7 +463,7 @@ reader-test --dump --batch 5 book.epub /tmp/cache
 reader-test --dump --no-statusbar book.epub /tmp/cache
 
 # Dump text from device cache (copied from SD card)
-reader-test --cache-dump /path/to/.papyrix/epub_<hash>/
+reader-test --cache-dump /path/to/.snapix/epub_<hash>/
 
 # Compare to find text differences (missing/duplicated text)
 diff <(reader-test --dump --batch 5 book.epub /tmp/cache 2>/dev/null) \
@@ -490,7 +490,7 @@ The `--batch 5` flag is critical for reproducing suspend/resume bugs that only t
 - **`StateMachine.h`** — FSM implementation
 - **`Types.h`** — Enums and constants
 - **`BootMode.h`** — Dual-boot system
-- **`PapyrixSettings.h`** — User preferences
+- **`SnapixSettings.h`** — User preferences
 
 ### States (`/src/states/`)
 

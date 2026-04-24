@@ -1,4 +1,4 @@
-module papyrix-monitor
+module snapix-monitor
 
 go 1.21
 

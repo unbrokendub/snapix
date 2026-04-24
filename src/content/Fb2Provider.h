@@ -7,7 +7,7 @@
 #include "../core/Result.h"
 #include "ContentTypes.h"
 
-namespace papyrix {
+namespace snapix {
 
 // Fb2Provider wraps the Fb2 handler
 struct Fb2Provider {
@@ -37,4 +37,4 @@ struct Fb2Provider {
   const Fb2* getFb2() const { return fb2.get(); }
 };
 
-}  // namespace papyrix
+}  // namespace snapix

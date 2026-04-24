@@ -11,7 +11,7 @@
 
 #define TAG "XTC_RENDER"
 
-namespace papyrix {
+namespace snapix {
 
 constexpr uint16_t MAX_PAGE_WIDTH = 2048;
 constexpr uint16_t MAX_PAGE_HEIGHT = 2048;
@@ -253,4 +253,4 @@ void XtcPageRenderer::render2BitGrayscale(const uint8_t* plane1, const uint8_t* 
   }
 }
 
-}  // namespace papyrix
+}  // namespace snapix

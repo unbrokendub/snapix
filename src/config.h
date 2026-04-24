@@ -58,11 +58,11 @@
 #define SMALL_FONT_ID 96157773
 
 // System directory for settings and cache
-#define PAPYRIX_DIR "/.papyrix"
-#define PAPYRIX_CACHE_DIR PAPYRIX_DIR "/cache"
-#define PAPYRIX_SETTINGS_FILE PAPYRIX_DIR "/settings.bin"
-#define PAPYRIX_STATE_FILE PAPYRIX_DIR "/state.bin"
-#define PAPYRIX_WIFI_FILE PAPYRIX_DIR "/wifi.bin"
+#define SNAPIX_DIR "/.snapix"
+#define SNAPIX_CACHE_DIR SNAPIX_DIR "/cache"
+#define SNAPIX_SETTINGS_FILE SNAPIX_DIR "/settings.bin"
+#define SNAPIX_STATE_FILE SNAPIX_DIR "/state.bin"
+#define SNAPIX_WIFI_FILE SNAPIX_DIR "/wifi.bin"
 
 // Thumbnail dimensions for home screen
 #define THUMB_WIDTH 320

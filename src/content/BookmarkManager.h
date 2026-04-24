@@ -4,7 +4,7 @@
 
 #include "ContentTypes.h"
 
-namespace papyrix {
+namespace snapix {
 
 struct Core;
 
@@ -25,4 +25,4 @@ class BookmarkManager {
                     uint32_t flatPage);
 };
 
-}  // namespace papyrix
+}  // namespace snapix

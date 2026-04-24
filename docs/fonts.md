@@ -1,6 +1,6 @@
 # Fonts
 
-Papyrix Reader supports custom fonts for reading. Fonts are converted to a proprietary `.epdfont` format optimized for e-paper displays.
+Snapix Reader supports custom fonts for reading. Fonts are converted to a proprietary `.epdfont` format optimized for e-paper displays.
 
 ## How Fonts Work
 
@@ -25,7 +25,7 @@ Custom `.epdfont` fonts support **regular** and **bold** styles:
 
 ### Fallback Behavior
 
-Papyrix ensures you can always read your books, even if a custom font fails:
+Snapix ensures you can always read your books, even if a custom font fails:
 
 1. **Font load failure** → Built-in font is used automatically
 2. **Individual glyph failure** → Character is skipped gracefully (no crash)
@@ -130,7 +130,7 @@ A sans-serif font with complete Arabic script support including contextual shapi
 
 ### IBM Plex Sans Arabic
 
-IBM's Arabic typeface from the Plex family. A modern, clean sans-serif design with excellent Arabic presentation forms coverage (140/144 in Forms-B), making it highly compatible with Papyrix's Arabic shaper. Provides a refined reading experience for Arabic content.
+IBM's Arabic typeface from the Plex family. A modern, clean sans-serif design with excellent Arabic presentation forms coverage (140/144 in Forms-B), making it highly compatible with Snapix's Arabic shaper. Provides a refined reading experience for Arabic content.
 
 - **Styles**: Regular, Bold
 - **Theme**: `light-ibm-plex-arabic.theme`
@@ -138,7 +138,7 @@ IBM's Arabic typeface from the Plex family. A modern, clean sans-serif design wi
 
 ### CJK Fonts (Chinese/Japanese/Korean)
 
-For CJK texts, Papyrix uses external `.bin` format fonts that are streamed from the SD card due to their large size. The `.bin` format uses direct codepoint indexing (1-bit bitmap, MSB first) for the full BMP range (U+0000-U+FFEF).
+For CJK texts, Snapix uses external `.bin` format fonts that are streamed from the SD card due to their large size. The `.bin` format uses direct codepoint indexing (1-bit bitmap, MSB first) for the full BMP range (U+0000-U+FFEF).
 
 > **Note:** CJK fonts are supported for book text (reading view) only. UI elements (home screen, status bar, book title overlay) use built-in bitmap fonts that do not include CJK glyphs.
 

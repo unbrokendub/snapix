@@ -178,7 +178,7 @@ static void writeBmpHeader2bit(Print& bmpOut, const int width, const int height)
 // SOF9 (0xC9) = Extended sequential DCT, arithmetic (NOT supported)
 // SOF10 (0xCA) = Progressive DCT, arithmetic (NOT supported)
 static bool isUnsupportedJpeg(FsFile& file) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     return true;
   }
@@ -238,7 +238,7 @@ unsigned char JpegToBmpConverter::jpegReadCallback(unsigned char* pBuf, const un
 
   // Check if we need to refill our context buffer
   if (context->bufferPos >= context->bufferFilled) {
-    papyrix::spi::SharedBusLock busLock;
+    snapix::spi::SharedBusLock busLock;
     if (!busLock) {
       return PJPG_STREAM_READ_ERROR;
     }
@@ -336,7 +336,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
   // Write BMP header with output dimensions
   int bytesPerRow;
   {
-    papyrix::spi::SharedBusLock busLock;
+    snapix::spi::SharedBusLock busLock;
     if (!busLock) {
       LOG_ERR(TAG, "Shared SPI lock unavailable for BMP header write");
       return false;
@@ -561,7 +561,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
             fsDitherer->nextRow();
         }
         {
-          papyrix::spi::SharedBusLock busLock;
+          snapix::spi::SharedBusLock busLock;
           if (!busLock || bmpOut.write(rowBuffer, bytesPerRow) != static_cast<size_t>(bytesPerRow)) {
             LOG_ERR(TAG, "Failed to write BMP row");
             if (rowAccum) delete[] rowAccum;
@@ -654,7 +654,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
           }
 
           {
-            papyrix::spi::SharedBusLock busLock;
+            snapix::spi::SharedBusLock busLock;
             if (!busLock || bmpOut.write(rowBuffer, bytesPerRow) != static_cast<size_t>(bytesPerRow)) {
               LOG_ERR(TAG, "Failed to write scaled BMP row");
               if (rowAccum) delete[] rowAccum;

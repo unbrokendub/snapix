@@ -20,10 +20,10 @@
 
 extern GfxRenderer renderer;
 
-namespace papyrix {
+namespace snapix {
 namespace clock_app {
 
-static constexpr const char* SETTINGS_PATH = "/.papyrix/apps/clock.txt";
+static constexpr const char* SETTINGS_PATH = "/.snapix/apps/clock.txt";
 
 static constexpr uint32_t NTP_SYNC_INTERVALS[] = {10800000, 21600000, 86400000, 0};
 static constexpr const char* NTP_SYNC_LABELS[] = {"3h", "6h", "24h", "Off"};
@@ -105,7 +105,7 @@ static void loadSettings(Core& core) {
 }
 
 static void saveSettings(Core& core) {
-  core.storage.mkdir("/.papyrix/apps");
+  core.storage.mkdir("/.snapix/apps");
 
   FsFile file;
   auto result = core.storage.openWrite(SETTINGS_PATH, file);
@@ -440,4 +440,4 @@ void onMenuButton(Core& core, Button btn) {
 }
 
 }  // namespace clock_app
-}  // namespace papyrix
+}  // namespace snapix

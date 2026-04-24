@@ -1,6 +1,6 @@
 #include "Result.h"
 
-namespace papyrix {
+namespace snapix {
 
 const char* errorToString(Error e) {
   switch (e) {
@@ -38,4 +38,4 @@ const char* errorToString(Error e) {
   return "Unknown error";
 }
 
-}  // namespace papyrix
+}  // namespace snapix

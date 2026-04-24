@@ -1,4 +1,4 @@
-#include "PapyrixSettings.h"
+#include "SnapixSettings.h"
 
 #include <Logging.h>
 #include <SDCardManager.h>
@@ -12,10 +12,10 @@
 
 #define TAG "SETTINGS"
 
-namespace papyrix {
+namespace snapix {
 
 namespace {
-// Magic signature to identify Papyrix settings files ("PPXS" in little-endian)
+// Magic signature to identify Snapix settings files ("PPXS" in little-endian)
 constexpr uint32_t SETTINGS_MAGIC = 0x53585050;
 // Minimum version we can read (allows backward compatibility)
 constexpr uint8_t MIN_SETTINGS_VERSION = 3;
@@ -27,11 +27,11 @@ constexpr uint8_t SETTINGS_COUNT = 30;
 
 Result<void> Settings::save(drivers::Storage& storage) const {
   // Make sure the directories exist
-  storage.mkdir(PAPYRIX_DIR);
-  storage.mkdir(PAPYRIX_CACHE_DIR);
+  storage.mkdir(SNAPIX_DIR);
+  storage.mkdir(SNAPIX_CACHE_DIR);
 
   FsFile outputFile;
-  auto result = storage.openWrite(PAPYRIX_SETTINGS_FILE, outputFile);
+  auto result = storage.openWrite(SNAPIX_SETTINGS_FILE, outputFile);
   if (!result.ok()) {
     return result;
   }
@@ -78,7 +78,7 @@ Result<void> Settings::save(drivers::Storage& storage) const {
 
 Result<void> Settings::load(drivers::Storage& storage) {
   FsFile inputFile;
-  auto result = storage.openRead(PAPYRIX_SETTINGS_FILE, inputFile);
+  auto result = storage.openRead(SNAPIX_SETTINGS_FILE, inputFile);
   if (!result.ok()) {
     return result;
   }
@@ -89,7 +89,7 @@ Result<void> Settings::load(drivers::Storage& storage) {
   if (magic != SETTINGS_MAGIC) {
     LOG_ERR(TAG, "Invalid settings file (wrong magic 0x%08X), deleting", magic);
     inputFile.close();
-    storage.remove(PAPYRIX_SETTINGS_FILE);
+    storage.remove(SNAPIX_SETTINGS_FILE);
     return ErrVoid(Error::UnsupportedVersion);
   }
 
@@ -233,11 +233,11 @@ RenderConfig Settings::getRenderConfig(const Theme& theme, uint16_t viewportWidt
 
 // Legacy methods that use SdMan directly (for early init before Core)
 bool Settings::saveToFile() const {
-  SdMan.mkdir(PAPYRIX_DIR);
-  SdMan.mkdir(PAPYRIX_CACHE_DIR);
+  SdMan.mkdir(SNAPIX_DIR);
+  SdMan.mkdir(SNAPIX_CACHE_DIR);
 
   FsFile outputFile;
-  if (!SdMan.openFileForWrite("SET", PAPYRIX_SETTINGS_FILE, outputFile)) {
+  if (!SdMan.openFileForWrite("SET", SNAPIX_SETTINGS_FILE, outputFile)) {
     return false;
   }
 
@@ -282,7 +282,7 @@ bool Settings::saveToFile() const {
 
 bool Settings::loadFromFile() {
   FsFile inputFile;
-  if (!SdMan.openFileForRead("SET", PAPYRIX_SETTINGS_FILE, inputFile)) {
+  if (!SdMan.openFileForRead("SET", SNAPIX_SETTINGS_FILE, inputFile)) {
     return false;
   }
 
@@ -292,7 +292,7 @@ bool Settings::loadFromFile() {
   if (magic != SETTINGS_MAGIC) {
     LOG_ERR(TAG, "Invalid settings file (wrong magic 0x%08X), deleting", magic);
     inputFile.close();
-    SdMan.remove(PAPYRIX_SETTINGS_FILE);
+    SdMan.remove(SNAPIX_SETTINGS_FILE);
     return false;
   }
 
@@ -394,4 +394,4 @@ bool Settings::loadFromFile() {
   return true;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

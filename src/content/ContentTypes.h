@@ -6,7 +6,7 @@
 #include "../core/Result.h"
 #include "../core/Types.h"
 
-namespace papyrix {
+namespace snapix {
 
 // Metadata shared by all content types
 struct ContentMetadata {
@@ -45,4 +45,4 @@ struct TocEntry {
 // Content format detection
 ContentType detectContentType(const char* path);
 
-}  // namespace papyrix
+}  // namespace snapix

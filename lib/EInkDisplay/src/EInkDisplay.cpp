@@ -229,7 +229,7 @@ void EInkDisplay::resetDisplay() {
 }
 
 void EInkDisplay::sendCommand(uint8_t command) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     LOG_ERR(TAG, "Shared SPI lock unavailable for command 0x%02X", command);
     return;
@@ -243,7 +243,7 @@ void EInkDisplay::sendCommand(uint8_t command) {
 }
 
 void EInkDisplay::sendData(uint8_t data) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     LOG_ERR(TAG, "Shared SPI lock unavailable for data write");
     return;
@@ -257,7 +257,7 @@ void EInkDisplay::sendData(uint8_t data) {
 }
 
 void EInkDisplay::sendData(const uint8_t* data, uint16_t length) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     LOG_ERR(TAG, "Shared SPI lock unavailable for bulk data write (%u bytes)", static_cast<unsigned>(length));
     return;
@@ -271,7 +271,7 @@ void EInkDisplay::sendData(const uint8_t* data, uint16_t length) {
 }
 
 void EInkDisplay::sendCommandWithData(uint8_t command, const uint8_t* data, uint16_t length) {
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     LOG_ERR(TAG, "Shared SPI lock unavailable for command+data 0x%02X (%u bytes)", command,
             static_cast<unsigned>(length));
@@ -497,7 +497,7 @@ void EInkDisplay::writeRamBufferInverted(uint8_t ramBuffer, const uint8_t* data,
   const unsigned long startTime = millis();
   LOG_DBG(TAG, "Writing inverted buffer to %s RAM (%lu bytes)...", bufferName, size);
 
-  papyrix::spi::SharedBusLock busLock;
+  snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     LOG_ERR(TAG, "Shared SPI lock unavailable for inverted write");
     return;

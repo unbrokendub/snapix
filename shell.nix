@@ -1,4 +1,4 @@
-# Nix development shell for Papyrix Reader
+# Nix development shell for Snapix Reader
 #
 # Usage:
 #   nix-shell              # Enter development environment
@@ -13,7 +13,7 @@ let
   ]);
 in
 pkgs.mkShell {
-  name = "papyrix-dev";
+  name = "snapix-dev";
 
   buildInputs = with pkgs; [
     # PlatformIO for ESP32 firmware builds
@@ -34,7 +34,7 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
-    echo "Papyrix Reader Development Environment"
+    echo "Snapix Reader Development Environment"
     echo "  make build   - Build firmware"
     echo "  make check   - Run cppcheck"
     echo "  make format  - Format code"

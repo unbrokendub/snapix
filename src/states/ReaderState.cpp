@@ -38,7 +38,7 @@
 
 #define TAG "READER"
 
-namespace papyrix {
+namespace snapix {
 using reader::kCacheTaskStopTimeoutMs;
 using reader::kIdleBackgroundKickIntervalMs;
 
@@ -573,7 +573,7 @@ void ReaderState::enter(Core& core) {
   }
 
   // Open content using ContentHandle
-  auto result = core.content.open(contentPath_, PAPYRIX_CACHE_DIR);
+  auto result = core.content.open(contentPath_, SNAPIX_CACHE_DIR);
   if (!result.ok()) {
     LOG_ERR(TAG, "Failed to open content: %s", errorToString(result.err));
     // Store error message for ErrorState to display
@@ -2080,4 +2080,4 @@ bool ReaderState::stopBackgroundCaching() {
   return true;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

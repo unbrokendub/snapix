@@ -11,7 +11,7 @@
 
 #define TAG "BOOKMARK"
 
-namespace papyrix {
+namespace snapix {
 
 bool BookmarkManager::save(Core& core, const char* cacheDir, ContentType type, const Bookmark* bookmarks, int count) {
   if (!cacheDir || cacheDir[0] == '\0') return false;
@@ -132,4 +132,4 @@ int BookmarkManager::findAt(const Bookmark* bookmarks, int count, ContentType ty
   return -1;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

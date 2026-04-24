@@ -11,7 +11,7 @@ extern "C" {
 
 class GfxRenderer;
 
-namespace papyrix {
+namespace snapix {
 
 class CalibreSyncState : public State {
  public:
@@ -56,4 +56,4 @@ class CalibreSyncState : public State {
   void restartConnection(Core& core);
 };
 
-}  // namespace papyrix
+}  // namespace snapix

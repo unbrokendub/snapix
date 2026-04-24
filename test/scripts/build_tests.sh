@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$TEST_DIR/build"
 
-echo "=== Building Papyrix Unit Tests ==="
+echo "=== Building Snapix Unit Tests ==="
 echo "Test directory: $TEST_DIR"
 echo "Build directory: $BUILD_DIR"
 

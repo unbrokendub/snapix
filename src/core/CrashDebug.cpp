@@ -5,7 +5,7 @@
 
 #define TAG "CRASHDBG"
 
-namespace papyrix::crashdebug {
+namespace snapix::crashdebug {
 
 namespace {
 
@@ -124,4 +124,4 @@ void logBootInfo(const esp_reset_reason_t reason) {
   clear();
 }
 
-}  // namespace papyrix::crashdebug
+}  // namespace snapix::crashdebug

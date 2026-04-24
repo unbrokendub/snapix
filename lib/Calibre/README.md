@@ -4,7 +4,7 @@ Memory-efficient implementation of Calibre's Smart Device App protocol for synci
 
 ## Overview
 
-This library enables wireless book synchronization between Papyrix e-reader devices and Calibre (https://calibre-ebook.com/). It implements the "Smart Device" protocol that Calibre uses to communicate with compatible devices over WiFi.
+This library enables wireless book synchronization between Snapix e-reader devices and Calibre (https://calibre-ebook.com/). It implements the "Smart Device" protocol that Calibre uses to communicate with compatible devices over WiFi.
 
 **Features:**
 - UDP broadcast discovery (device broadcasts "hello" to find Calibre)
@@ -142,7 +142,7 @@ Device: BOOK_DONE {}
 
 ```json
 {
-  "appName": "Papyrix Reader",
+  "appName": "Snapix Reader",
   "acceptedExtensions": ["epub", "txt", "md", "xtc", "xtch"],
   "cacheUsesLpaths": true,
   "canAcceptLibraryInfo": true,
@@ -154,8 +154,8 @@ Device: BOOK_DONE {}
   "canUseCachedMetadata": true,
   "ccVersionNumber": 128,
   "coverHeight": 240,
-  "deviceKind": "Papyrix E-Ink Reader",
-  "deviceName": "My Papyrix",
+  "deviceKind": "Snapix E-Ink Reader",
+  "deviceName": "My Snapix",
   "extensionPathLengths": {},
   "maxBookContentPacketLen": 4096,
   "passwordHash": "",
@@ -171,9 +171,9 @@ Device: BOOK_DONE {}
 {
   "device_info": {
     "device_store_uuid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "device_name": "Papyrix Reader"
+    "device_name": "Snapix Reader"
   },
-  "device_version": "Papyrix 1.0",
+  "device_version": "Snapix 1.0",
   "version": "1.0"
 }
 ```
@@ -329,7 +329,7 @@ calibre_deinit();
 
 Use the included simulators to test without hardware. Both simulators implement the real Calibre 8.x protocol flow.
 
-**Device Simulator** - Simulates a Papyrix device connecting to real Calibre:
+**Device Simulator** - Simulates a Snapix device connecting to real Calibre:
 ```bash
 # Auto-discover Calibre on local network
 node scripts/device-simulator.mjs

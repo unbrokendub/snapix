@@ -8,7 +8,7 @@
 extern InputManager inputManager;
 extern MappedInputManager& mappedInput;
 
-namespace papyrix {
+namespace snapix {
 namespace drivers {
 
 Result<void> Input::init(EventQueue& eventQueue) {
@@ -171,4 +171,4 @@ void Input::resyncState() {
 MappedInputManager& Input::raw() { return mappedInput; }
 
 }  // namespace drivers
-}  // namespace papyrix
+}  // namespace snapix

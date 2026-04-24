@@ -643,7 +643,7 @@
 
 *  Update docs [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
 *  Add Calibre wireless device connection support [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
-*  Rename system directory from .crosspoint to .papyrix [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
+*  Rename system directory from .crosspoint to .snapix [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
 *  Consolidate calibre.ini, opds.ini, themes/, and fonts/ under /config/.   Hide /config from file browsers [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
 
 
@@ -743,7 +743,7 @@
 
 ## v0.1.1 (2025-12-30)
 
-*  Add UTF-8 filename support and papyrix-flasher docs [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
+*  Add UTF-8 filename support and snapix-flasher docs [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
 
 
 ## v0.1.0 (2025-12-30)
@@ -919,7 +919,7 @@
 *  Add side button layout configuration while on reader (#147) [[Yona](mailto:yonatanrodriguezmartin7@gmail.com)]
 *  Custom zip parsing (#140) [[Dave Allie](mailto:dave@daveallie.com)]
 *  Add sleep screen image converter script [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
-*  Replace boot/sleep logo with Papyrix papyrus scroll [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
+*  Replace boot/sleep logo with Snapix papyrus scroll [[Pavel Liashkov](mailto:pavel.liashkov@protonmail.com)]
 *  Recalibrated power button duration, decreased long setting slightly. (#149) [[Jonas Diemer](mailto:jonasdiemer@gmail.com)]
 *  Improvement/settings selection by inversion (#152) [[Jonas Diemer](mailto:jonasdiemer@gmail.com)]
 *  Shorten continueLabel to actual screen width. (#151) [[Jonas Diemer](mailto:jonasdiemer@gmail.com)]

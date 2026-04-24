@@ -1,6 +1,6 @@
 # Image Rendering
 
-This document describes how Papyrix handles images in EPUB content.
+This document describes how Snapix handles images in EPUB content.
 
 ## Pipeline
 
@@ -123,10 +123,10 @@ This prevents memory allocation for embedded image data while preserving the doc
 
 ### Cache Location
 
-Images are cached to SD card under `/.papyrix/epub_<hash>/images/`:
+Images are cached to SD card under `/.snapix/epub_<hash>/images/`:
 
 ```
-.papyrix/
+.snapix/
 └── epub_12345678/
     └── images/
         ├── a1b2c3d4.bmp      # Converted image

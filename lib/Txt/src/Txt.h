@@ -1,7 +1,7 @@
 /**
  * Txt.h
  *
- * Plain text file handler for Papyrix Reader
+ * Plain text file handler for Snapix Reader
  * Provides EPUB-like interface for TXT file handling
  */
 

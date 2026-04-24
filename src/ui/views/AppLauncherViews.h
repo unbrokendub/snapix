@@ -7,7 +7,7 @@
 
 #include "../Elements.h"
 
-namespace papyrix {
+namespace snapix {
 struct MiniApp;
 }
 
@@ -36,6 +36,6 @@ struct AppMenuView {
   }
 };
 
-void render(const GfxRenderer& r, const Theme& t, const AppMenuView& v, const papyrix::MiniApp* apps);
+void render(const GfxRenderer& r, const Theme& t, const AppMenuView& v, const snapix::MiniApp* apps);
 
 }  // namespace ui

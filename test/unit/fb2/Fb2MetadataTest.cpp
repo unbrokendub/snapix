@@ -542,8 +542,8 @@ int main() {
 
   // Test 21: Cache path generation with fb2_ prefix
   {
-    std::string path = generateCachePath("/.papyrix", "/books/novel.fb2");
-    runner.expectTrue(path.find("/.papyrix/fb2_") == 0, "cachePath: has fb2_ prefix");
+    std::string path = generateCachePath("/.snapix", "/books/novel.fb2");
+    runner.expectTrue(path.find("/.snapix/fb2_") == 0, "cachePath: has fb2_ prefix");
     runner.expectTrue(path.length() > 14, "cachePath: has hash suffix");
   }
 

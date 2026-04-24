@@ -183,7 +183,7 @@ wheels = [
 ]
 
 [[package]]
-name = "papyrix-reader"
+name = "snapix-reader"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

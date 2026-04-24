@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace papyrix {
+namespace snapix {
 
 Result<void> Fb2Provider::open(const char* path, const char* cacheDir) {
   close();
@@ -78,4 +78,4 @@ Result<TocEntry> Fb2Provider::getTocEntry(uint16_t index) const {
   return Ok(entry);
 }
 
-}  // namespace papyrix
+}  // namespace snapix

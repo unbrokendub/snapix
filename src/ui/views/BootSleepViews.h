@@ -55,7 +55,7 @@ void render(const GfxRenderer& r, const Theme& t, const BootView& v);
 
 struct SleepView {
   enum class Mode : uint8_t {
-    Logo,       // Show Papyrix logo
+    Logo,       // Show Snapix logo
     BookCover,  // Show current book cover
     Black,      // Black screen
     Custom      // Custom image

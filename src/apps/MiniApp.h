@@ -4,7 +4,7 @@
 
 #include "../core/Types.h"
 
-namespace papyrix {
+namespace snapix {
 
 struct Core;
 
@@ -25,4 +25,4 @@ extern const uint8_t APP_COUNT;
 extern const int8_t APP_IMAGEVIEWER;
 extern const int8_t APP_CLOCK;
 
-}  // namespace papyrix
+}  // namespace snapix

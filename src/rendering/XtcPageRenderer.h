@@ -9,7 +9,7 @@ namespace xtc {
 class XtcParser;
 }
 
-namespace papyrix {
+namespace snapix {
 
 // XtcPageRenderer - Renders XTC/XTCH binary page data to GfxRenderer
 // Supports 1-bit (B&W) and 2-bit (4-level grayscale) formats
@@ -36,4 +36,4 @@ class XtcPageRenderer {
   void render2BitGrayscale(const uint8_t* plane1, const uint8_t* plane2, uint16_t width, uint16_t height);
 };
 
-}  // namespace papyrix
+}  // namespace snapix

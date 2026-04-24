@@ -1,10 +1,10 @@
 # File Formats
 
-This document describes the binary cache formats used by Papyrix for EPUB, TXT, Markdown, FB2, and HTML files.
+This document describes the binary cache formats used by Snapix for EPUB, TXT, Markdown, FB2, and HTML files.
 
 ## TXT Cache Files
 
-TXT files use a simple cache format stored in `.papyrix/txt_<hash>/`.
+TXT files use a simple cache format stored in `.snapix/txt_<hash>/`.
 
 ### `progress.bin`
 
@@ -40,7 +40,7 @@ The image is converted to 1-bit dithered BMP format for display.
 
 ## Markdown Cache Files
 
-Markdown files (`.md`, `.markdown`) use a cache format stored in `.papyrix/md_<hash>/`.
+Markdown files (`.md`, `.markdown`) use a cache format stored in `.snapix/md_<hash>/`.
 
 ### `progress.bin`
 
@@ -103,7 +103,7 @@ The image is converted to 1-bit dithered BMP format for display.
 
 ## FB2 Cache Files
 
-FB2 (FictionBook 2.0) files use a cache format stored in `.papyrix/fb2_<hash>/`.
+FB2 (FictionBook 2.0) files use a cache format stored in `.snapix/fb2_<hash>/`.
 
 ### `meta.bin`
 
@@ -158,7 +158,7 @@ The image is converted to 1-bit dithered BMP format for display.
 
 ## HTML Cache Files
 
-HTML files (`.html`, `.htm`) use a cache format stored in `.papyrix/html_<hash>/`. HTML is parsed using the same pipeline as EPUB chapters (HTML5 normalization → Expat XML → page layout).
+HTML files (`.html`, `.htm`) use a cache format stored in `.snapix/html_<hash>/`. HTML is parsed using the same pipeline as EPUB chapters (HTML5 normalization → Expat XML → page layout).
 
 ### `progress.bin`
 
@@ -194,7 +194,7 @@ The image is converted to 1-bit dithered BMP format for display.
 
 ## EPUB Cache Files
 
-EPUB files use a more complex cache format stored in `.papyrix/epub_<hash>/`.
+EPUB files use a more complex cache format stored in `.snapix/epub_<hash>/`.
 
 ### Image Cache (`images/` subdirectory)
 

@@ -1,10 +1,10 @@
 # Web Server Guide
 
-This guide explains how to connect your Papyrix Reader to WiFi and use the built-in web server to upload books from your computer or phone.
+This guide explains how to connect your Snapix Reader to WiFi and use the built-in web server to upload books from your computer or phone.
 
 ## Overview
 
-Papyrix Reader includes a built-in web server that allows you to:
+Snapix Reader includes a built-in web server that allows you to:
 
 - Upload books wirelessly from any device on the same WiFi network
 - Browse and manage files on your device's SD card
@@ -15,7 +15,7 @@ Papyrix Reader includes a built-in web server that allows you to:
 
 ## Prerequisites
 
-- Your Papyrix Reader device
+- Your Snapix Reader device
 - A WiFi network
 - A computer, phone, or tablet connected to the **same WiFi network**
 
@@ -90,7 +90,7 @@ Once connected, the screen will display:
 
 ### From a Computer
 
-1. Ensure your computer is connected to the **same WiFi network** as your Papyrix Reader
+1. Ensure your computer is connected to the **same WiFi network** as your Snapix Reader
 2. Open any web browser (Chrome is recommended)
 3. Type the IP address shown on your device into the browser's address bar
    - Example: `http://192.168.1.102/`
@@ -98,7 +98,7 @@ Once connected, the screen will display:
 
 ### From a Phone or Tablet
 
-1. Ensure your phone/tablet is connected to the **same WiFi network** as your Papyrix Reader
+1. Ensure your phone/tablet is connected to the **same WiFi network** as your Snapix Reader
 2. Open your mobile browser (Safari, Chrome, etc.)
 3. Type the IP address into the address bar
    - Example: `http://192.168.1.102/`
@@ -211,7 +211,7 @@ See the [Customization Guide](customization.md) for details on creating and usin
 
 1. Verify both devices are on the **same WiFi network**
    - Check your computer/phone WiFi settings
-   - Confirm the Papyrix Reader shows "Connected" status
+   - Confirm the Snapix Reader shows "Connected" status
 2. Double-check the IP address
    - Make sure you typed it correctly
    - Include `http://` at the beginning
@@ -288,7 +288,7 @@ See the [Customization Guide](customization.md) for details on creating and usin
 
 When you're finished uploading files:
 
-1. Press the **Back** button on your Papyrix Reader
+1. Press the **Back** button on your Snapix Reader
 2. The web server will automatically stop
 3. WiFi will disconnect
 4. **The device will automatically restart** to reclaim memory

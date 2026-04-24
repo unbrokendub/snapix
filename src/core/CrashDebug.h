@@ -4,7 +4,7 @@
 
 #include <esp_system.h>
 
-namespace papyrix::crashdebug {
+namespace snapix::crashdebug {
 
 enum class CrashPhase : uint8_t {
   None = 0,
@@ -21,4 +21,4 @@ void mark(CrashPhase phase, int16_t spine = -1, uint8_t attempt = 0);
 void clear();
 void logBootInfo(esp_reset_reason_t reason);
 
-}  // namespace papyrix::crashdebug
+}  // namespace snapix::crashdebug

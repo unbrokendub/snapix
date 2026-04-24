@@ -68,7 +68,7 @@ void Fb2Parser::releaseStreamingState() {
     xmlParser_ = nullptr;
   }
   if (file_) {
-    papyrix::spi::SharedBusLock lk;
+    snapix::spi::SharedBusLock lk;
     file_.close();
   }
   initialized_ = false;
@@ -129,7 +129,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
     }
 
     {
-      papyrix::spi::SharedBusLock lk;
+      snapix::spi::SharedBusLock lk;
       fileSize_ = file_.size();
       lastParsedOffset_ = startOffset_;
 
@@ -202,7 +202,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       int bytesRead;
       int done;
       {
-        papyrix::spi::SharedBusLock lk;
+        snapix::spi::SharedBusLock lk;
         if (file_.available() <= 0) break;
         bytesRead = file_.read(buffer, READ_CHUNK_SIZE);
         if (bytesRead <= 0) {
@@ -240,7 +240,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       }
 
       {
-        papyrix::spi::SharedBusLock lk;
+        snapix::spi::SharedBusLock lk;
         lastParsedOffset_ = static_cast<uint32_t>(std::min<size_t>(file_.position(), fileSize_));
       }
 

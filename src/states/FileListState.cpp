@@ -21,7 +21,7 @@
 
 #define TAG "FILELIST"
 
-namespace papyrix {
+namespace snapix {
 
 FileListState::FileListState(GfxRenderer& renderer)
     : renderer_(renderer),
@@ -576,4 +576,4 @@ int FileListState::getPageStartIndex() const {
   return (selectedIndex_ / pageItems) * pageItems;
 }
 
-}  // namespace papyrix
+}  // namespace snapix

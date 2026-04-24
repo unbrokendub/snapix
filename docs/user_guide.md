@@ -1,6 +1,6 @@
-# Papyrix User Guide
+# Snapix User Guide
 
-Welcome to the **Papyrix** firmware. This guide outlines the hardware controls, navigation, and reading features of
+Welcome to the **Snapix** firmware. This guide outlines the hardware controls, navigation, and reading features of
 the device.
 
 ## 1. Hardware Overview
@@ -46,7 +46,7 @@ Empty:
 ![Home Screen: Empty](images/home-screen.jpg)
 
 
-The Home Screen displays the title "Papyrix" at the top with a **battery indicator** in the top-right corner.
+The Home Screen displays the title "Snapix" at the top with a **battery indicator** in the top-right corner.
 
 #### Book Display
 The center of the screen shows the cover of the currently open book, with the book title and author displayed below it.
@@ -79,10 +79,10 @@ The Files screen acts as a folder and file browser.
 
 > **Note:** The following folders are automatically hidden from the file browser:
 > - `System Volume Information`, `LOST.DIR`, `$RECYCLE.BIN` — OS system folders
-> - `config` — Papyrix configuration files
+> - `config` — Snapix configuration files
 > - `XTCache` — XTC format cache
 > - `sleep` — Custom sleep screen images
-> - `.papyrix` — Internal cache (dot-prefix hidden by default)
+> - `.snapix` — Internal cache (dot-prefix hidden by default)
 
 > **Note:** Each folder can display up to 1000 items. Organize large libraries into subfolders if you exceed this limit.
 
@@ -246,7 +246,7 @@ View device information: firmware version, uptime, WiFi status, MAC address, fre
 
 ### 3.6 Calibre Wireless
 
-Calibre Wireless allows you to send books directly from **Calibre** (the popular ebook management software) to your Papyrix Reader over WiFi. This is the fastest way to transfer books if you already use Calibre.
+Calibre Wireless allows you to send books directly from **Calibre** (the popular ebook management software) to your Snapix Reader over WiFi. This is the fastest way to transfer books if you already use Calibre.
 
 #### Prerequisites
 
@@ -264,8 +264,8 @@ Calibre Wireless allows you to send books directly from **Calibre** (the popular
 
 1. Click **Connect/Share** in the toolbar
 2. Select **Start wireless device connection**
-3. Calibre will automatically discover your Papyrix Reader
-4. Your device appears as "Papyrix Reader" (or your custom name)
+3. Calibre will automatically discover your Snapix Reader
+4. Your device appears as "Snapix Reader" (or your custom name)
 
 #### Sending Books
 
@@ -286,7 +286,7 @@ Customize settings via `/config/calibre.ini` on your SD card:
 
 ```ini
 [Settings]
-device_name = Papyrix Reader
+device_name = Snapix Reader
 password =
 ```
 

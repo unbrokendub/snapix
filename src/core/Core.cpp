@@ -5,7 +5,7 @@
 
 #define TAG "CORE"
 
-namespace papyrix {
+namespace snapix {
 
 Result<void> Core::init() {
   logMemory("Core::init start");
@@ -50,4 +50,4 @@ void Core::logMemory(const char* label) const {
   LOG_DBG(TAG, "%s: free=%lu, largest=%lu", label, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 }
 
-}  // namespace papyrix
+}  // namespace snapix

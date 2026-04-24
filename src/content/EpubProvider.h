@@ -7,7 +7,7 @@
 #include "../core/Result.h"
 #include "ContentTypes.h"
 
-namespace papyrix {
+namespace snapix {
 
 // EpubProvider wraps the Epub parser
 // Uses shared_ptr because Section class requires it for rendering
@@ -39,4 +39,4 @@ struct EpubProvider {
   std::shared_ptr<Epub> getEpubShared() { return epub; }
 };
 
-}  // namespace papyrix
+}  // namespace snapix

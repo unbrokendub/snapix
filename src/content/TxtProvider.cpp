@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace papyrix {
+namespace snapix {
 
 Result<void> TxtProvider::open(const char* path, const char* cacheDir) {
   close();
@@ -56,4 +56,4 @@ uint32_t TxtProvider::pageCount() const {
   return (fileSize + BYTES_PER_PAGE - 1) / BYTES_PER_PAGE;
 }
 
-}  // namespace papyrix
+}  // namespace snapix
