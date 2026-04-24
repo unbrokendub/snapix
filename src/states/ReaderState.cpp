@@ -478,16 +478,26 @@ void ReaderState::enter(Core& core) {
   // Free memory from the previous reader session before loading a new book.
   // On ESP32 the heap is non-compacting, so unloading long-lived font caches is
   // one of the few effective ways to recover a larger contiguous block.
+  //
+  // Skip the font unload (and width-cache invalidation) when the new book uses
+  // the SAME font as the previous one — keeps the warm bitmap LRU cache in
+  // place so the first page renders instantly instead of paying the 15-30s
+  // cold-load penalty for Cyrillic/CJK glyphs.
   const reader::HeapState heapBeforeTrim = reader::readHeapState();
   const size_t fontBytesBeforeTrim = FONT_MANAGER.getTotalFontMemoryUsage();
   THEME_MANAGER.clearCache();
-  FONT_MANAGER.unloadReaderFonts();
-  renderer_.clearWidthCache();
+  const Theme& currentTheme = THEME_MANAGER.current();
+  const char* newReaderFontFamily = core.settings.getReaderFontFamily(currentTheme);
+  const bool sameReaderFontAsBefore = FONT_MANAGER.isReaderFontAlreadyActive(newReaderFontFamily);
+  if (!sameReaderFontAsBefore) {
+    FONT_MANAGER.unloadReaderFonts();
+    renderer_.clearWidthCache();
+  }
   const reader::HeapState heapAfterTrim = reader::readHeapState();
-  LOG_INF(TAG, "Entry heap trim: free=%u->%u largest=%u->%u fontBytes=%u",
+  LOG_INF(TAG, "Entry heap trim: free=%u->%u largest=%u->%u fontBytes=%u sameFont=%u",
           static_cast<unsigned>(heapBeforeTrim.freeBytes), static_cast<unsigned>(heapAfterTrim.freeBytes),
           static_cast<unsigned>(heapBeforeTrim.largestBlock), static_cast<unsigned>(heapAfterTrim.largestBlock),
-          static_cast<unsigned>(fontBytesBeforeTrim));
+          static_cast<unsigned>(fontBytesBeforeTrim), static_cast<unsigned>(sameReaderFontAsBefore));
 
   contentLoaded_ = false;
   loadFailed_ = false;

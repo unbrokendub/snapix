@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -144,6 +145,14 @@ class ChapterHtmlSlimParser {
   static constexpr uint8_t MAX_CONSECUTIVE_IMAGE_FAILURES = 3;
   static constexpr uint32_t MAX_QUICK_IMAGE_PROCESS_TIME_MS = 8000;
   static constexpr uint32_t MAX_FULL_IMAGE_PROCESS_TIME_MS = 12000;
+
+  // Session-wide blacklist of images that timed out or aborted during conversion.
+  // Prevents background cold-extend from repeatedly grinding the same problematic
+  // image (e.g. a large JPEG that takes >8s to convert).  Reset on reboot.
+  static std::unordered_set<size_t>& sessionFailedImageHashes() {
+    static std::unordered_set<size_t> instance;
+    return instance;
+  }
 
   // Parser safety - timeout and memory checks
   uint32_t parseStartTime_ = 0;

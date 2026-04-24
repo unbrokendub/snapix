@@ -329,10 +329,6 @@ void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* te
 IRAM_ATTR void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, const EpdFontFamily::Style style) const {
   if (!text || !*text) return;
 
-  StreamingEpdFont* streamingFont = getStreamingFont(fontId, style);
-  const bool externalAvailable =
-      isExternalFontAllowed(fontId) && ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont());
-
   std::vector<uint32_t> codepoints;
   codepoints.reserve(24);
 
@@ -349,9 +345,20 @@ IRAM_ATTR void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, c
   std::sort(codepoints.begin(), codepoints.end());
   codepoints.erase(std::unique(codepoints.begin(), codepoints.end()), codepoints.end());
 
+  warmCodepointsBatch(fontId, codepoints.data(), codepoints.size(), style);
+}
+
+IRAM_ATTR void GfxRenderer::warmCodepointsBatch(const int fontId, const uint32_t* codepoints, const size_t count,
+                                                const EpdFontFamily::Style style) const {
+  if (!codepoints || count == 0) return;
+
+  StreamingEpdFont* streamingFont = getStreamingFont(fontId, style);
+  const bool externalAvailable =
+      isExternalFontAllowed(fontId) && ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont());
+
   if (streamingFont) {
-    for (const uint32_t warmCp : codepoints) {
-      const EpdGlyph* glyph = streamingFont->getGlyph(warmCp);
+    for (size_t i = 0; i < count; i++) {
+      const EpdGlyph* glyph = streamingFont->getGlyph(codepoints[i]);
       if (glyph) {
         streamingFont->getGlyphBitmap(glyph);
       }
@@ -359,9 +366,13 @@ IRAM_ATTR void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, c
   }
 
   if (externalAvailable) {
-    auto firstExternal = std::lower_bound(codepoints.begin(), codepoints.end(), static_cast<uint32_t>(0x80));
-    if (firstExternal != codepoints.end()) {
-      _externalFont->preloadGlyphs(&(*firstExternal), static_cast<size_t>(codepoints.end() - firstExternal));
+    // Find first codepoint >= 0x80 (ASCII handled by built-in font, not external)
+    size_t firstExternal = 0;
+    while (firstExternal < count && codepoints[firstExternal] < 0x80) {
+      firstExternal++;
+    }
+    if (firstExternal < count) {
+      _externalFont->preloadGlyphs(&codepoints[firstExternal], count - firstExternal);
     }
   }
 }

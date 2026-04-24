@@ -3,6 +3,10 @@
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Serialization.h>
+#include <Utf8.h>
+
+#include <algorithm>
+#include <vector>
 
 #if __has_include(<esp_attr.h>)
 #include <esp_attr.h>
@@ -74,10 +78,46 @@ IRAM_ATTR void Page::render(GfxRenderer& renderer, const int fontId, const int x
 }
 
 IRAM_ATTR void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
+  // Batch glyph warming across the entire page.  Per-line warming caused
+  // LRU thrashing in the external font cache (~80 entries) when Cyrillic /
+  // CJK pages had 100+ unique codepoints split across many words; cold
+  // first-render took 15s.  Collecting all codepoints once and dispatching
+  // a single batch per style amortises sort/dedup and lets preloadGlyphs
+  // see the full page set so the LRU never evicts a glyph the page needs.
+  //
+  // Codepoints are bucketed per style (REGULAR / BOLD / ITALIC / BOLD_ITALIC)
+  // because each style has its own glyph data.  When fakeBold is enabled,
+  // BOLD/BOLD_ITALIC remap to REGULAR/ITALIC respectively.
+  std::vector<uint32_t> bucket[4];  // index by EpdFontFamily::Style enum (0..3)
+  for (auto& v : bucket) v.reserve(64);
+
   for (const auto& element : elements) {
     if (element->getTag() != TAG_PageLine) continue;
-    const auto& line = static_cast<const PageLine&>(*element);
-    line.getTextBlock().warmGlyphs(renderer, fontId);
+    const auto& tb = static_cast<const PageLine&>(*element).getTextBlock();
+    for (size_t i = 0; i < tb.wordCount(); i++) {
+      const auto& wd = tb.wordAt(i);
+      auto style = wd.style;
+      if (TextBlock::fakeBold) {
+        if (style == EpdFontFamily::BOLD) style = EpdFontFamily::REGULAR;
+        else if (style == EpdFontFamily::BOLD_ITALIC) style = EpdFontFamily::ITALIC;
+      }
+      const int idx = static_cast<int>(style);
+      if (idx < 0 || idx >= 4) continue;
+      const char* text = tb.wordCStr(i);
+      const unsigned char* ptr = reinterpret_cast<const unsigned char*>(text);
+      uint32_t cp;
+      while ((cp = utf8NextCodepoint(&ptr))) {
+        bucket[idx].push_back(cp);
+      }
+    }
+  }
+
+  for (int s = 0; s < 4; s++) {
+    if (bucket[s].empty()) continue;
+    std::sort(bucket[s].begin(), bucket[s].end());
+    bucket[s].erase(std::unique(bucket[s].begin(), bucket[s].end()), bucket[s].end());
+    renderer.warmCodepointsBatch(fontId, bucket[s].data(), bucket[s].size(),
+                                  static_cast<EpdFontFamily::Style>(s));
   }
 }
 

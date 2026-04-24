@@ -145,6 +145,11 @@ class FontManager {
   /// Returns true if the active reader font was loaded from SD card (not a builtin font).
   bool isUsingCustomReaderFont() const { return _activeReaderFontId != 0; }
 
+  /// Returns true if the given font family name matches the currently active reader font.
+  /// Used to skip an unload+reload cycle when opening a new book that uses the same font
+  /// as the previous one — preserves the warm bitmap LRU cache.
+  bool isReaderFontAlreadyActive(const char* familyName) const;
+
   /**
    * Log information about all loaded fonts.
    */

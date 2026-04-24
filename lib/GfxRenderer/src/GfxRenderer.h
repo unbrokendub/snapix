@@ -213,6 +213,14 @@ class GfxRenderer {
   int getLineHeight(int fontId) const;
   int getEffectiveLineHeight(int fontId) const;
   void warmTextGlyphs(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+
+  /// Batch glyph warming.  Caller pre-collects all unique codepoints across a
+  /// page (or larger scope) and passes them in one call.  Avoids per-word
+  /// LRU thrashing in the external font cache when the page contains many
+  /// words sharing the same codepoint set (e.g. Cyrillic text where 50-100
+  /// unique chars exceed the 80-entry cache when split across words).
+  void warmCodepointsBatch(int fontId, const uint32_t* codepoints, size_t count,
+                           EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   std::string truncatedText(const int fontId, const char* text, const int maxWidth,
                             const EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   // Breaks a single word into chunks that fit within maxWidth, adding "-" where needed

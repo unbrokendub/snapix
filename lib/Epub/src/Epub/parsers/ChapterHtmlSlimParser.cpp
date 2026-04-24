@@ -1569,6 +1569,16 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
   size_t srcHash = std::hash<std::string>{}(result.resolvedPath);
   result.cachedBmpPath = imageCachePath + "/" + std::to_string(srcHash) + ".bmp";
 
+  // Session blacklist: image already failed with timeout/abort this boot.
+  // Skip immediately to break the infinite-retry loop in cold-extend.
+  auto& failedHashes = sessionFailedImageHashes();
+  if (failedHashes.count(srcHash)) {
+    LOG_INF(TAG, "[CONTENT][IMAGE] session-blacklisted src=%s resolved=%s (skipped)", src.c_str(),
+            result.resolvedPath.c_str());
+    setTerminal("session-blacklisted", ImageFailureClass::ConvertFailed);
+    return result;
+  }
+
   std::string failedMarker = imageCachePath + "/" + std::to_string(srcHash) + ".failed";
   uint16_t cachedWidth = 0;
   uint16_t cachedHeight = 0;
@@ -1723,6 +1733,16 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
               interruptToReason(interrupt, "none"), interruptToReason(effectiveInterrupt, "none"));
       SdMan.remove(result.cachedBmpPath.c_str());
       if (effectiveInterrupt != ImageInterruptReason::None) {
+        // Session-blacklist images that timed out or hit OOM during conversion —
+        // they're guaranteed to fail again on background cold-extend retries.
+        // User-aborted (StopRequested) is NOT blacklisted: user may navigate
+        // back and want the image rendered properly.
+        if (effectiveInterrupt == ImageInterruptReason::Timeout ||
+            effectiveInterrupt == ImageInterruptReason::LowMemory) {
+          sessionFailedImageHashes().insert(srcHash);
+          LOG_INF(TAG, "[CONTENT][IMAGE] blacklisted for session src=%s reason=%s", result.resolvedPath.c_str(),
+                  interruptToReason(effectiveInterrupt, "convert-aborted"));
+        }
         setRetryable(interruptToReason(effectiveInterrupt, "convert-aborted"),
                      interruptToFailureClass(effectiveInterrupt, ImageFailureClass::ConvertAborted));
         return result;

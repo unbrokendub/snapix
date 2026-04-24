@@ -135,14 +135,22 @@ PageCache::PageCache(std::string cachePath) : cachePath_(std::move(cachePath)) {
 
 bool PageCache::ensureReadHandle() {
   if (readFile_) return true;
-  // SdFat's single-sector directory cache can return stale "not found" results
-  // immediately after another thread created a file. Retry with a short delay
-  // to let the cache settle.
-  for (int attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) {
-      delay(20);
-      LOG_DBG(TAG, "Retry ensureReadHandle attempt %d for %s", attempt + 1, cachePath_.c_str());
+  {
+    papyrix::spi::SharedBusLock lk;
+    if (SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
+      readFileSize_ = readFile_.size();
+      return true;
     }
+  }
+  // First open failed. SdFat's single-sector directory cache can return stale
+  // "not found" results immediately after another thread created a file.
+  // Only retry if pageCount_ > 0 (we previously loaded this cache, so the file
+  // *should* exist). For cold-load misses (e.g. TOC jump to a new spine), the
+  // file genuinely doesn't exist and retrying just wastes 40ms.
+  if (pageCount_ == 0) return false;
+  for (int attempt = 1; attempt < 3; attempt++) {
+    delay(10);
+    LOG_DBG(TAG, "Retry ensureReadHandle attempt %d for %s", attempt + 1, cachePath_.c_str());
     papyrix::spi::SharedBusLock lk;
     if (SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
       readFileSize_ = readFile_.size();

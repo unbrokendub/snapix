@@ -465,6 +465,17 @@ void FontManager::unloadReaderFonts() {
   unloadExternalFont();
 }
 
+bool FontManager::isReaderFontAlreadyActive(const char* familyName) const {
+  // Builtin font (empty/null name) or deferred .bin external font:
+  // both result in _activeReaderFontId == 0.  Same if active is also 0.
+  if (!familyName || !*familyName || isBinFont(familyName)) {
+    return _activeReaderFontId == 0;
+  }
+  // Custom .epdfont — compare hashes.  generateFontId is deterministic so
+  // the same name always produces the same id.
+  return _activeReaderFontId != 0 && _activeReaderFontId == generateFontId(familyName);
+}
+
 size_t FontManager::getCustomFontMemoryUsage() const {
   size_t total = 0;
   for (const auto& pair : loadedFamilies) {
