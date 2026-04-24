@@ -78,7 +78,7 @@ struct Settings {
   uint8_t shortPwrBtn = PowerIgnore;
   uint8_t orientation = Portrait;
   uint8_t fontSize = FontMedium;
-  uint8_t pagesPerRefresh = PPR15;
+  uint8_t pagesPerRefresh = PPR0;
   uint8_t sideButtonLayout = PrevNext;
   uint8_t autoSleepMinutes = Sleep10Min;
   uint8_t paragraphAlignment = AlignJustified;
@@ -97,7 +97,7 @@ struct Settings {
   char fileListSelectedName[128] = "";  // FileListState: last selected filename
   uint16_t fileListSelectedIndex = 0;   // FileListState: last selected index
   uint8_t frontButtonLayout = FrontBCLR;
-  uint8_t transitionFullRefresh = 1;    // Use clean refresh on first render after major state transitions
+  uint8_t transitionFullRefresh = 0;    // Use clean refresh on first render after major state transitions
   uint8_t pendingSleepWake = 0;         // 1 when device intentionally entered deep sleep and next boot should resume
   uint8_t sleepHoldTime = SleepHold1s;  // How long power button must be held to enter sleep (1-5 seconds)
   uint8_t bionicReading = 0;            // Bionic reading mode: bold first half of each word
