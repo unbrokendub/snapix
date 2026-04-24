@@ -980,21 +980,21 @@ int GfxRenderer::getSpaceWidth(const int fontId) const {
 }
 
 int GfxRenderer::getFontAscenderSize(const int fontId) const {
-  if (fontMap.count(fontId) == 0) {
+  auto it = fontMap.find(fontId);
+  if (it == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return 0;
   }
-
-  return fontMap.at(fontId).getData(EpdFontFamily::REGULAR)->ascender;
+  return it->second.getData(EpdFontFamily::REGULAR)->ascender;
 }
 
 int GfxRenderer::getLineHeight(const int fontId) const {
-  if (fontMap.count(fontId) == 0) {
+  auto it = fontMap.find(fontId);
+  if (it == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return 0;
   }
-
-  return fontMap.at(fontId).getData(EpdFontFamily::REGULAR)->advanceY;
+  return it->second.getData(EpdFontFamily::REGULAR)->advanceY;
 }
 
 int GfxRenderer::getEffectiveLineHeight(const int fontId) const {
@@ -1386,12 +1386,13 @@ int GfxRenderer::getThaiTextWidth(const int fontId, const char* text, const EpdF
     return 0;
   }
 
-  if (fontMap.count(fontId) == 0) {
+  auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return 0;
   }
 
-  const auto& font = fontMap.at(fontId);
+  const auto& font = fontIt->second;
   int totalWidth = 0;
 
   // Build clusters and sum their widths
@@ -1416,7 +1417,8 @@ int GfxRenderer::getThaiTextWidth(const int fontId, const char* text, const EpdF
 
 void GfxRenderer::drawThaiText(const int fontId, const int x, const int y, const char* text, const bool black,
                                const EpdFontFamily::Style style) const {
-  if (fontMap.count(fontId) == 0) {
+  auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return;
   }
@@ -1424,7 +1426,7 @@ void GfxRenderer::drawThaiText(const int fontId, const int x, const int y, const
   const int yPos = y + getFontAscenderSize(fontId);
   int xpos = x;
 
-  const auto font = fontMap.at(fontId);
+  const auto& font = fontIt->second;
 
   // Build Thai clusters from the text
   auto clusters = ThaiShaper::ThaiClusterBuilder::buildClusters(text);
@@ -1538,12 +1540,13 @@ void GfxRenderer::renderThaiCluster(const EpdFontFamily& fontFamily, const ThaiS
 int GfxRenderer::getArabicTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style) const {
   if (text == nullptr || *text == '\0') return 0;
 
-  if (fontMap.count(fontId) == 0) {
+  auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return 0;
   }
 
-  const auto& font = fontMap.at(fontId);
+  const auto& font = fontIt->second;
   int totalWidth = 0;
 
   auto shaped = ArabicShaper::shapeText(text);
@@ -1563,7 +1566,8 @@ int GfxRenderer::getArabicTextWidth(const int fontId, const char* text, const Ep
 
 void GfxRenderer::drawArabicText(const int fontId, const int x, const int y, const char* text, const bool black,
                                  const EpdFontFamily::Style style) const {
-  if (fontMap.count(fontId) == 0) {
+  auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
     LOG_ERR(TAG, "Font %d not found", fontId);
     return;
   }
@@ -1571,7 +1575,7 @@ void GfxRenderer::drawArabicText(const int fontId, const int x, const int y, con
   const int yPos = y + getFontAscenderSize(fontId);
   int xpos = x;
 
-  const auto& font = fontMap.at(fontId);
+  const auto& font = fontIt->second;
   auto shaped = ArabicShaper::shapeText(text);
 
   // Render each shaped codepoint (already in visual LTR order)
