@@ -30,8 +30,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pio-
 
-      - name: Install PlatformIO
-        run: pip install --upgrade platformio
+      - name: Install PlatformIO and esptool
+        run: pip install --upgrade platformio esptool
 
       - name: Build release firmware
         run: pio run -e release
@@ -48,7 +48,7 @@ jobs:
 
       - name: Create merged flashable binary
         run: |
-          python -m esptool --chip esp32c3 merge-bin \
+          esptool.py --chip esp32c3 merge_bin \
             --output "snapix-${{ steps.version.outputs.version }}-full.bin" \
             --flash_mode dio --flash_freq 80m --flash_size 16MB \
             0x0 .pio/build/release/bootloader.bin \
