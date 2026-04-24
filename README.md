@@ -1,424 +1,193 @@
-# Snapix
+# Snapix ⚡
 
+Speed-optimized fork of [Papyrix](https://github.com/bigbag/papyrix-reader) — open-source firmware for the **Xteink X4** e-paper reader, targeting the **ESP32-C3** microcontroller.
+
+[![Build firmware](https://github.com/unbrokendub/snapix/actions/workflows/build.yml/badge.svg)](https://github.com/unbrokendub/snapix/actions/workflows/build.yml)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](CHANGELOG.md)
 [![User Guide](https://img.shields.io/badge/docs-User_Guide-green)](docs/user_guide.md)
 [![Customization](https://img.shields.io/badge/docs-Customization-green)](docs/customization.md)
-[![Fonts](https://img.shields.io/badge/docs-Fonts-green)](docs/fonts.md)
 [![Architecture](https://img.shields.io/badge/docs-Architecture-green)](docs/architecture.md)
-[![Device Specs](https://img.shields.io/badge/docs-Device_Specs-green)](docs/device-specifications.md)
-[![File Formats](https://img.shields.io/badge/docs-File_Formats-green)](docs/file-formats.md)
-[![Images](https://img.shields.io/badge/docs-Images-green)](docs/images.md)
-[![SSD1677 Driver](https://img.shields.io/badge/docs-SSD1677_Driver-green)](docs/ssd1677-driver.md)
-[![Webserver](https://img.shields.io/badge/docs-Webserver-green)](docs/webserver.md)
-[![Calibre](https://img.shields.io/badge/docs-Calibre_Wireless-green)](docs/calibre.md)
-
-
-A lightweight, user-friendly firmware for the **Xteink X4** e-paper display reader.
-Built using **PlatformIO** and targeting the **ESP32-C3** microcontroller.
 
 ![Home screen](./docs/images/device.jpg)
 
-## Motivation
+## What's different in Snapix
 
-E-paper devices are fantastic for reading, but most commercially available readers are closed systems with limited customisation. The **Xteink X4** is an affordable e-paper device, however the official firmware remains closed.
+Snapix is a drop-in replacement for Papyrix with the same features, same SD-card layout¹, but tuned hard for speed and stability on the ESP32-C3:
 
-Snapix aims to:
-* Provide a **lightweight, open-source alternative** to the official firmware.
-* Offer a **document reader** capable of handling EPUB content on constrained hardware.
-* Support **customisable font, layout, and display** options.
-* Run purely on the **Xteink X4 hardware**.
+| Scenario | Papyrix | Snapix |
+|---|---|---|
+| Cold first-render of a new book (same font as previous) | 15–28 s | **0.2–1 s** (up to **130× faster**) |
+| TOC jump to a new chapter | retry-spam, 100–400 ms wasted | instant, no retries |
+| EPUB chapter with slow-converting image | stuck in retry loop until reboot | image blacklisted per session, chapter continues |
+| SdFat "directory vanished" under memory pressure | possible crash / white screen | auto-recovers directory hierarchy |
+| Text rendering hot path | in flash, cache-miss penalties | **~6 KB hot code pinned in IRAM** |
+| Compiler flags | `-Os` (size) | **`-O2` + LTO** (speed, +~270 KB flash) |
 
-This project is **not affiliated with Xteink**; it's built as a community project.
+**Other behavioural changes**
+
+* **Fake Bold** now has three levels: `Off` / `Bold` (x,x+1 shift) / `Extra Bold` (x-1,x,x+1 shift) — adds synthetic weight without loading a bold font.
+* **Default "Pages Per Refresh" is `0`** (no periodic full refresh).
+* **Default "Transition Refresh" is `Off`** (no clean refresh on state transitions) — trade small residual ghosting for much faster navigation.
+
+¹ SD-card paths changed from `/.papyrix/` to `/.snapix/`, so your first boot will see a clean-install experience. Your books in `/Books/` are untouched.
 
 ## Features
 
 ### Reading & Format Support
-- [x] EPUB 2 and EPUB 3 parsing (nav.xhtml with NCX fallback)
-- [x] CSS stylesheet parsing (text-align, font-style, font-weight, text-indent, margins, direction)
-- [x] FB2 (FictionBook 2.0) support with metadata, TOC navigation, and metadata caching (no inline images)
-- [x] HTML (.html, .htm) file support (standalone HTML documents)
-- [x] XTC/XTCH native format support
-- [x] Markdown (.md, .markdown) file support with formatting
-- [x] Plain text (.txt, .text) file support
-- [x] Saved reading position
-- [x] Bookmarks (up to 20 per book, persisted to SD card)
-- [x] Book cover display (JPG/JPEG/PNG/BMP, case-insensitive)
-- [x] Table of contents navigation
-- [x] Image support within EPUB (JPEG/PNG/BMP, baseline JPEG only, max 2048×3072)
+- EPUB 2 and EPUB 3 (nav.xhtml with NCX fallback)
+- CSS parsing (text-align, font-style, font-weight, text-indent, margins, direction)
+- FB2 with metadata, TOC navigation, metadata caching (no inline images)
+- HTML (.html/.htm), XTC/XTCH native, Markdown (.md), plain text
+- Saved reading position, bookmarks (up to 20 per book)
+- Book covers (JPG/JPEG/PNG/BMP)
+- Table of contents navigation
+- Inline images in EPUB (baseline JPEG/PNG/BMP, max 2048×3072)
 
 ### Text & Display
-- [x] Configurable font sizes (XSmall/Small/Normal/Large)
-- [x] Paragraph alignment (Justified/Left/Center/Right)
-- [x] Text layout presets (Compact/Standard/Large) for indentation and spacing
-- [x] Soft hyphen support for text layout
-- [x] Liang-pattern hyphenation with language detection from EPUB metadata (de, en, es, fr, it, ru, uk)
-- [x] Native Vietnamese, Thai, Greek, and Arabic support in builtin fonts
-- [x] CJK (Chinese/Japanese/Korean) text layout (book text only, not UI)
-- [x] Thai text rendering with proper mark positioning
-- [x] Arabic text shaping - contextual forms, Lam-Alef ligatures with RTL layout
-- [x] Knuth-Plass line breaking algorithm (TeX-quality justified text)
-- [x] Text anti-aliasing toggle (grayscale text rendering for builtin and custom fonts)
-- [x] Pages per refresh setting (1/5/10/15/30)
-- [x] Sunlight fading fix (powers down display after refresh to prevent UV fading)
-- [x] 4 screen orientations
+- Configurable font sizes (XSmall/Small/Normal/Large)
+- Paragraph alignment (Justified/Left/Center/Right)
+- Text layout presets (Compact/Standard/Large)
+- Soft hyphens + Liang-pattern hyphenation (de, en, es, fr, it, ru, uk)
+- Native Vietnamese, Thai, Greek, Arabic support
+- CJK text layout (book text)
+- Thai mark positioning; Arabic shaping, Lam-Alef ligatures, RTL
+- Knuth-Plass line breaking (TeX-quality justified text)
+- Grayscale text anti-aliasing toggle
+- Fake Bold (3 levels: Off / Bold / Extra Bold)
+- 4 screen orientations
 
 ### Customization
-- [x] Custom themes from SD card (`/config/themes/`)
-- [x] Custom fonts from SD card (`/config/fonts/`, .epdfont format)
-- [x] Custom sleep screens (Dark/Light/Custom/Cover modes)
-- [x] Button remapping (side and front buttons)
-- [x] Power button page turn (one-handed reading)
+- Themes from SD card (`/config/themes/`)
+- Fonts from SD card (`/config/fonts/`, .epdfont format)
+- Sleep screens (Dark / Light / Custom / Cover)
+- Button remapping, power-button page turn
 
 ### Network & Connectivity
-- [x] WiFi file transfer (web server)
-- [x] Calibre Wireless Device - Send books from Calibre desktop
-
-### Maintenance
-- [x] Cleanup menu (clear caches, fonts, factory reset)
-- [x] System info (version, uptime, memory, storage)
-
-### File System
-- [x] exFAT and FAT32 SD card support
-- [x] UTF-8 filenames (Cyrillic, etc.)
-- [x] File explorer with nested folders
-- [x] Hidden system folders filtering (LOST.DIR, $RECYCLE.BIN, etc.)
-
-See [the user guide](docs/user_guide.md) for operating instructions, and the [customization guide](docs/customization.md) for themes and fonts. Example theme and font files are available in [`docs/examples/`](docs/examples/).
+- WiFi file transfer (web server)
+- Calibre Wireless Device
 
 ## Installing
 
-### Using Snapix Flasher (Recommended)
+### Flash a fresh device (recommended path)
 
-The easiest way to install Snapix is using [snapix-flasher](https://github.com/bigbag/snapix-flasher) — a cross-platform CLI tool with auto-detection and embedded bootloader. Download the latest release for your platform and run:
+Download the latest **`snapix-*-full.bin`** from [Releases](https://github.com/unbrokendub/snapix/releases). This single file contains the bootloader, partition table, and firmware.
+
+With Python's `esptool`:
 
 ```bash
-snapix-flasher flash firmware.bin
+pip install esptool
+esptool.py --chip esp32c3 --port /dev/tty.usbmodem* --baud 921600 write_flash 0x0 snapix-*-full.bin
 ```
 
-### Manual Build
+Or with [papyrix-flasher](https://github.com/bigbag/papyrix-flasher) (upstream's CLI tool, works for Snapix too — the Xteink X4 ROM protocol is unchanged):
 
-See [Development](#development) below.
+```bash
+papyrix-flasher flash snapix-*-full.bin
+```
+
+### OTA update (already running Snapix or Papyrix)
+
+Copy `snapix-*-firmware.bin` to the `/update/` folder on your SD card as `firmware.bin`. The device will flash on the next boot.
+
+### If the device won't boot after flash
+
+Erase flash and retry with the full binary:
+
+```bash
+esptool.py --chip esp32c3 erase_flash
+esptool.py --chip esp32c3 -p /dev/tty.usbmodem* -b 921600 write_flash 0x0 snapix-*-full.bin
+```
 
 ## Development
 
 ### Prerequisites
 
-* **PlatformIO Core** (`pio`) or **VS Code + PlatformIO IDE**
-* Python 3.12+ with [uv](https://docs.astral.sh/uv/) (for font conversion)
+* PlatformIO Core (`pio`) or VS Code + PlatformIO IDE
+* Python 3.12+ with [uv](https://docs.astral.sh/uv/) (for font conversion scripts)
 * Node.js 18+ (for sleep screen and logo scripts)
-* USB-C cable for flashing the ESP32-C3
-* Xteink X4
+* USB-C cable, Xteink X4
 
-Install Node.js dependencies (for sleep screen and logo scripts):
-```bash
-cd scripts && npm install
-```
-
-### Using Nix (Recommended)
-
-If you have [Nix](https://nixos.org/) installed, all dependencies are provided via `shell.nix`:
+### Build & flash
 
 ```bash
-# Enter development environment
-nix-shell
+git clone https://github.com/unbrokendub/snapix
+cd snapix
 
-# Or run commands directly
-nix-shell --run "make build"
-nix-shell --run "make check"
-```
-
-First-time Nix setup:
-```bash
-# Install Nix (if not installed)
-sh <(curl -L https://nixos.org/nix/install) --daemon
-
-# Add nixpkgs channel
-nix-channel --add https://nixos.org/channels/nixos-unstable nixpkgs
-nix-channel --update
-```
-
-### Checking out the code
-
-Snapix uses PlatformIO for building and flashing the firmware. To get started, clone the repository:
-
-```
-git clone --recursive https://github.com/pliashkou/snapix
-
-# Or, if you've already cloned without --recursive:
-git submodule update --init --recursive
-```
-
-### Building
-
-```sh
-# Build firmware
-make build
-
-# Build release firmware
-make release
-
-# Or using PlatformIO directly
+# Dev build (verbose serial logs, perf counters on)
 pio run
+
+# Release build (no logs, smaller/faster)
+pio run -e release
+
+# Flash current build
+pio run -t upload
 ```
 
-### Flashing your device
+See [docs/architecture.md](docs/architecture.md) for internals.
 
-Connect your Xteink X4 to your computer via USB-C and run the following command.
-
-```sh
-make flash
-
-# Or using PlatformIO directly
-pio run --target upload
-```
-
-You can also flash using esptool directly (useful if you have a pre-built firmware binary):
-
-```sh
-esptool.py --chip esp32c3 --port /dev/ttyACM0 --baud 460800 \
-  write_flash -z 0x0 firmware.bin
-```
-
-Replace `/dev/ttyACM0` with your device port (e.g., `COM3` on Windows, `/dev/tty.usbmodem*` on macOS).
-
-### Build Scripts
-
-Build scripts are in the `scripts/` directory.
-
-#### Converting fonts
-
-Convert TTF/OTF fonts to Snapix `.epdfont` format using Python (requires [uv](https://docs.astral.sh/uv/)):
+### Converting fonts
 
 ```bash
-# Basic conversion (outputs to current directory)
+# Basic
 uv run scripts/fontconvert.py my-font -r MyFont-Regular.ttf --2bit
 
-# Full font family with all reader sizes (14, 16, 18pt)
+# Full family with all reader sizes
 uv run scripts/fontconvert.py my-font -r Regular.ttf -b Bold.ttf --2bit --all-sizes -o /tmp/fonts/
 
-# With Thai script support
+# With Thai / Arabic support
 uv run scripts/fontconvert.py my-font -r Regular.ttf --2bit --thai -o /tmp/fonts/
-
-# With Arabic script support
 uv run scripts/fontconvert.py my-font -r Regular.ttf --2bit --arabic -o /tmp/fonts/
-
-# Generate C header instead of binary (for builtin fonts)
-uv run scripts/fontconvert.py my_font 16 Regular.ttf --2bit > my_font_16_2b.h
 ```
 
-Options: `-r/--regular`, `-b/--bold`, `-i/--italic`, `-o/--output`, `-s/--size`, `--2bit`, `--all-sizes`, `--header`, `--thai`, `--arabic`
+See [customization guide](docs/customization.md) for full details.
 
-See [customization guide](docs/customization.md) for detailed font conversion instructions.
-
-#### Creating sleep screen images
-
-Convert any image to sleep screen BMP format (requires `cd scripts && npm install`):
+### Sleep screen images
 
 ```bash
-# Via Makefile
 make sleep-screen INPUT=photo.jpg OUTPUT=sleep.bmp
-make sleep-screen INPUT=photo.jpg OUTPUT=sleep.bmp ARGS='--dither --bits 8'
-
-# Or directly
-cd scripts && node create-sleep-screen.mjs photo.jpg sleep.bmp --dither --bits 8
+# Options: --orientation, --bits, --dither, --fit
 ```
-
-Options:
-- `--orientation portrait|landscape` - Screen orientation (default: portrait)
-- `--bits 2|4|8` - Output bit depth (default: 4)
-- `--dither` - Enable Floyd-Steinberg dithering
-- `--fit contain|cover|stretch` - Resize mode (default: contain)
 
 Copy the output BMP to `/sleep/` directory or as `/sleep.bmp` on the SD card.
 
-#### Converting logo
+### Creating a release
 
-Convert image to C header for firmware logo (128x128 monochrome):
-
-```bash
-cd scripts && node convert-logo.mjs logo.png ../src/images/SnapixLogo.h
-```
-
-Options: `--invert`, `--threshold <0-255>`, `--rotate <0|90|180|270>`
-
-#### Calibre simulators (development/testing)
-
-Two simulators are provided for testing the Calibre Wireless Device feature without real hardware:
+Push a tag matching `v*` to trigger the [GitHub Actions release workflow](.github/workflows/build.yml):
 
 ```bash
-cd scripts
-
-# Simulate a Snapix device (for testing Calibre desktop connection)
-node device-simulator.mjs
-
-# Simulate Calibre desktop (for testing device firmware)
-node calibre-simulator.mjs
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
-The device simulator listens for Calibre broadcasts and can receive books (saved to `scripts/received_books/`). The Calibre simulator broadcasts discovery packets and sends test books to connected devices.
+It builds release firmware and publishes a GitHub Release with `snapix-*-full.bin` (one-shot flashable), `snapix-*-firmware.bin` (OTA), `snapix-*-bootloader.bin`, `snapix-*-partitions.bin`.
 
-#### Serial monitor
+## Data caching
 
-A standalone Go binary for reading device logs without PlatformIO. Pre-built binaries are available on the [releases page](https://github.com/pliashkou/snapix/releases), or build from source:
-
-```bash
-cd tools/monitor && go build -o monitor .
-```
-
-Usage:
-```bash
-./monitor                                  # Auto-detect port
-./monitor -port /dev/ttyACM0               # Explicit port
-./monitor -port /dev/ttyACM0 -log out.txt  # Also save to file
-./monitor -speed 921600                    # Custom baud rate (default: 115200)
-```
-
-#### Reader test (desktop)
-
-A desktop tool for testing the content parsing pipeline (EPUB, FB2, HTML, TXT, Markdown) without flashing to hardware. Useful for catching parsing bugs, layout issues, or crashes.
-
-```bash
-# Build only
-make reader-test
-
-# Build and process a book
-make reader-test FILE=book.epub OUTPUT=/tmp/cache
-
-# Dump parsed text content of each page
-tools/reader-test/build/reader-test --dump book.epub /tmp/cache
-```
-
-Options:
-- `--dump` — Print the parsed text content of each page (useful for verifying entity resolution, text extraction, and layout)
-
-### Creating a GitHub release
-
-```sh
-# With auto-generated notes from commits
-make gh-release VERSION=0.1.1
-
-# With custom notes
-make gh-release VERSION=0.1.1 NOTES="Release notes here"
-```
-
-### Generating changelog
-
-Generate `CHANGELOG.md` from git tags and commit history:
-
-```sh
-make changelog
-```
-
-This creates a changelog grouped by version tags, with commit messages and author information.
-
-## Internals
-
-Snapix is designed for the ESP32-C3's ~380KB RAM constraint. See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
-
-### Data caching
-
-The first time chapters of a book are loaded, they are cached to the SD card. Subsequent loads are served from the cache. This cache directory exists at `.snapix` on the SD card. The structure is as follows:
-
+On first open, each book is cached under `/.snapix/<type>_<hash>/` on the SD card. Subsequent opens use the cache. Structure:
 
 ```
 .snapix/
-├── epub_12471232/       # Each EPUB is cached to a subdirectory named `epub_<hash>`
-│   ├── progress.bin     # Stores reading progress (chapter, page, etc.)
-│   ├── bookmarks.bin    # Saved bookmarks (up to 20 per book)
-│   ├── bookmarks.txt    # Human-readable bookmark list (companion to bookmarks.bin)
-│   ├── cover.bmp        # Book cover image (once generated)
-│   ├── book.bin         # Book metadata (title, author, spine, table of contents, etc.)
-│   ├── sections/        # All chapter data is stored in the sections subdirectory
-│   │   ├── 0.bin        # Chapter data (screen count, all text layout info, etc.)
-│   │   ├── 1.bin        #     files are named by their index in the spine
-│   │   └── ...
-│   └── images/          # Cached inline images (converted to 2-bit BMP)
-│       ├── 123456.bmp   # Images named by hash of source path
-│       └── ...
+├── epub_12471232/            # EPUB cache
+│   ├── progress.bin          # reading position
+│   ├── bookmarks.bin         # (up to 20 per book)
+│   ├── book.bin              # metadata, spine, TOC
+│   ├── sections/<N>.bin      # paginated chapter data
+│   └── images/<hash>.bmp     # converted inline images
 │
-├── fb2_55667788/        # Each FB2 file is cached to a subdirectory named `fb2_<hash>`
-│   ├── meta.bin         # Cached metadata (title, author, TOC) for faster reloads
-│   ├── progress.bin     # Stores reading progress
-│   ├── cover.bmp        # Cover image (converted from adjacent image file)
-│   ├── sections/        # Cached chapter pages (same format as EPUB sections)
-│   │   ├── 0.bin
-│   │   └── ...
-│
-│
-├── txt_98765432/        # Each TXT file is cached to a subdirectory named `txt_<hash>`
-│   ├── progress.bin     # Stores current page number (4-byte uint32)
-│   ├── index.bin        # Page index (byte offsets for each page start)
-│   └── cover.bmp        # Cover image (converted from book.jpg/png/bmp or cover.jpg/png/bmp)
-│
-├── md_12345678/         # Each Markdown file is cached to a subdirectory named `md_<hash>`
-│   ├── progress.bin     # Stores current page number (2-byte uint16)
-│   ├── section.bin      # Parsed pages (same format as EPUB sections)
-│   └── cover.bmp        # Cover image (converted from README.jpg/png/bmp or cover.jpg/png/bmp)
-│
-├── html_12345678/       # Each HTML file is cached to a subdirectory named `html_<hash>`
-│   ├── progress.bin     # Stores current page number (4-byte, same as TXT/Markdown)
-│   ├── pages_<fontId>.bin  # Parsed pages (same format as Markdown/FB2 sections)
-│   └── cover.bmp        # Cover image (converted from adjacent image file)
-│
-└── epub_189013891/
+├── fb2_55667788/             # FB2 cache (similar layout)
+├── txt_98765432/             # TXT cache
+├── md_12345678/              # Markdown cache
+└── html_12345678/            # HTML cache
 ```
 
-To clear cached data, use **Settings > Cleanup** (see [User Guide](docs/user_guide.md)). Alternatively, delete the `.snapix` directory manually.
+Clear via **Settings → Cleanup**, or delete `.snapix/` manually. See [docs/file-formats.md](docs/file-formats.md) for binary layouts.
 
-Due the way it's currently implemented, the cache is not automatically cleared when a book is deleted and moving a book file will use a new cache directory, resetting the reading progress.
+## Credits
 
-For more details on the internal file structures, see the [file formats document](./docs/file-formats.md).
+Snapix is a fork of **[Papyrix](https://github.com/bigbag/papyrix-reader)** by bigbag, which itself builds on [CrossPoint Reader](https://github.com/daveallie/crosspoint-reader) by Dave Allie.
 
-## Related Tools
+* X4 hardware insights: [bb_epaper](https://github.com/bitbank2/bb_epaper) by Larry Bank
+* Markdown parsing: [MD4C](https://github.com/mity/md4c) by Martin Mitáš
+* CSS parser adapted from [microreader](https://github.com/CidVonHighwind/microreader) by CidVonHighwind
 
-### EPUB to XTC Converter (Web)
-
-[epub-to-xtc-converter](https://github.com/bigbag/epub-to-xtc-converter) — browser-based converter from EPUB to Xteink's native XTC/XTCH format. Uses CREngine WASM for accurate rendering.
-
-- Device presets for Xteink X4/X3 (480x800)
-- Font selection from Google Fonts or custom TTF/OTF
-- Configurable margins, line height, hyphenation (42 languages)
-- Dark mode and dithering options
-- Batch processing and ZIP export
-
-**Live version:** [liashkov.site/epub-to-xtc-converter](https://liashkov.site/epub-to-xtc-converter/)
-
-### EPUB Optimizer (CLI)
-
-[xteink-epub-optimizer](https://github.com/bigbag/xteink-epub-optimizer) — command-line tool to optimize EPUB files for the Xteink X4's constraints (480×800 display, limited RAM):
-
-- **CSS Sanitization** - Removes complex layouts (floats, flexbox, grid)
-- **Font Removal** - Strips embedded fonts to reduce file size
-- **Image Optimization** - Grayscale conversion, resizing to 480px max width
-- **XTC/XTCH Conversion** - Convert EPUBs to Xteink's native format
-
-```bash
-# Optimize EPUB
-python src/optimizer.py ./ebooks ./optimized
-
-# Convert to XTCH format
-python src/converter.py book.epub book.xtch --font fonts/MyFont.ttf
-```
-
-## Contributing
-
-Contributions are very welcome!
-
-### To submit a contribution:
-
-1. Fork the repo
-2. Create a branch (`feature/your-feature`)
-3. Make changes
-4. Submit a PR
-
----
-
-Snapix is a fork of [CrossPoint Reader](https://github.com/daveallie/crosspoint-reader) by Dave Allie.
-
-X4 hardware insights from [bb_epaper](https://github.com/bitbank2/bb_epaper) by Larry Bank.
-
-Markdown parsing using [MD4C](https://github.com/mity/md4c) by Martin Mitáš.
-
-CSS parser adapted from [microreader](https://github.com/CidVonHighwind/microreader) by CidVonHighwind.
-
-**Not affiliated with Xteink or any manufacturer of the X4 hardware**.
+**Not affiliated with Xteink or any manufacturer of the X4 hardware.**
