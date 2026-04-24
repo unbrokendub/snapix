@@ -42,6 +42,8 @@ status_bar_offset_y = 0
 status_font =
 # Custom reader font for each size (leave empty for builtin)
 # Must match directory name under /config/fonts/ on SD card
+# Example: reader_font_xsmall = noto-serif-12
+reader_font_xsmall =
 # Example: reader_font_small = noto-serif-14
 reader_font_small =
 # Example: reader_font_medium = noto-serif-16

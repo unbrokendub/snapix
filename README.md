@@ -53,12 +53,15 @@ Snapix is a drop-in replacement for Papyrix with the same features, same SD-card
 - Thai mark positioning; Arabic shaping, Lam-Alef ligatures, RTL
 - Knuth-Plass line breaking (TeX-quality justified text)
 - Grayscale text anti-aliasing toggle
-- Fake Bold (3 levels: Off / Bold / Extra Bold)
+- **Bionic Reading** — bolds the first half of each word for faster scanning
+- **Fake Bold** (3 levels: Off / Bold / Extra Bold) — synthetic weight without loading a bold font
 - 4 screen orientations
 
 ### Customization
-- Themes from SD card (`/config/themes/`)
+- Themes from SD card (`/config/themes/`) — full control over colors, margins, item heights, fonts
 - Fonts from SD card (`/config/fonts/`, .epdfont format)
+- **Custom status-bar font** per theme via `status_font = <family>` in the `[fonts]` section
+- **Adjustable status bar vertical offset** via `status_bar_offset_y = <0-20>` in the `[layout]` section
 - Sleep screens (Dark / Light / Custom / Cover)
 - Button remapping, power-button page turn
 
