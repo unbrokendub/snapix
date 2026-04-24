@@ -10,9 +10,12 @@ class BatteryMonitor {
   uint16_t readPercentage() const;
 
   // Read the battery voltage in millivolts (accounts for divider)
+  // Cached for 1s — analogReadMilliVolts() takes 1-3ms due to ADC calibration,
+  // and battery voltage is a slow-changing signal.  Called multiple times per
+  // page render (status bar renders 1-4× with anti-aliasing).
   uint16_t readMillivolts() const;
 
-  // Read raw millivolts from ADC (doesn't account for divider)
+  // Read raw millivolts from ADC (doesn't account for divider, bypasses cache)
   uint16_t readRawMillivolts() const;
 
   // Read the battery voltage in volts (accounts for divider)
@@ -27,4 +30,10 @@ class BatteryMonitor {
  private:
   uint8_t _adcPin;
   float _dividerMultiplier;
+
+  // Cache for readMillivolts() — avoids repeated ADC calibration calls
+  // during status-bar renders in the same frame or within a few seconds.
+  static constexpr uint32_t CACHE_TTL_MS = 1000;
+  mutable uint16_t _cachedMillivolts = 0;
+  mutable uint32_t _cachedMillivoltsAtMs = 0;
 };

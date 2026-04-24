@@ -11,8 +11,14 @@ BatteryMonitor::BatteryMonitor(uint8_t adcPin, float dividerMultiplier)
 uint16_t BatteryMonitor::readPercentage() const { return percentageFromMillivolts(readMillivolts()); }
 
 uint16_t BatteryMonitor::readMillivolts() const {
+  const uint32_t now = millis();
+  if (_cachedMillivoltsAtMs != 0 && now - _cachedMillivoltsAtMs < CACHE_TTL_MS) {
+    return _cachedMillivolts;
+  }
   const uint16_t mv = readRawMillivolts();
-  return static_cast<uint16_t>(mv * _dividerMultiplier);
+  _cachedMillivolts = static_cast<uint16_t>(mv * _dividerMultiplier);
+  _cachedMillivoltsAtMs = now == 0 ? 1 : now;  // avoid 0 which is "never cached"
+  return _cachedMillivolts;
 }
 
 uint16_t BatteryMonitor::readRawMillivolts() const { return analogReadMilliVolts(_adcPin); }
