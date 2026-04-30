@@ -59,6 +59,8 @@ class MarkdownParser : public ContentParser {
   // Carries over unconsumed words from a text block that was
   // interrupted by a page-batch limit.
   std::unique_ptr<ParsedText> pendingTextBlock_;
+  std::unique_ptr<Page> pendingPage_;
+  int16_t pendingPageNextY_ = 0;
 
   // Parsing context passed through md_parser callback
   struct ParseContext {
@@ -73,6 +75,7 @@ class MarkdownParser : public ContentParser {
     bool hitMaxPages;
     uint16_t pagesCreated;
     uint16_t maxPages;
+    bool replayCurrentLine;
     std::function<void(std::unique_ptr<Page>)> onPageComplete;
 
     // Word buffer for building words

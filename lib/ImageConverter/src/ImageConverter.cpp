@@ -56,7 +56,11 @@ class BmpImageConverter : public ImageConverter {
     (void)config;
     uint8_t buffer[512];
     while (input.available()) {
-      size_t bytesRead = input.read(buffer, sizeof(buffer));
+      const int readResult = input.read(buffer, sizeof(buffer));
+      if (readResult <= 0) {
+        return false;
+      }
+      const size_t bytesRead = static_cast<size_t>(readResult);
       if (output.write(buffer, bytesRead) != bytesRead) {
         return false;
       }

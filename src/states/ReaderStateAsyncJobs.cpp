@@ -125,11 +125,12 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
     } else if (type == ContentType::Fb2 && !(shouldAbort && shouldAbort())) {
       auto* fb2Provider = coreRef.content.asFb2();
       uint32_t startOffset = 0;
+      uint32_t endOffset = 0;
       int startingSectionIndex = 0;
       if (resolveFb2SectionContext(fb2Provider, config, activeSpineForCache, &cachePath, &startOffset,
-                                   &startingSectionIndex)) {
+                                   &startingSectionIndex, &endOffset)) {
         if (!parser_ || parserSpineIndex_ != activeSpineForCache) {
-          parser_.reset(new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true));
+          parser_.reset(new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset));
           parserSpineIndex_ = activeSpineForCache;
         }
       } else {
@@ -448,10 +449,11 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
       } else if (type == ContentType::Fb2) {
         auto* fb2Provider = coreRef.content.asFb2();
         uint32_t startOffset = 0;
+        uint32_t endOffset = 0;
         int startingSectionIndex = 0;
         if (resolveFb2SectionContext(fb2Provider, config, request.targetSpine, nullptr, &startOffset,
-                                     &startingSectionIndex)) {
-          parser_.reset(new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true));
+                                     &startingSectionIndex, &endOffset)) {
+          parser_.reset(new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset));
           parserSpineIndex_ = request.targetSpine;
         } else {
           parser_.reset(new Fb2Parser(contentPath_, renderer_, config));

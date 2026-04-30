@@ -242,9 +242,15 @@ unsigned char JpegToBmpConverter::jpegReadCallback(unsigned char* pBuf, const un
     if (!busLock) {
       return PJPG_STREAM_READ_ERROR;
     }
-    context->bufferFilled = context->file.read(context->buffer, sizeof(context->buffer));
+    const int readResult = context->file.read(context->buffer, sizeof(context->buffer));
     context->bufferPos = 0;
 
+    if (readResult < 0) {
+      *pBytes_actually_read = 0;
+      return PJPG_STREAM_READ_ERROR;
+    }
+
+    context->bufferFilled = static_cast<size_t>(readResult);
     if (context->bufferFilled == 0) {
       // EOF or error
       *pBytes_actually_read = 0;

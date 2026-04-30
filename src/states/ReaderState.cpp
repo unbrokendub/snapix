@@ -327,11 +327,18 @@ ReaderState::GlobalPageMetrics ReaderState::resolveGlobalPageMetrics(Core& core,
     if (globalSectionPageMetricsInitialized_ && !globalSectionPageMetrics_.empty()) {
       const int clampedSpine = std::clamp(currentSpineIndex_, 0, static_cast<int>(globalSectionPageMetrics_.size()) - 1);
       uint32_t pagesBefore = 0;
+      bool totalIsExact = true;
       for (int i = 0; i < clampedSpine; ++i) {
-        pagesBefore += globalSectionPageMetrics_[static_cast<size_t>(i)].pages;
+        const auto& sectionMetric = globalSectionPageMetrics_[static_cast<size_t>(i)];
+        pagesBefore += sectionMetric.pages;
+        totalIsExact = totalIsExact && sectionMetric.exact;
+      }
+      for (int i = clampedSpine; i < static_cast<int>(globalSectionPageMetrics_.size()); ++i) {
+        totalIsExact = totalIsExact && globalSectionPageMetrics_[static_cast<size_t>(i)].exact;
       }
       metrics.currentPage = static_cast<int>(pagesBefore) + std::max(currentSectionPage_, 0) + 1;
       metrics.totalPages = static_cast<int>(std::max<uint32_t>(globalSectionPageMetricTotal_, metrics.currentPage));
+      metrics.totalIsExact = totalIsExact;
       return metrics;
     }
   }
@@ -341,11 +348,18 @@ ReaderState::GlobalPageMetrics ReaderState::resolveGlobalPageMetrics(Core& core,
     if (globalSectionPageMetricsInitialized_ && !globalSectionPageMetrics_.empty()) {
       const int clampedSpine = std::clamp(currentSpineIndex_, 0, static_cast<int>(globalSectionPageMetrics_.size()) - 1);
       uint32_t pagesBefore = 0;
+      bool totalIsExact = true;
       for (int i = 0; i < clampedSpine; ++i) {
-        pagesBefore += globalSectionPageMetrics_[static_cast<size_t>(i)].pages;
+        const auto& sectionMetric = globalSectionPageMetrics_[static_cast<size_t>(i)];
+        pagesBefore += sectionMetric.pages;
+        totalIsExact = totalIsExact && sectionMetric.exact;
+      }
+      for (int i = clampedSpine; i < static_cast<int>(globalSectionPageMetrics_.size()); ++i) {
+        totalIsExact = totalIsExact && globalSectionPageMetrics_[static_cast<size_t>(i)].exact;
       }
       metrics.currentPage = static_cast<int>(pagesBefore) + std::max(currentSectionPage_, 0) + 1;
       metrics.totalPages = static_cast<int>(std::max<uint32_t>(globalSectionPageMetricTotal_, metrics.currentPage));
+      metrics.totalIsExact = totalIsExact;
       return metrics;
     }
 
@@ -355,20 +369,22 @@ ReaderState::GlobalPageMetrics ReaderState::resolveGlobalPageMetrics(Core& core,
     const int estimatedTotalPages =
         std::max({static_cast<int>(core.content.pageCount()), std::max(currentSectionTotalPages, 0), 1});
 
-    int currentPage = std::max(currentSectionPage_, 0) + 1;
+    int resolvedPage = std::max(currentSectionPage_, 0) + 1;
     if (fb2 && currentSpineIndex_ >= 0 && currentSpineIndex_ < static_cast<int>(fb2->tocCount()) && fb2->getFileSize() > 0) {
       const Fb2::TocItem item = fb2->getTocItem(static_cast<uint16_t>(currentSpineIndex_));
       const uint64_t scaled = static_cast<uint64_t>(estimatedTotalPages) * item.sourceOffset;
-      currentPage = static_cast<int>(scaled / fb2->getFileSize()) + std::max(currentSectionPage_, 0) + 1;
+      resolvedPage = static_cast<int>(scaled / fb2->getFileSize()) + std::max(currentSectionPage_, 0) + 1;
     }
 
-    metrics.currentPage = std::max(1, currentPage);
+    metrics.currentPage = std::max(1, resolvedPage);
     metrics.totalPages = std::max(estimatedTotalPages, metrics.currentPage);
+    metrics.totalIsExact = false;
     return metrics;
   }
 
   metrics.currentPage = std::max(currentSectionPage_, 0) + 1;
   metrics.totalPages = static_cast<int>(std::max<uint32_t>(core.content.pageCount(), metrics.currentPage));
+  metrics.totalIsExact = !currentSectionIsPartial;
   return metrics;
 }
 
@@ -1025,11 +1041,11 @@ void ReaderState::navigateNext(Core& core) {
     return;
   }
 
-  if (deferPageTurnUntilCacheStops(1)) {
+  if (tryFastNavigateNext(core)) {
     return;
   }
 
-  if (tryFastNavigateNext(core)) {
+  if (deferPageTurnUntilCacheStops(1)) {
     return;
   }
 
@@ -1125,7 +1141,7 @@ bool ReaderState::tryFastNavigateNext(Core& core) {
 bool ReaderState::tryFastNavigateWithinCurrentCache(Core& core, const int direction) {
   (void)core;
 
-  if (isWorkerRunning() || !pageCache_ || pageCache_->isPartial()) {
+  if (isWorkerRunning() || !pageCache_) {
     return false;
   }
 
@@ -1530,10 +1546,6 @@ void ReaderState::renderCachedPage(Core& core) {
   }
 
   if (renderOverridePage_.matches(currentSpineIndex_, currentSectionPage_)) {
-    if (isWorkerRunning()) {
-      LOG_INF(TAG, "[ASYNC] forcing worker stop before detached warm render state=%d", static_cast<int>(workerState()));
-      stopBackgroundCaching();
-    }
     WarmPageSlot pageSlot = renderOverridePage_;
     renderOverridePage_.clear();
     LOG_DBG(TAG, "Rendered via detached warm page spine=%d page=%d", currentSpineIndex_, currentSectionPage_);
@@ -1788,6 +1800,10 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
 
 void ReaderState::renderStatusBar(Core& core, int marginRight, int marginBottom, int marginLeft, int totalPages,
                                   bool isPartial) {
+  if (core.settings.statusBar == Settings::StatusNone) {
+    return;
+  }
+
   const Theme& theme = THEME_MANAGER.current();
 
   // Build status bar data
@@ -1822,7 +1838,7 @@ void ReaderState::renderStatusBar(Core& core, int marginRight, int marginBottom,
   const GlobalPageMetrics metrics = resolveGlobalPageMetrics(core, totalPages, isPartial);
   data.currentPage = metrics.currentPage;
   data.totalPages = metrics.totalPages;
-  data.isPartial = data.totalPages <= 0;
+  data.isPartial = data.totalPages <= 0 || !metrics.totalIsExact;
 
   ui::readerStatusBar(renderer_, theme, marginLeft, marginRight, marginBottom, data);
 }

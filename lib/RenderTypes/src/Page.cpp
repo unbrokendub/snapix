@@ -77,7 +77,7 @@ IRAM_ATTR void Page::render(GfxRenderer& renderer, const int fontId, const int x
   }
 }
 
-IRAM_ATTR void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
+void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
   // Batch glyph warming across the entire page.  Per-line warming caused
   // LRU thrashing in the external font cache (~80 entries) when Cyrillic /
   // CJK pages had 100+ unique codepoints split across many words; cold

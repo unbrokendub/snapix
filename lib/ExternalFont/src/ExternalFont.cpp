@@ -232,8 +232,8 @@ bool ExternalFont::readGlyphAtOffset(uint32_t offset, uint8_t* buffer) {
     return false;
   }
 
-  size_t bytesRead = _fontFile.read(buffer, _bytesPerChar);
-  if (bytesRead != _bytesPerChar) {
+  const int bytesRead = _fontFile.read(buffer, _bytesPerChar);
+  if (bytesRead != static_cast<int>(_bytesPerChar)) {
     // May be end of file or other error, fill with zeros
     memset(buffer, 0, _bytesPerChar);
   }
@@ -365,24 +365,39 @@ void ExternalFont::preloadGlyphs(const uint32_t* codepoints, size_t count) {
     return;
   }
 
-  // Create a sorted copy for sequential SD card access.
-  // Sorting first lets us dedupe before applying cache-size limits.
-  std::vector<uint32_t> sorted(codepoints, codepoints + count);
-  std::sort(sorted.begin(), sorted.end());
-
-  // Remove duplicates
-  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
-  if (sorted.size() > static_cast<size_t>(CACHE_SIZE)) {
-    sorted.resize(CACHE_SIZE);
+  bool inputSortedUnique = true;
+  for (size_t i = 1; i < count; ++i) {
+    if (codepoints[i - 1] >= codepoints[i]) {
+      inputSortedUnique = false;
+      break;
+    }
   }
 
-  LOG_INF(TAG, "Preloading %zu unique glyphs", sorted.size());
+  std::vector<uint32_t> sorted;
+  const uint32_t* glyphs = codepoints;
+  size_t glyphCount = count;
+  if (!inputSortedUnique) {
+    // Create a sorted copy for sequential SD card access.
+    // Sorting first lets us dedupe before applying cache-size limits.
+    sorted.assign(codepoints, codepoints + count);
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    glyphs = sorted.data();
+    glyphCount = sorted.size();
+  }
+
+  if (glyphCount > static_cast<size_t>(CACHE_SIZE)) {
+    glyphCount = CACHE_SIZE;
+  }
+
+  LOG_INF(TAG, "Preloading %zu unique glyphs", glyphCount);
   const unsigned long startTime = millis();
 
   size_t loaded = 0;
   size_t skipped = 0;
 
-  for (uint32_t cp : sorted) {
+  for (size_t i = 0; i < glyphCount; ++i) {
+    const uint32_t cp = glyphs[i];
     // Skip if already in cache
     if (findInCache(cp) >= 0) {
       skipped++;

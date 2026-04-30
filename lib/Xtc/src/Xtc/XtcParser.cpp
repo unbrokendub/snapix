@@ -88,8 +88,8 @@ void XtcParser::close() {
 
 XtcError XtcParser::readHeader() {
   // Read first 56 bytes of header
-  size_t bytesRead = m_file.read(reinterpret_cast<uint8_t*>(&m_header), sizeof(XtcHeader));
-  if (bytesRead != sizeof(XtcHeader)) {
+  const int bytesRead = m_file.read(reinterpret_cast<uint8_t*>(&m_header), sizeof(XtcHeader));
+  if (bytesRead != static_cast<int>(sizeof(XtcHeader))) {
     return XtcError::READ_ERROR;
   }
 
@@ -357,15 +357,15 @@ size_t XtcParser::loadPage(uint32_t pageIndex, uint8_t* buffer, size_t bufferSiz
 
   // Seek to page data
   if (!m_file.seek(page.offset)) {
-    LOG_ERR(TAG, "Failed to seek to page %u at offset %lu", pageIndex, page.offset);
+    LOG_ERR(TAG, "Failed to seek to page %u at offset %lu", pageIndex, static_cast<unsigned long>(page.offset));
     m_lastError = XtcError::READ_ERROR;
     return 0;
   }
 
   // Read page header (XTG for 1-bit, XTH for 2-bit - same structure)
   XtgPageHeader pageHeader;
-  size_t headerRead = m_file.read(reinterpret_cast<uint8_t*>(&pageHeader), sizeof(XtgPageHeader));
-  if (headerRead != sizeof(XtgPageHeader)) {
+  const int headerRead = m_file.read(reinterpret_cast<uint8_t*>(&pageHeader), sizeof(XtgPageHeader));
+  if (headerRead != static_cast<int>(sizeof(XtgPageHeader))) {
     LOG_ERR(TAG, "Failed to read page header for page %u", pageIndex);
     m_lastError = XtcError::READ_ERROR;
     return 0;
@@ -393,21 +393,22 @@ size_t XtcParser::loadPage(uint32_t pageIndex, uint8_t* buffer, size_t bufferSiz
 
   // Check buffer size
   if (bufferSize < bitmapSize) {
-    LOG_ERR(TAG, "Buffer too small: need %u, have %u", bitmapSize, bufferSize);
+    LOG_ERR(TAG, "Buffer too small: need %u, have %u", static_cast<unsigned>(bitmapSize),
+            static_cast<unsigned>(bufferSize));
     m_lastError = XtcError::MEMORY_ERROR;
     return 0;
   }
 
   // Read bitmap data
-  size_t bytesRead = m_file.read(buffer, bitmapSize);
-  if (bytesRead != bitmapSize) {
-    LOG_ERR(TAG, "Page read error: expected %u, got %u", bitmapSize, bytesRead);
+  const int readResult = m_file.read(buffer, bitmapSize);
+  if (readResult != static_cast<int>(bitmapSize)) {
+    LOG_ERR(TAG, "Page read error: expected %u, got %d", static_cast<unsigned>(bitmapSize), readResult);
     m_lastError = XtcError::READ_ERROR;
     return 0;
   }
 
   m_lastError = XtcError::OK;
-  return bytesRead;
+  return static_cast<size_t>(readResult);
 }
 
 XtcError XtcParser::loadPageStreaming(uint32_t pageIndex,
@@ -433,9 +434,9 @@ XtcError XtcParser::loadPageStreaming(uint32_t pageIndex,
 
   // Read and skip page header (XTG for 1-bit, XTH for 2-bit)
   XtgPageHeader pageHeader;
-  size_t headerRead = m_file.read(reinterpret_cast<uint8_t*>(&pageHeader), sizeof(XtgPageHeader));
+  const int headerRead = m_file.read(reinterpret_cast<uint8_t*>(&pageHeader), sizeof(XtgPageHeader));
   const uint32_t expectedMagic = (m_bitDepth == 2) ? XTH_MAGIC : XTG_MAGIC;
-  if (headerRead != sizeof(XtgPageHeader) || pageHeader.magic != expectedMagic) {
+  if (headerRead != static_cast<int>(sizeof(XtgPageHeader)) || pageHeader.magic != expectedMagic) {
     return XtcError::READ_ERROR;
   }
 
@@ -455,12 +456,13 @@ XtcError XtcParser::loadPageStreaming(uint32_t pageIndex,
 
   while (totalRead < bitmapSize) {
     size_t toRead = std::min(chunkSize, bitmapSize - totalRead);
-    size_t bytesRead = m_file.read(chunk.data(), toRead);
+    const int readResult = m_file.read(chunk.data(), toRead);
 
-    if (bytesRead == 0) {
+    if (readResult <= 0) {
       return XtcError::READ_ERROR;
     }
 
+    const size_t bytesRead = static_cast<size_t>(readResult);
     callback(chunk.data(), bytesRead, totalRead);
     totalRead += bytesRead;
   }
@@ -475,10 +477,10 @@ bool XtcParser::isValidXtcFile(const char* filepath) {
   }
 
   uint32_t magic = 0;
-  size_t bytesRead = file.read(reinterpret_cast<uint8_t*>(&magic), sizeof(magic));
+  const int bytesRead = file.read(reinterpret_cast<uint8_t*>(&magic), sizeof(magic));
   file.close();
 
-  if (bytesRead != sizeof(magic)) {
+  if (bytesRead != static_cast<int>(sizeof(magic))) {
     return false;
   }
 

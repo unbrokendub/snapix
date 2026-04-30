@@ -184,7 +184,14 @@ bool Epub::parseTocNcxFile() const {
   }
 
   while (tempNcxFile.available()) {
-    const auto readSize = tempNcxFile.read(ncxBuffer, 1024);
+    const int readResult = tempNcxFile.read(ncxBuffer, 1024);
+    if (readResult <= 0) {
+      LOG_ERR(TAG, "Could not read toc ncx data");
+      free(ncxBuffer);
+      tempNcxFile.close();
+      return false;
+    }
+    const size_t readSize = static_cast<size_t>(readResult);
     const auto processedSize = ncxParser.write(ncxBuffer, readSize);
 
     if (processedSize != readSize) {
@@ -246,7 +253,14 @@ bool Epub::parseTocNavFile() const {
   }
 
   while (tempNavFile.available()) {
-    const auto readSize = tempNavFile.read(navBuffer, 1024);
+    const int readResult = tempNavFile.read(navBuffer, 1024);
+    if (readResult <= 0) {
+      LOG_ERR(TAG, "Could not read toc nav data");
+      free(navBuffer);
+      tempNavFile.close();
+      return false;
+    }
+    const size_t readSize = static_cast<size_t>(readResult);
     const auto processedSize = navParser.write(navBuffer, readSize);
 
     if (processedSize != readSize) {

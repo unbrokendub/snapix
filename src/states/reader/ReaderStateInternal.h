@@ -23,7 +23,8 @@ inline bool fb2UsesSectionNavigation(const Fb2Provider* provider) {
 }
 
 inline bool resolveFb2SectionContext(const Fb2Provider* provider, const RenderConfig& config, const int tocIndex,
-                                     std::string* cachePath, uint32_t* startOffset, int* startingSectionIndex) {
+                                     std::string* cachePath, uint32_t* startOffset, int* startingSectionIndex,
+                                     uint32_t* endOffset = nullptr) {
   if (!fb2UsesSectionNavigation(provider) || tocIndex < 0 || tocIndex >= static_cast<int>(provider->tocCount())) {
     return false;
   }
@@ -41,6 +42,15 @@ inline bool resolveFb2SectionContext(const Fb2Provider* provider, const RenderCo
   }
   if (startingSectionIndex) {
     *startingSectionIndex = item.sectionIndex;
+  }
+  if (endOffset) {
+    *endOffset = 0;
+    if (tocIndex + 1 < static_cast<int>(provider->tocCount())) {
+      const Fb2::TocItem nextItem = provider->getFb2()->getTocItem(static_cast<uint16_t>(tocIndex + 1));
+      if (nextItem.sectionIndex >= 0 && nextItem.sourceOffset > item.sourceOffset) {
+        *endOffset = nextItem.sourceOffset;
+      }
+    }
   }
   return true;
 }

@@ -1118,13 +1118,13 @@ bool ChapterHtmlSlimParser::parseLoop() {
       return false;
     }
 
-    size_t len;
+    int readResult;
     {
       snapix::spi::SharedBusLock busLock;
-      len = file_.read(static_cast<uint8_t*>(buf), kReadChunkSize);
+      readResult = file_.read(static_cast<uint8_t*>(buf), kReadChunkSize);
     }
 
-    if (len == 0) {
+    if (readResult <= 0) {
       LOG_ERR(TAG, "File read error");
       cleanupParser();
       return false;
@@ -1132,6 +1132,7 @@ bool ChapterHtmlSlimParser::parseLoop() {
 
     // Strip data URIs BEFORE expat parses the buffer to prevent OOM on large embedded images.
     // This replaces src="data:image/..." with src="#" so expat never sees the huge base64 string.
+    size_t len = static_cast<size_t>(readResult);
     const size_t originalLen = len;
     len = dataUriStripper_.strip(static_cast<char*>(buf), len, kReadChunkSize + kDataUriPrefixSize);
 

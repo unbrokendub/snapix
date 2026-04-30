@@ -53,39 +53,45 @@ bool Html::load() {
     auto* buf = new (std::nothrow) char[SCAN_SIZE + 1];
     if (buf) {
       size_t toRead = fileSize < SCAN_SIZE ? fileSize : SCAN_SIZE;
-      size_t bytesRead = file.read(reinterpret_cast<uint8_t*>(buf), toRead);
-      buf[bytesRead] = '\0';
+      const int readResult = file.read(reinterpret_cast<uint8_t*>(buf), toRead);
 
-      // Case-insensitive search for <title>...</title>
-      // Convert to lowercase for searching
-      auto* lower = new (std::nothrow) char[bytesRead + 1];
-      if (lower) {
-        for (size_t i = 0; i < bytesRead; i++) {
-          lower[i] = static_cast<char>(tolower(static_cast<unsigned char>(buf[i])));
-        }
-        lower[bytesRead] = '\0';
+      if (readResult > 0) {
+        const size_t bytesRead = static_cast<size_t>(readResult);
+        buf[bytesRead] = '\0';
 
-        const char* titleStart = strstr(lower, "<title>");
-        if (titleStart) {
-          size_t startOffset = static_cast<size_t>(titleStart - lower) + 7;  // skip "<title>"
-          const char* titleEnd = strstr(lower + startOffset, "</title>");
-          if (titleEnd) {
-            size_t endOffset = static_cast<size_t>(titleEnd - lower);
-            if (endOffset > startOffset) {
-              size_t len = endOffset - startOffset;
-              if (len > 255) len = 255;
-              // Use original case from buf
-              std::string extracted(buf + startOffset, len);
-              // Trim whitespace
-              size_t first = extracted.find_first_not_of(" \t\r\n");
-              size_t last = extracted.find_last_not_of(" \t\r\n");
-              if (first != std::string::npos) {
-                title = extracted.substr(first, last - first + 1);
+        // Case-insensitive search for <title>...</title>
+        // Convert to lowercase for searching
+        auto* lower = new (std::nothrow) char[bytesRead + 1];
+        if (lower) {
+          for (size_t i = 0; i < bytesRead; i++) {
+            lower[i] = static_cast<char>(tolower(static_cast<unsigned char>(buf[i])));
+          }
+          lower[bytesRead] = '\0';
+
+          const char* titleStart = strstr(lower, "<title>");
+          if (titleStart) {
+            size_t startOffset = static_cast<size_t>(titleStart - lower) + 7;  // skip "<title>"
+            const char* titleEnd = strstr(lower + startOffset, "</title>");
+            if (titleEnd) {
+              size_t endOffset = static_cast<size_t>(titleEnd - lower);
+              if (endOffset > startOffset) {
+                size_t len = endOffset - startOffset;
+                if (len > 255) len = 255;
+                // Use original case from buf
+                std::string extracted(buf + startOffset, len);
+                // Trim whitespace
+                size_t first = extracted.find_first_not_of(" \t\r\n");
+                size_t last = extracted.find_last_not_of(" \t\r\n");
+                if (first != std::string::npos) {
+                  title = extracted.substr(first, last - first + 1);
+                }
               }
             }
           }
+          delete[] lower;
         }
-        delete[] lower;
+      } else if (readResult < 0) {
+        LOG_ERR(TAG, "Failed to read title scan buffer");
       }
       delete[] buf;
     }

@@ -140,6 +140,7 @@ class ReaderState : public State {
   struct GlobalPageMetrics {
     int currentPage = 1;
     int totalPages = 0;
+    bool totalIsExact = true;
   };
   struct SectionPageMetric {
     uint16_t pages = 0;

@@ -18,7 +18,7 @@
 #include "ContentParser.h"
 
 namespace {
-constexpr uint8_t CACHE_FILE_VERSION = 22;  // v22: add fakeBold to config header
+constexpr uint8_t CACHE_FILE_VERSION = 23;  // v23: invalidate overlapping FB2 section caches
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 #ifndef SNAPIX_PERF_LOG
@@ -180,6 +180,10 @@ std::shared_ptr<Page> PageCache::getResidentPage(uint16_t pageNum) {
 
 void PageCache::putResidentPage(uint16_t pageNum, std::shared_ptr<Page> page) {
   if (!page) return;
+
+  if (residentPages_.capacity() < RESIDENT_PAGE_LIMIT) {
+    residentPages_.reserve(RESIDENT_PAGE_LIMIT);
+  }
 
   for (auto& entry : residentPages_) {
     if (entry.pageNum == pageNum) {
@@ -408,6 +412,7 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
   serialization::readPod(readFile, fileConfig.hyphenation);
   serialization::readPod(readFile, fileConfig.showImages);
   serialization::readPod(readFile, fileConfig.bionicReading);
+  serialization::readPod(readFile, fileConfig.fakeBold);
   serialization::readPod(readFile, fileConfig.viewportWidth);
   serialization::readPod(readFile, fileConfig.viewportHeight);
   if (config != fileConfig) {
@@ -828,12 +833,36 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
       return pageCount_ > pagesBefore;
     }
 
-    isPartial_ = parser.hasMoreContent();
-
     if (!parseOk && pageCount_ == pagesBefore) {
       closeFileProtected(file_);
       LOG_ERR(TAG, "[CACHE] hot extend failed path=%s pagesBefore=%u", cachePath_.c_str(),
               static_cast<unsigned>(pagesBefore));
+      return false;
+    }
+
+    isPartial_ = parser.hasMoreContent();
+
+    if (pageCount_ == pagesBefore) {
+      if (!isPartial_) {
+        if (!writeLut(lut)) {
+          closeFileProtected(file_);
+          SdMan.remove(cachePath_.c_str());
+          return false;
+        }
+        {
+          snapix::spi::SharedBusLock lk;
+          file_.sync();
+        }
+        closeFileProtected(file_);
+        LOG_INF(TAG, "[CACHE] hot extend reached end without new pages path=%s pages=%u", cachePath_.c_str(),
+                static_cast<unsigned>(pageCount_));
+        return true;
+      }
+
+      closeFileProtected(file_);
+      parser.reset();
+      LOG_INF(TAG, "[CACHE] hot extend stalled without page growth path=%s pages=%u", cachePath_.c_str(),
+              static_cast<unsigned>(pageCount_));
       return false;
     }
 

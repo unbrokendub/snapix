@@ -9,6 +9,7 @@
 #include "ContentParser.h"
 
 class GfxRenderer;
+class Page;
 class ParsedText;
 
 /**
@@ -27,6 +28,8 @@ class PlainTextParser : public ContentParser {
   // Carries over unconsumed words from a paragraph that was
   // interrupted by a page-batch limit.
   std::unique_ptr<ParsedText> pendingBlock_;
+  std::unique_ptr<Page> pendingPage_;
+  int16_t pendingPageY_ = 0;
 
  public:
   PlainTextParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config);

@@ -12,6 +12,7 @@ void ReaderNavigationController::resetSession() {
   powerPressStartedMs_ = 0;
   queuedPendingEpubTurn_ = 0;
   queuedPendingEpubTurnQueuedMs_ = 0;
+  queuedPendingEpubTurnHasQueuedMs_ = false;
   lastCachePreemptRequestedMs_ = 0;
   deferredTurnAwaitingWorkerIdle_ = false;
   deferredTurnIdleLogged_ = false;
@@ -19,8 +20,9 @@ void ReaderNavigationController::resetSession() {
 
 void ReaderNavigationController::enqueuePendingPageTurn(const int direction, const char* reason, const int workerState) {
   queuedPendingEpubTurn_ += direction > 0 ? 1 : -1;
-  if (queuedPendingEpubTurnQueuedMs_ == 0) {
+  if (!queuedPendingEpubTurnHasQueuedMs_) {
     queuedPendingEpubTurnQueuedMs_ = millis();
+    queuedPendingEpubTurnHasQueuedMs_ = true;
   }
   LOG_INF(TAG, "[INPUT] deferred page-turn dir=%d queue=%d reason=%s workerState=%d preemptAge=%lu", direction,
           queuedPendingEpubTurn_, reason ? reason : "unknown", workerState,
@@ -50,7 +52,7 @@ void ReaderNavigationController::noteWorkerIdle(const bool workerRunning) {
 
   deferredTurnIdleLogged_ = true;
   const uint32_t queuedForMs =
-      queuedPendingEpubTurnQueuedMs_ == 0 ? 0 : static_cast<uint32_t>(millis() - queuedPendingEpubTurnQueuedMs_);
+      !queuedPendingEpubTurnHasQueuedMs_ ? 0 : static_cast<uint32_t>(millis() - queuedPendingEpubTurnQueuedMs_);
   LOG_INF(TAG, "[INPUT] deferred page-turn resumed queue=%d wait=%lu", queuedPendingEpubTurn_,
           static_cast<unsigned long>(queuedForMs));
 }
@@ -70,9 +72,10 @@ bool ReaderNavigationController::tryConsumeQueuedTurn(const bool workerRunning, 
   queuedTurn = queuedPendingEpubTurn_ > 0 ? 1 : -1;
   queuedPendingEpubTurn_ -= queuedTurn;
   queuedForMs =
-      queuedPendingEpubTurnQueuedMs_ == 0 ? 0 : static_cast<uint32_t>(millis() - queuedPendingEpubTurnQueuedMs_);
+      !queuedPendingEpubTurnHasQueuedMs_ ? 0 : static_cast<uint32_t>(millis() - queuedPendingEpubTurnQueuedMs_);
   if (queuedPendingEpubTurn_ == 0) {
     queuedPendingEpubTurnQueuedMs_ = 0;
+    queuedPendingEpubTurnHasQueuedMs_ = false;
     lastCachePreemptRequestedMs_ = 0;
     deferredTurnAwaitingWorkerIdle_ = false;
     deferredTurnIdleLogged_ = false;

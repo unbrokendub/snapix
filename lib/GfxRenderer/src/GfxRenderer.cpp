@@ -326,7 +326,7 @@ void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* te
   drawText(fontId, x, y, text, black, style);
 }
 
-IRAM_ATTR void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, const EpdFontFamily::Style style) const {
   if (!text || !*text) return;
 
   std::vector<uint32_t> codepoints;
@@ -348,8 +348,8 @@ IRAM_ATTR void GfxRenderer::warmTextGlyphs(const int fontId, const char* text, c
   warmCodepointsBatch(fontId, codepoints.data(), codepoints.size(), style);
 }
 
-IRAM_ATTR void GfxRenderer::warmCodepointsBatch(const int fontId, const uint32_t* codepoints, const size_t count,
-                                                const EpdFontFamily::Style style) const {
+void GfxRenderer::warmCodepointsBatch(const int fontId, const uint32_t* codepoints, const size_t count,
+                                      const EpdFontFamily::Style style) const {
   if (!codepoints || count == 0) return;
 
   StreamingEpdFont* streamingFont = getStreamingFont(fontId, style);

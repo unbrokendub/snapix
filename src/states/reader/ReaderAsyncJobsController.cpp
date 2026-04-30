@@ -155,8 +155,14 @@ bool ReaderAsyncJobsController::enqueue(const Command& cmd) {
   if (!workerTask_.isRunning() && !startWorker()) {
     return false;
   }
+  if (stateEvents_) {
+    xEventGroupClearBits(stateEvents_, EVENT_IDLE);
+  }
   if (xQueueSend(commandQueue_, &cmd, 0) != pdTRUE) {
     LOG_ERR(TAG, "[ASYNC] command queue full type=%d", static_cast<int>(cmd.type));
+    if (!isJobRunning() && stateEvents_) {
+      xEventGroupSetBits(stateEvents_, EVENT_IDLE);
+    }
     return false;
   }
   return true;

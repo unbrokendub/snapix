@@ -362,6 +362,9 @@ bool ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
   if (shouldAbort && shouldAbort()) {
     return false;
   }
+  if (lineBreakIndices.empty()) {
+    return false;
+  }
 
   const size_t lineCount = includeLastLine ? lineBreakIndices.size() : lineBreakIndices.size() - 1;
 

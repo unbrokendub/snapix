@@ -11,7 +11,7 @@ int main() {
   {
     snapix::drivers::Cpu cpu;
     runner.expectTrue(!cpu.isThrottled(), "default: not throttled");
-    runner.expectEq(uint8_t(10), cpu.loopDelayMs(), "default: active loop delay 10ms");
+    runner.expectEq(uint8_t(2), cpu.loopDelayMs(), "default: active loop delay 2ms");
   }
 
   // === throttle() drops frequency and changes delay ===
@@ -23,7 +23,7 @@ int main() {
 
     runner.expectTrue(cpu.isThrottled(), "after throttle: isThrottled true");
     runner.expectEq(uint32_t(10), g_mockCpuFreqMhz, "after throttle: freq is 10 MHz");
-    runner.expectEq(uint8_t(50), cpu.loopDelayMs(), "after throttle: idle loop delay 50ms");
+    runner.expectEq(uint8_t(20), cpu.loopDelayMs(), "after throttle: idle loop delay 20ms");
   }
 
   // === unthrottle() restores frequency ===
@@ -36,7 +36,7 @@ int main() {
 
     runner.expectTrue(!cpu.isThrottled(), "after unthrottle: isThrottled false");
     runner.expectEq(uint32_t(160), g_mockCpuFreqMhz, "after unthrottle: freq is 160 MHz");
-    runner.expectEq(uint8_t(10), cpu.loopDelayMs(), "after unthrottle: active loop delay 10ms");
+    runner.expectEq(uint8_t(2), cpu.loopDelayMs(), "after unthrottle: active loop delay 2ms");
   }
 
   // === throttle() is idempotent ===

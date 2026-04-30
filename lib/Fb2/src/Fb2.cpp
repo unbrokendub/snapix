@@ -634,8 +634,8 @@ size_t Fb2::readContent(uint8_t* buffer, size_t offset, size_t length) const {
     file.seek(offset);
   }
 
-  const size_t bytesRead = file.read(buffer, length);
+  const int readResult = file.read(buffer, length);
   file.close();
 
-  return bytesRead;
+  return readResult > 0 ? static_cast<size_t>(readResult) : 0;
 }

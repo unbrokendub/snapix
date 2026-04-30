@@ -610,8 +610,9 @@ void SnapixWebServer::handleDownload() {
 
   uint8_t buf[512];
   while (file.available()) {
-    size_t bytesRead = file.read(buf, sizeof(buf));
-    if (bytesRead == 0) break;
+    const int readResult = file.read(buf, sizeof(buf));
+    if (readResult <= 0) break;
+    const size_t bytesRead = static_cast<size_t>(readResult);
     server_->client().write(buf, bytesRead);
   }
 

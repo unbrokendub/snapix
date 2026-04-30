@@ -25,6 +25,8 @@ void PlainTextParser::reset() {
   hasMore_ = true;
   isRtl_ = false;
   pendingBlock_.reset();
+  pendingPage_.reset();
+  pendingPageY_ = 0;
 }
 
 bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages,
@@ -56,6 +58,13 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
     currentPageY = 0;
   };
 
+  auto preservePendingPage = [&]() {
+    if (currentPage && !currentPage->elements.empty()) {
+      pendingPage_ = std::move(currentPage);
+      pendingPageY_ = currentPageY;
+    }
+  };
+
   auto addLineToPage = [&](std::shared_ptr<TextBlock> line) {
     if (!currentPage) {
       startNewPage();
@@ -67,6 +76,8 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
       startNewPage();
 
       if (maxPages > 0 && pagesCreated >= maxPages) {
+        currentPage->elements.push_back(std::make_unique<PageLine>(std::move(line), 0, currentPageY));
+        currentPageY += lineHeight;
         return false;
       }
     }
@@ -98,15 +109,22 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
   };
 
   if (currentOffset_ == 0) {
-    size_t peekBytes = file.read(buffer, READ_CHUNK_SIZE);
-    if (peekBytes > 0) {
+    const int peekResult = file.read(buffer, READ_CHUNK_SIZE);
+    if (peekResult > 0) {
+      const size_t peekBytes = static_cast<size_t>(peekResult);
       buffer[peekBytes] = '\0';
       isRtl_ = ScriptDetector::containsArabic(reinterpret_cast<const char*>(buffer));
     }
     file.seekSet(0);
   }
 
-  startNewPage();
+  if (pendingPage_) {
+    currentPage = std::move(pendingPage_);
+    currentPageY = pendingPageY_;
+    pendingPageY_ = 0;
+  } else {
+    startNewPage();
+  }
 
   // Resume: flush any pending block carried over from a previous interrupted batch
   if (pendingBlock_) {
@@ -114,9 +132,7 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
     if (!flushBlock()) {
       // Still can't fit — save pending block and return
       pendingBlock_ = std::move(currentBlock);
-      if (currentPage && !currentPage->elements.empty()) {
-        onPageComplete(std::move(currentPage));
-      }
+      preservePendingPage();
       file.close();
       return true;
     }
@@ -137,9 +153,14 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
       return false;
     }
 
-    size_t bytesRead = file.read(buffer, READ_CHUNK_SIZE);
-    if (bytesRead == 0) break;
+    const int readResult = file.read(buffer, READ_CHUNK_SIZE);
+    if (readResult <= 0) {
+      LOG_ERR(TAG, "File read error at offset %lu", static_cast<unsigned long>(file.position()));
+      file.close();
+      return false;
+    }
 
+    const size_t bytesRead = static_cast<size_t>(readResult);
     buffer[bytesRead] = '\0';
 
     for (size_t i = 0; i < bytesRead; i++) {
@@ -158,14 +179,14 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
         if (!flushBlock()) {
           // currentBlock still has unconsumed words — save for next call
           pendingBlock_ = std::move(currentBlock);
-          currentOffset_ = file.position() - (bytesRead - i - 1);
+          // Keep the newline unread until the pending paragraph tail is laid
+          // out.  The next batch will then apply paragraph spacing exactly
+          // once after that tail completes.
+          currentOffset_ = file.position() - (bytesRead - i);
           hasMore_ = true;
           file.close();
 
-          // Complete final page if it has content
-          if (currentPage && !currentPage->elements.empty()) {
-            onPageComplete(std::move(currentPage));
-          }
+          preservePendingPage();
           return true;
         }
 
@@ -224,7 +245,8 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
     // Check if we hit max pages
     if (maxPages > 0 && pagesCreated >= maxPages) {
       currentOffset_ = file.position();
-      hasMore_ = (currentOffset_ < fileSize_);
+      preservePendingPage();
+      hasMore_ = pendingPage_ || (currentOffset_ < fileSize_);
       file.close();
       return true;
     }
@@ -235,7 +257,14 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
     partialWord.resize(utf8NormalizeNfc(&partialWord[0], partialWord.size()));
     currentBlock->addWord(partialWord, EpdFontFamily::REGULAR);
   }
-  flushBlock();
+  if (!flushBlock()) {
+    pendingBlock_ = std::move(currentBlock);
+    currentOffset_ = fileSize_;
+    hasMore_ = true;
+    preservePendingPage();
+    file.close();
+    return true;
+  }
 
   // Complete final page
   if (currentPage && !currentPage->elements.empty()) {

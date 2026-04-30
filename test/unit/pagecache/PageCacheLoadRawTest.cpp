@@ -18,7 +18,7 @@
 
 namespace {
 
-constexpr uint8_t CACHE_FILE_VERSION = 20;
+constexpr uint8_t CACHE_FILE_VERSION = 23;
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 // Header layout (must match PageCache.cpp):
@@ -30,12 +30,14 @@ constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 // - paragraphAlignment (1 byte)
 // - hyphenation (1 byte)
 // - showImages (1 byte)
+// - bionicReading (1 byte)
+// - fakeBold (1 byte)
 // - viewportWidth (2 bytes)
 // - viewportHeight (2 bytes)
 // - pageCount (2 bytes)
 // - isPartial (1 byte)
 // - lutOffset (4 bytes)
-constexpr uint32_t HEADER_SIZE = 1 + 4 + 4 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 4;
+constexpr uint32_t HEADER_SIZE = 1 + 4 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 4;
 
 // Write a complete cache file that satisfies the current PageCache::loadRaw()
 // contract: header + LUT payload sized for pageCount entries.
@@ -55,6 +57,10 @@ void writeCacheFile(FsFile& file, uint16_t pageCount, bool isPartial, uint8_t ve
   serialization::writePod(file, hyphenation);
   uint8_t showImages = 1;
   serialization::writePod(file, showImages);
+  uint8_t bionicReading = 0;
+  serialization::writePod(file, bionicReading);
+  uint8_t fakeBold = 0;
+  serialization::writePod(file, fakeBold);
   uint16_t viewportWidth = 464;
   serialization::writePod(file, viewportWidth);
   uint16_t viewportHeight = 769;
@@ -210,24 +216,24 @@ int main() {
     runner.expectFalse(result.success, "max_pages_rejected");
   }
 
-  // Test 8: Header layout size is exactly 25 bytes
+  // Test 8: Header layout size is exactly 27 bytes
   {
-    runner.expectEq(static_cast<uint32_t>(25), HEADER_SIZE, "header_size_25_bytes");
+    runner.expectEq(static_cast<uint32_t>(27), HEADER_SIZE, "header_size_27_bytes");
   }
 
-  // Test 9: Seek position is correct (HEADER_SIZE - 4 - 1 - 2 = 18)
-  // pageCount starts at byte 18, isPartial at byte 20
+  // Test 9: Seek position is correct (HEADER_SIZE - 4 - 1 - 2 = 20)
+  // pageCount starts at byte 20, isPartial at byte 22
   {
     FsFile writer;
     writer.setBuffer("");
     writeCacheFile(writer, 0x1234, true);
     std::string buf = writer.getBuffer();
 
-    // Verify pageCount at offset 18 (little-endian)
-    runner.expectEq(static_cast<uint8_t>(0x34), static_cast<uint8_t>(buf[18]), "pagecount_low_byte");
-    runner.expectEq(static_cast<uint8_t>(0x12), static_cast<uint8_t>(buf[19]), "pagecount_high_byte");
-    // Verify isPartial at offset 20
-    runner.expectEq(static_cast<uint8_t>(1), static_cast<uint8_t>(buf[20]), "ispartial_byte");
+    // Verify pageCount at offset 20 (little-endian)
+    runner.expectEq(static_cast<uint8_t>(0x34), static_cast<uint8_t>(buf[20]), "pagecount_low_byte");
+    runner.expectEq(static_cast<uint8_t>(0x12), static_cast<uint8_t>(buf[21]), "pagecount_high_byte");
+    // Verify isPartial at offset 22
+    runner.expectEq(static_cast<uint8_t>(1), static_cast<uint8_t>(buf[22]), "ispartial_byte");
   }
 
   // Test 10: Old version (version 16) is rejected
@@ -274,6 +280,10 @@ int main() {
     serialization::writePod(writer, hyphenation);
     uint8_t showImages = 0;
     serialization::writePod(writer, showImages);
+    uint8_t bionicReading = 1;
+    serialization::writePod(writer, bionicReading);
+    uint8_t fakeBold = 2;
+    serialization::writePod(writer, fakeBold);
     uint16_t viewportWidth = 320;
     serialization::writePod(writer, viewportWidth);
     uint16_t viewportHeight = 480;

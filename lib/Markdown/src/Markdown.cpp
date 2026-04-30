@@ -191,10 +191,10 @@ size_t Markdown::readContent(uint8_t* buffer, size_t offset, size_t length) cons
     file.seek(offset);
   }
 
-  size_t bytesRead = file.read(buffer, length);
+  const int readResult = file.read(buffer, length);
   file.close();
 
-  return bytesRead;
+  return readResult > 0 ? static_cast<size_t>(readResult) : 0;
 }
 
 bool Markdown::extractTitleFromContent() {

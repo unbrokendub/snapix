@@ -32,11 +32,11 @@ int zipReadCallback(uzlib_uncomp* uncomp) {
   if (ctx->fileRemaining == 0) return -1;
 
   const size_t toRead = ctx->fileRemaining < ctx->readBufSize ? ctx->fileRemaining : ctx->readBufSize;
-  const size_t bytesRead = ctx->file->read(ctx->readBuf, toRead);
+  const int readResult = ctx->file->read(ctx->readBuf, toRead);
+  if (readResult <= 0) return -1;
+
+  const size_t bytesRead = static_cast<size_t>(readResult);
   ctx->fileRemaining -= bytesRead;
-
-  if (bytesRead == 0) return -1;
-
   uncomp->source = ctx->readBuf + 1;
   uncomp->source_limit = ctx->readBuf + bytesRead;
   return ctx->readBuf[0];
@@ -182,7 +182,7 @@ long ZipFile::getDataOffset(const FileStatSlim& fileStat) {
   const uint64_t fileOffset = fileStat.localHeaderOffset;
 
   file.seek(fileOffset);
-  const size_t read = file.read(pLocalHeader, localHeaderSize);
+  const int read = file.read(pLocalHeader, localHeaderSize);
   if (!wasOpen) {
     close();
   }
@@ -498,7 +498,7 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
   const auto dataSize = trailingNullByte ? inflatedDataSize + 1 : inflatedDataSize;
   const auto data = static_cast<uint8_t*>(malloc(dataSize));
   if (data == nullptr) {
-    LOG_ERR(TAG, "Failed to allocate memory for output buffer (%zu bytes)", dataSize);
+    LOG_ERR(TAG, "Failed to allocate memory for output buffer (%u bytes)", static_cast<unsigned>(dataSize));
     if (!wasOpen) {
       close();
     }
@@ -507,12 +507,12 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
 
   if (fileStat.method == ZIP_METHOD_STORED) {
     // no deflation, just read content
-    const size_t dataRead = file.read(data, inflatedDataSize);
+    const int dataRead = file.read(data, inflatedDataSize);
     if (!wasOpen) {
       close();
     }
 
-    if (dataRead != inflatedDataSize) {
+    if (dataRead != static_cast<int>(inflatedDataSize)) {
       LOG_ERR(TAG, "Failed to read data");
       free(data);
       return nullptr;
@@ -530,12 +530,12 @@ uint8_t* ZipFile::readFileToMemory(const char* filename, size_t* size, const boo
       return nullptr;
     }
 
-    const size_t dataRead = file.read(deflatedData, deflatedDataSize);
+    const int dataRead = file.read(deflatedData, deflatedDataSize);
     if (!wasOpen) {
       close();
     }
 
-    if (dataRead != deflatedDataSize) {
+    if (dataRead != static_cast<int>(deflatedDataSize)) {
       LOG_ERR(TAG, "Failed to read data, expected %d got %d", deflatedDataSize, dataRead);
       free(deflatedData);
       free(data);
@@ -655,8 +655,8 @@ ZipFile::StreamReadResult ZipFile::readFileToStreamDetailed(const char* filename
         delay(1);
       }
 
-      const size_t dataRead = file.read(buffer, remaining < chunkSize ? remaining : chunkSize);
-      if (dataRead == 0) {
+      const int readResult = file.read(buffer, remaining < chunkSize ? remaining : chunkSize);
+      if (readResult <= 0) {
         LOG_ERR(TAG, "Could not read more bytes");
         free(buffer);
         if (!wasOpen) {
@@ -665,6 +665,7 @@ ZipFile::StreamReadResult ZipFile::readFileToStreamDetailed(const char* filename
         return StreamReadResult::ReadError;
       }
 
+      const size_t dataRead = static_cast<size_t>(readResult);
       if (out.write(buffer, dataRead) != dataRead) {
         LOG_ERR(TAG, "Failed to write all stored output bytes to stream");
         free(buffer);
@@ -710,7 +711,7 @@ ZipFile::StreamReadResult ZipFile::readFileToStreamDetailed(const char* filename
 
     if (!ctx.reader.init(true, dictBuffer)) {
       LOG_ERR(TAG, "Failed to init inflate reader (largest free: %u)",
-              heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
       free(outputBuffer);
       free(fileReadBuffer);
       if (!wasOpen) {

@@ -18,26 +18,29 @@ int main() {
     cleanupMockTasks();
     cleanupMockQueues();
 
-    ReaderAsyncJobsController controller;
     std::atomic<int> runCount{0};
 
-    controller.setBackgroundCacheHandler([&](const ReaderAsyncJobsController::BackgroundCacheRequest&,
-                                             const ReaderAsyncJobsController::AbortCallback&) {
-      runCount.fetch_add(1);
-    });
+    {
+      ReaderAsyncJobsController controller;
 
-    runner.expectTrue(controller.startWorker(), "startWorker succeeds");
+      controller.setBackgroundCacheHandler([&](const ReaderAsyncJobsController::BackgroundCacheRequest&,
+                                               const ReaderAsyncJobsController::AbortCallback&) {
+        runCount.fetch_add(1);
+      });
 
-    ReaderAsyncJobsController::BackgroundCacheRequest request;
-    request.plan.shouldStart = true;
-    request.plan.reason = BackgroundCacheWakeReason::CurrentCachePartial;
-    request.plan.candidateSpine = 3;
+      runner.expectTrue(controller.startWorker(), "startWorker succeeds");
 
-    runner.expectTrue(controller.queueBackgroundCache(request), "background cache request queues");
-    runner.expectTrue(controller.waitUntilIdle(1000), "worker returns to idle after job");
-    runner.expectEq(int(1), runCount.load(), "queued background job executes exactly once");
+      ReaderAsyncJobsController::BackgroundCacheRequest request;
+      request.plan.shouldStart = true;
+      request.plan.reason = BackgroundCacheWakeReason::CurrentCachePartial;
+      request.plan.candidateSpine = 3;
 
-    runner.expectTrue(controller.stopWorker(), "stopWorker succeeds after idle job");
+      runner.expectTrue(controller.queueBackgroundCache(request), "background cache request queues");
+      runner.expectTrue(controller.waitUntilIdle(1000), "worker returns to idle after job");
+      runner.expectEq(int(1), runCount.load(), "queued background job executes exactly once");
+
+      runner.expectTrue(controller.stopWorker(), "stopWorker succeeds after idle job");
+    }
     cleanupMockTasks();
     cleanupMockQueues();
   }
@@ -46,32 +49,36 @@ int main() {
     cleanupMockTasks();
     cleanupMockQueues();
 
-    ReaderAsyncJobsController controller;
     std::atomic<int> runCount{0};
 
-    controller.setBackgroundCacheHandler([&](const ReaderAsyncJobsController::BackgroundCacheRequest&,
-                                             const ReaderAsyncJobsController::AbortCallback&) {
-      runCount.fetch_add(1);
-    });
+    {
+      ReaderAsyncJobsController controller;
 
-    runner.expectTrue(controller.startWorker(), "restart scenario starts");
+      controller.setBackgroundCacheHandler([&](const ReaderAsyncJobsController::BackgroundCacheRequest&,
+                                               const ReaderAsyncJobsController::AbortCallback&) {
+        runCount.fetch_add(1);
+      });
 
-    ReaderAsyncJobsController::BackgroundCacheRequest request;
-    request.plan.shouldStart = true;
-    request.plan.reason = BackgroundCacheWakeReason::CurrentCachePartial;
-    runner.expectTrue(controller.queueBackgroundCache(request), "restart scenario queues request");
-    runner.expectTrue(controller.stopWorker(), "restart scenario stops worker");
+      runner.expectTrue(controller.startWorker(), "restart scenario starts");
 
-    controller.setBackgroundCacheHandler([&](const ReaderAsyncJobsController::BackgroundCacheRequest&,
-                                             const ReaderAsyncJobsController::AbortCallback&) {
-      runCount.fetch_add(100);
-    });
+      ReaderAsyncJobsController::BackgroundCacheRequest request;
+      request.plan.shouldStart = true;
+      request.plan.reason = BackgroundCacheWakeReason::CurrentCachePartial;
+      runner.expectTrue(controller.queueBackgroundCache(request), "restart scenario queues request");
+      runner.expectTrue(controller.stopWorker(), "restart scenario stops worker");
+      const int runCountAfterStop = runCount.load();
 
-    runner.expectTrue(controller.startWorker(), "worker restarts cleanly");
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    runner.expectEq(int(0), runCount.load(), "stale queued commands do not survive worker restart");
+      controller.setBackgroundCacheHandler([&](const ReaderAsyncJobsController::BackgroundCacheRequest&,
+                                               const ReaderAsyncJobsController::AbortCallback&) {
+        runCount.fetch_add(100);
+      });
 
-    controller.stopWorker();
+      runner.expectTrue(controller.startWorker(), "worker restarts cleanly");
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      runner.expectEq(runCountAfterStop, runCount.load(), "stale queued commands do not survive worker restart");
+
+      controller.stopWorker();
+    }
     cleanupMockTasks();
     cleanupMockQueues();
   }
@@ -80,28 +87,31 @@ int main() {
     cleanupMockTasks();
     cleanupMockQueues();
 
-    ReaderAsyncJobsController controller;
     std::atomic<bool> sawAbort{false};
 
-    controller.setPageFillHandler([&](const ReaderAsyncJobsController::PageFillRequest&,
-                                      const ReaderAsyncJobsController::AbortCallback& shouldAbort) {
-      while (!shouldAbort()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      }
-      sawAbort.store(true);
-    });
+    {
+      ReaderAsyncJobsController controller;
 
-    runner.expectTrue(controller.startWorker(), "cancel scenario starts");
+      controller.setPageFillHandler([&](const ReaderAsyncJobsController::PageFillRequest&,
+                                        const ReaderAsyncJobsController::AbortCallback& shouldAbort) {
+        while (!shouldAbort()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        sawAbort.store(true);
+      });
 
-    ReaderAsyncJobsController::PageFillRequest request;
-    request.targetSpine = 2;
-    request.targetPage = 14;
-    runner.expectTrue(controller.queuePageFillWork(request), "page fill request queues");
+      runner.expectTrue(controller.startWorker(), "cancel scenario starts");
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    controller.requestCancelCurrentJob();
-    runner.expectTrue(controller.stopWorker(), "stopWorker cancels running job");
-    runner.expectTrue(sawAbort.load(), "abort callback is observed by running handler");
+      ReaderAsyncJobsController::PageFillRequest request;
+      request.targetSpine = 2;
+      request.targetPage = 14;
+      runner.expectTrue(controller.queuePageFillWork(request), "page fill request queues");
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      controller.requestCancelCurrentJob();
+      runner.expectTrue(controller.stopWorker(), "stopWorker cancels running job");
+      runner.expectTrue(sawAbort.load(), "abort callback is observed by running handler");
+    }
 
     cleanupMockTasks();
     cleanupMockQueues();

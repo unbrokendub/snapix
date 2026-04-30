@@ -52,11 +52,12 @@ const char* stripNamespace(const char* name) {
 }  // namespace
 
 Fb2Parser::Fb2Parser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config, const uint32_t startOffset,
-                     const int startingSectionIndex, const bool sectionScoped)
+                     const int startingSectionIndex, const bool sectionScoped, const uint32_t endOffset)
     : filepath_(std::move(filepath)),
       renderer_(renderer),
       config_(config),
       startOffset_(startOffset),
+      endOffset_(endOffset),
       startingSectionIndex_(startingSectionIndex),
       sectionScoped_(sectionScoped) {}
 
@@ -96,6 +97,11 @@ void Fb2Parser::reset() {
   targetSectionDepth_ = 0;
   fragmentComplete_ = false;
   xmlParserSuspended_ = false;
+  pendingNewTextBlock_ = false;
+  pendingBlockStyle_ = TextBlock::LEFT_ALIGN;
+  pendingSectionStart_ = false;
+  pendingSectionNeedsPageBreak_ = false;
+  pendingSectionAnchorIndex_ = -1;
   delete[] partWordBuffer_;
   partWordBuffer_ = nullptr;
   partWordBufferIndex_ = 0;
@@ -109,6 +115,70 @@ void Fb2Parser::reset() {
   fileSize_ = 0;
   lastParsedOffset_ = startOffset_;
   anchorMap_.clear();
+}
+
+void Fb2Parser::requestXmlSuspend() {
+  hitMaxPages_ = true;
+  stopRequested_ = true;
+  if (xmlParser_ && !xmlParserSuspended_) {
+    XML_StopParser(xmlParser_, XML_TRUE);
+    xmlParserSuspended_ = true;
+  }
+}
+
+bool Fb2Parser::finishPendingSectionStart() {
+  if (!pendingSectionStart_) {
+    return true;
+  }
+
+  const bool needsPageBreak = pendingSectionNeedsPageBreak_;
+  const int anchorIndex = pendingSectionAnchorIndex_;
+
+  if (needsPageBreak) {
+    if (currentPage_ && !currentPage_->elements.empty()) {
+      onPageComplete_(std::move(currentPage_));
+      pagesCreated_++;
+      if (maxPages_ > 0 && pagesCreated_ >= maxPages_) {
+        requestXmlSuspend();
+        return false;
+      }
+    }
+    startNewPage();
+  }
+
+  firstSection_ = false;
+  if (anchorIndex >= 0) {
+    anchorMap_.emplace_back("section_" + std::to_string(anchorIndex), pagesCreated_);
+  }
+
+  pendingSectionStart_ = false;
+  pendingSectionNeedsPageBreak_ = false;
+  pendingSectionAnchorIndex_ = -1;
+  return true;
+}
+
+bool Fb2Parser::flushDeferredLayoutBeforeResume() {
+  if (currentTextBlock_ && !currentTextBlock_->isEmpty()) {
+    makePages();
+    if (stopRequested_) {
+      suspended_ = true;
+      hasMore_ = true;
+      return false;
+    }
+  }
+
+  if (!finishPendingSectionStart()) {
+    suspended_ = true;
+    hasMore_ = true;
+    return false;
+  }
+
+  if (pendingNewTextBlock_) {
+    pendingNewTextBlock_ = false;
+    currentTextBlock_.reset(new ParsedText(pendingBlockStyle_, config_.indentLevel, config_.hyphenation, true, isRtl_));
+  }
+
+  return true;
 }
 
 bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages,
@@ -163,6 +233,14 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
   } else {
     suspended_ = false;
 
+    // A previous batch may have stopped while laying out an already parsed
+    // paragraph.  Finish that tail before Expat is resumed, otherwise new XML
+    // characterData can be appended to the old ParsedText and shift/duplicate
+    // page-boundary text.
+    if (!flushDeferredLayoutBeforeResume()) {
+      return true;
+    }
+
     // The Expat parser may have been suspended mid-buffer via
     // XML_StopParser(resumable) when hitMaxPages fired.  Finish
     // processing the remainder of that buffer before reading new data.
@@ -204,14 +282,25 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       {
         snapix::spi::SharedBusLock lk;
         if (file_.available() <= 0) break;
-        bytesRead = file_.read(buffer, READ_CHUNK_SIZE);
+
+        size_t bytesToRead = READ_CHUNK_SIZE;
+        if (sectionScoped_ && endOffset_ > startOffset_) {
+          const size_t pos = file_.position();
+          if (pos >= endOffset_) {
+            fragmentComplete_ = true;
+            break;
+          }
+          bytesToRead = std::min(bytesToRead, static_cast<size_t>(endOffset_ - pos));
+        }
+
+        bytesRead = file_.read(buffer, bytesToRead);
         if (bytesRead <= 0) {
           if (bytesRead < 0) {
             LOG_ERR(TAG, "SD read error at offset %lu", static_cast<unsigned long>(file_.position()));
           }
           break;
         }
-        done = (file_.available() == 0) ? 1 : 0;
+        done = (file_.available() == 0 && !(sectionScoped_ && endOffset_ > startOffset_)) ? 1 : 0;
       }
       // --- SPI released: display driver can use the bus while we process XML ---
 
@@ -242,6 +331,9 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       {
         snapix::spi::SharedBusLock lk;
         lastParsedOffset_ = static_cast<uint32_t>(std::min<size_t>(file_.position(), fileSize_));
+        if (sectionScoped_ && endOffset_ > startOffset_ && file_.position() >= endOffset_) {
+          fragmentComplete_ = true;
+        }
       }
 
       if (stopRequested_) {
@@ -316,37 +408,35 @@ void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const
   }
 
   if (strcmp(localName, "section") == 0) {
+    const bool needsPageBreak = !self->firstSection_;
     self->sectionCounter_++;
+    const int sectionAnchorIndex = self->sectionCounter_ - 1;
     if (self->sectionScoped_) {
       self->targetSectionStarted_ = true;
       self->targetSectionDepth_++;
     }
-    if (!self->firstSection_) {
+    if (needsPageBreak) {
       // Flush current content before new section
       self->flushPartWordBuffer();
       if (self->currentTextBlock_ && !self->currentTextBlock_->isEmpty()) {
         self->makePages();
-      }
-      // Section break: start new page
-      if (self->currentPage_ && !self->currentPage_->elements.empty()) {
-        self->onPageComplete_(std::move(self->currentPage_));
-        self->pagesCreated_++;
-        if (self->maxPages_ > 0 && self->pagesCreated_ >= self->maxPages_) {
-          self->hitMaxPages_ = true;
-          self->stopRequested_ = true;
-          if (self->xmlParser_) {
-            XML_StopParser(self->xmlParser_, XML_TRUE);
-            self->xmlParserSuspended_ = true;
-          }
+        if (self->stopRequested_) {
+          self->pendingSectionStart_ = true;
+          self->pendingSectionNeedsPageBreak_ = true;
+          self->pendingSectionAnchorIndex_ = sectionAnchorIndex;
           self->depth_++;
           return;
         }
       }
-      self->startNewPage();
     }
-    self->firstSection_ = false;
-    // Record anchor for TOC navigation: section_N → page where this section starts
-    self->anchorMap_.emplace_back("section_" + std::to_string(self->sectionCounter_ - 1), self->pagesCreated_);
+
+    self->pendingSectionStart_ = true;
+    self->pendingSectionNeedsPageBreak_ = needsPageBreak;
+    self->pendingSectionAnchorIndex_ = sectionAnchorIndex;
+    if (!self->finishPendingSectionStart()) {
+      self->depth_++;
+      return;
+    }
   } else if (strcmp(localName, "title") == 0) {
     self->inTitle_ = true;
     self->boldUntilDepth_ = std::min(self->boldUntilDepth_, self->depth_);
@@ -379,6 +469,10 @@ void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const
     self->flushPartWordBuffer();
     if (self->currentTextBlock_ && !self->currentTextBlock_->isEmpty()) {
       self->makePages();
+      if (self->stopRequested_) {
+        self->depth_++;
+        return;
+      }
     }
     self->addVerticalSpacing(1);
   } else if (strcmp(localName, "image") == 0) {
@@ -424,6 +518,9 @@ void XMLCALL Fb2Parser::endElement(void* userData, const XML_Char* name) {
     self->flushPartWordBuffer();
     if (self->currentTextBlock_ && !self->currentTextBlock_->isEmpty()) {
       self->makePages();
+      if (self->stopRequested_) {
+        return;
+      }
     }
     self->addVerticalSpacing(1);
   } else if (strcmp(localName, "subtitle") == 0) {
@@ -431,6 +528,9 @@ void XMLCALL Fb2Parser::endElement(void* userData, const XML_Char* name) {
     self->flushPartWordBuffer();
     if (self->currentTextBlock_ && !self->currentTextBlock_->isEmpty()) {
       self->makePages();
+      if (self->stopRequested_) {
+        return;
+      }
     }
     self->addVerticalSpacing(1);
   } else if (strcmp(localName, "p") == 0) {
@@ -438,6 +538,9 @@ void XMLCALL Fb2Parser::endElement(void* userData, const XML_Char* name) {
     self->flushPartWordBuffer();
     if (self->currentTextBlock_ && !self->currentTextBlock_->isEmpty()) {
       self->makePages();
+      if (self->stopRequested_) {
+        return;
+      }
     }
   } else if (strcmp(localName, "section") == 0 && self->sectionScoped_ && self->targetSectionStarted_) {
     if (self->targetSectionDepth_ > 0) {
@@ -550,12 +653,23 @@ void Fb2Parser::refreshTextDirection() {
 }
 
 void Fb2Parser::startNewTextBlock(TextBlock::BLOCK_STYLE style) {
+  if (stopRequested_) {
+    pendingNewTextBlock_ = true;
+    pendingBlockStyle_ = style;
+    return;
+  }
+
   if (currentTextBlock_) {
     if (currentTextBlock_->isEmpty()) {
       currentTextBlock_->setStyle(style);
       return;
     }
     makePages();
+    if (stopRequested_) {
+      pendingNewTextBlock_ = true;
+      pendingBlockStyle_ = style;
+      return;
+    }
   }
   currentTextBlock_.reset(new ParsedText(style, config_.indentLevel, config_.hyphenation, true, isRtl_));
 }
@@ -600,6 +714,10 @@ void Fb2Parser::makePages() {
 }
 
 void Fb2Parser::addLineToPage(std::shared_ptr<TextBlock> line) {
+  if (stopRequested_) {
+    return;
+  }
+
   const int lineHeight = static_cast<int>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression);
 
   if (!currentPage_) {
@@ -612,20 +730,7 @@ void Fb2Parser::addLineToPage(std::shared_ptr<TextBlock> line) {
     startNewPage();
 
     if (maxPages_ > 0 && pagesCreated_ >= maxPages_) {
-      hitMaxPages_ = true;
-      stopRequested_ = true;
-      // Suspend Expat immediately so that no further callbacks fire.
-      // Without this, characterData/endElement callbacks for subsequent
-      // paragraphs in the same 4 KB buffer keep running, merging words
-      // from multiple paragraphs into the same currentTextBlock_.  Those
-      // merged pages differ from a fresh parse (cold extend), and when
-      // the cache is later rebuilt the page boundaries shift — the user
-      // then sees a paragraph at the end of one page repeated at the
-      // start of the next.
-      if (xmlParser_) {
-        XML_StopParser(xmlParser_, XML_TRUE);
-        xmlParserSuspended_ = true;
-      }
+      requestXmlSuspend();
     }
   }
 

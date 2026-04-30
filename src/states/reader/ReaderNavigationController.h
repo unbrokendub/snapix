@@ -37,6 +37,7 @@ class ReaderNavigationController {
   uint32_t powerPressStartedMs_ = 0;
   int queuedPendingEpubTurn_ = 0;
   uint32_t queuedPendingEpubTurnQueuedMs_ = 0;
+  bool queuedPendingEpubTurnHasQueuedMs_ = false;
   uint32_t lastCachePreemptRequestedMs_ = 0;
   bool deferredTurnAwaitingWorkerIdle_ = false;
   bool deferredTurnIdleLogged_ = false;

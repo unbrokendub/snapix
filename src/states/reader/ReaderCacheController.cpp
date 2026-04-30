@@ -38,7 +38,8 @@ bool fb2UsesSectionNavigation(const Fb2Provider* provider) {
 }
 
 bool resolveFb2SectionContext(const Fb2Provider* provider, const RenderConfig& config, const int tocIndex,
-                              std::string* cachePath, uint32_t* startOffset, int* startingSectionIndex) {
+                              std::string* cachePath, uint32_t* startOffset, int* startingSectionIndex,
+                              uint32_t* endOffset = nullptr) {
   if (!fb2UsesSectionNavigation(provider) || tocIndex < 0 || tocIndex >= static_cast<int>(provider->tocCount())) {
     return false;
   }
@@ -56,6 +57,15 @@ bool resolveFb2SectionContext(const Fb2Provider* provider, const RenderConfig& c
   }
   if (startingSectionIndex) {
     *startingSectionIndex = item.sectionIndex;
+  }
+  if (endOffset) {
+    *endOffset = 0;
+    if (tocIndex + 1 < static_cast<int>(provider->tocCount())) {
+      const Fb2::TocItem nextItem = provider->getFb2()->getTocItem(static_cast<uint16_t>(tocIndex + 1));
+      if (nextItem.sectionIndex >= 0 && nextItem.sourceOffset > item.sourceOffset) {
+        *endOffset = nextItem.sourceOffset;
+      }
+    }
   }
   return true;
 }
@@ -513,16 +523,12 @@ bool ReaderCacheController::shouldContinueIdleBackgroundCaching(Core& core) {
     if (!currentCacheMatchesActive) {
       return true;
     }
-    auto& state = resources_.unsafeState();
-    const bool canHotExtend = ((state.parser && state.parserSpineIndex == activeSpine && state.parser->canResume()) ||
-                               (state.lookaheadParser && state.lookaheadParserSpineIndex == activeSpine &&
-                                state.lookaheadParser->canResume()));
     const bool nearTail = position_.currentSectionPage >= 0 &&
                           pageCache()->needsExtension(static_cast<uint16_t>(std::max(position_.currentSectionPage, 0)));
-    if (type == ContentType::Epub && currentCacheMatchesActive) {
+    if (type == ContentType::Epub) {
       return true;
     }
-    return nearTail || (type == ContentType::Epub && canHotExtend);
+    return nearTail;
   }
 
   return type == ContentType::Epub && !backgroundPrefetchSweepComplete_;
@@ -551,10 +557,21 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
   }
 
   bool didWork = false;
+  bool sweepComplete = allowFarSweep;
   const int prefetchScanStart = nextSpine;
   const int prefetchScanEnd = std::min(spineCount, allowFarSweep ? nextSpine + kEpubActivePrefetchAheadSpines : nextSpine + 1);
   const std::string imageCachePath = core.settings.showImages ? (epub->getCachePath() + "/images") : "";
   auto& state = resources_.unsafeState();
+
+  auto notePrefetchResult = [&](const int spine, const bool cacheComplete) {
+    if (spine == nextSpine) {
+      backgroundNearPrefetchComplete_ = cacheComplete;
+    }
+    if (allowFarSweep && !cacheComplete) {
+      sweepComplete = false;
+      backgroundPrefetchCursorSpine_ = spine;
+    }
+  };
 
   for (int spine = prefetchScanStart; spine < prefetchScanEnd; ++spine) {
     if (spine > prefetchScanStart) {
@@ -579,10 +596,7 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
     const std::string nextCachePath = epubSectionCachePath(epub->getCachePath(), spine);
     PageCache nextCache(nextCachePath);
     if (nextCache.load(config) && !nextCache.isPartial()) {
-      backgroundNearPrefetchComplete_ = (spine == nextSpine);
-      if (allowFarSweep && spine == prefetchScanEnd - 1) {
-        backgroundPrefetchSweepComplete_ = true;
-      }
+      notePrefetchResult(spine, true);
       continue;
     }
 
@@ -603,10 +617,14 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
         if (nextCache.extend(*transientParser, kDefaultCacheBatchPages, shouldAbort)) {
           didWork = true;
         }
+        notePrefetchResult(spine, !nextCache.isPartial());
       } else {
         PageCache transientCache(nextCachePath);
         if (transientCache.create(*transientParser, config, kDefaultCacheBatchPages, 0, shouldAbort)) {
           didWork = true;
+          notePrefetchResult(spine, !transientCache.isPartial());
+        } else {
+          notePrefetchResult(spine, false);
         }
       }
       continue;
@@ -620,16 +638,24 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
       if (nextCache.extend(*parser, kDefaultCacheBatchPages, shouldAbort)) {
         didWork = true;
       }
+      notePrefetchResult(spine, !nextCache.isPartial());
     } else {
       PageCache buildCache(nextCachePath);
       if (buildCache.create(*parser, config, kDefaultCacheBatchPages, 0, shouldAbort)) {
         didWork = true;
+        notePrefetchResult(spine, !buildCache.isPartial());
+      } else {
+        notePrefetchResult(spine, false);
       }
     }
-    backgroundNearPrefetchComplete_ = (spine == nextSpine) && !nextCache.isPartial();
   }
 
-  backgroundPrefetchSweepComplete_ = allowFarSweep;
+  if (allowFarSweep) {
+    backgroundPrefetchSweepComplete_ = sweepComplete;
+    if (sweepComplete) {
+      backgroundPrefetchCursorSpine_ = -1;
+    }
+  }
   return didWork;
 }
 
@@ -852,12 +878,13 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
   } else if (type == ContentType::Fb2) {
     auto* provider = core.content.asFb2();
     uint32_t startOffset = 0;
+    uint32_t endOffset = 0;
     int startingSectionIndex = 0;
     if (resolveFb2SectionContext(provider, config, position_.currentSpineIndex, &cachePath, &startOffset,
-                                 &startingSectionIndex)) {
+                                 &startingSectionIndex, &endOffset)) {
       if (!state.parser || state.parserSpineIndex != position_.currentSpineIndex) {
         state.parser.reset(new Fb2Parser(contentPath_, resources_.renderer(), config, startOffset, startingSectionIndex,
-                                         true));
+                                         true, endOffset));
         state.parserSpineIndex = position_.currentSpineIndex;
       }
     } else {
