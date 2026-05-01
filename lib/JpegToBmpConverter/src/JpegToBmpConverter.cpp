@@ -466,6 +466,20 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
 
     // Decode one row of MCUs
     for (int mcuX = 0; mcuX < imageInfo.m_MCUSPerRow; mcuX++) {
+      // Wide images (e.g. 50+ MCUs/row) can decode for 100ms+ between outer
+      // mcuY abort checks.  Sample abort every 4 MCUs so a button-press preempt
+      // is honoured within ~30ms instead of waiting for the row to finish.
+      if ((mcuX & 0x3) == 0 && shouldAbort && shouldAbort()) {
+        LOG_INF(TAG, "Abort requested mid-row during JPEG conversion (mcuY=%d mcuX=%d)", mcuY, mcuX);
+        if (rowAccum) delete[] rowAccum;
+        if (rowCount) delete[] rowCount;
+        if (atkinsonDitherer) delete atkinsonDitherer;
+        if (fsDitherer) delete fsDitherer;
+        if (atkinson1BitDitherer) delete atkinson1BitDitherer;
+        free(mcuRowBuffer);
+        free(rowBuffer);
+        return false;
+      }
       const unsigned char mcuStatus = pjpeg_decode_mcu();
       if (mcuStatus != 0) {
         if (mcuStatus == PJPG_NO_MORE_BLOCKS) {
