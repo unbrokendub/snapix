@@ -306,12 +306,34 @@ bool SDCardManager::removeDir(const char* path) {
   bool allOk = true;
   auto file = dir.openNextFile();
   char name[128];
-  while (file) {
+  // Safety bound — SdFat's openNextFile() has been observed in the wild
+  // returning the same pathological entry repeatedly (empty name, FAT cache
+  // staleness under memory pressure).  Without a hard cap this turns into a
+  // silent infinite loop; cap at a generous 4096 entries (more than any
+  // realistic snapix cache subtree).
+  int iterations = 0;
+  constexpr int kMaxEntries = 4096;
+  while (file && iterations++ < kMaxEntries) {
+    file.getName(name, sizeof(name));
+
+    // Skip pathological entries: empty name, "." and "..".  These appear
+    // when the FAT directory cache loses entries (memory pressure) or when
+    // the filesystem returns synthetic entries.  Without this check, an
+    // empty name builds a path like ".snapix/cache/foo/" and sd.remove()
+    // tries to delete the directory as if it were a file — fails forever.
+    const bool skipEntry = (name[0] == '\0') ||
+                           (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')));
+    if (skipEntry) {
+      LOG_DBG(TAG, "removeDir: skipping synthetic entry '%s' in %s", name, path);
+      file.close();
+      file = dir.openNextFile();
+      continue;
+    }
+
     String filePath = path;
     if (!filePath.endsWith("/")) {
       filePath += "/";
     }
-    file.getName(name, sizeof(name));
     filePath += name;
 
     if (file.isDirectory()) {
@@ -328,6 +350,10 @@ bool SDCardManager::removeDir(const char* path) {
       }
     }
     file = dir.openNextFile();
+  }
+  if (iterations >= kMaxEntries) {
+    LOG_ERR(TAG, "removeDir: aborted after %d iterations on %s (FAT cache likely stale)", iterations, path);
+    allOk = false;
   }
 
   dir.close();
