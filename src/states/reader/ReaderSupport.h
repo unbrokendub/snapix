@@ -12,7 +12,12 @@ struct HeapState {
 };
 
 constexpr int kCacheTaskStackSize = 16384;
-constexpr int kCacheTaskStopTimeoutMs = 10000;
+// 15s gives the JPEG decoder + FB2 parser their MAX work-then-abort cycle a
+// chance to wind down before the nuclear ESP.restart() kicks in.  With the
+// per-MCU abort check (every 4 MCUs) added in the JPEG converter, a normal
+// abort completes in ~30-200ms; this headroom only matters under genuine
+// deadlock or pathological input.
+constexpr int kCacheTaskStopTimeoutMs = 15000;
 constexpr uint8_t kPendingTocJumpMaxRetries = 3;
 constexpr uint8_t kPendingEpubPageLoadMaxRetries = 3;
 // Must not exceed the main Arduino loop priority (1) — on single-core

@@ -2108,7 +2108,17 @@ bool ReaderState::stopBackgroundCaching() {
 
   requestWorkerCancel();
   if (!waitWorkerIdle(kCacheTaskStopTimeoutMs)) {
-    LOG_ERR(TAG, "[ASYNC] worker did not stop within timeout");
+    // The worker is genuinely stuck — likely a deadlock in SharedBusLock or
+    // a tight loop in picojpeg / parser that didn't honour shouldAbort.  Log
+    // a forensic snapshot before the nuclear restart so the next session can
+    // tell us *why* this fired (free heap shrinking? stuck on a particular
+    // book?).  A clean reboot is safer than tearing down state with a live
+    // task still touching it.
+    const reader::HeapState heap = reader::readHeapState();
+    LOG_ERR(TAG, "[ASYNC] worker did not stop within %d ms timeout", kCacheTaskStopTimeoutMs);
+    LOG_ERR(TAG, "[ASYNC] forensic snapshot: free=%u largest=%u spine=%d page=%d path=%s",
+            static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlock),
+            currentSpineIndex_, currentSectionPage_, contentPath_);
     LOG_ERR(TAG, "Restarting to avoid unsafe cache/parser teardown after stop timeout");
     vTaskDelay(50 / portTICK_PERIOD_MS);
     ESP.restart();
