@@ -225,8 +225,22 @@ FsFile SDCardManager::open(const char* path, oflag_t oflag) {
 }
 
 bool SDCardManager::mkdir(const char* path, bool pFlag) {
-  snapix::spi::SharedBusLock lk;
-  return sd.mkdir(path, pFlag);
+  // Retry mkdir on transient failures (FAT directory cluster cache eviction
+  // races with the directory walk under memory pressure).  Skip retries when
+  // the path now exists — that means a concurrent caller (or a previous
+  // attempt that returned false but actually succeeded) created it.
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      delay(50);
+      snapix::spi::SharedBusLock lk;
+      if (sd.exists(path)) return true;
+    }
+    {
+      snapix::spi::SharedBusLock lk;
+      if (sd.mkdir(path, pFlag)) return true;
+    }
+  }
+  return false;
 }
 
 bool SDCardManager::exists(const char* path) {
@@ -250,18 +264,24 @@ bool SDCardManager::rename(const char* path, const char* newPath) {
 }
 
 bool SDCardManager::openFileForRead(const char* moduleName, const char* path, FsFile& file) {
-  snapix::spi::SharedBusLock lk;
-  if (!sd.exists(path)) {
-    LOG_DBG(moduleName, "File does not exist: %s", path);
-    return false;
+  // SdFat's directory cache occasionally returns false-negatives for both
+  // exists() AND the first open() attempt under memory pressure — observed
+  // in the wild moments after a saveMetaCache() returned success.  Drop the
+  // redundant exists() precheck (sd.open() does its own lookup) and retry
+  // a couple of times with a brief delay to let the FAT cache settle.
+  // Release the SPI lock between attempts so the display can use the bus.
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) delay(50);
+    {
+      snapix::spi::SharedBusLock lk;
+      file = sd.open(path, O_RDONLY);
+      if (file) {
+        return true;
+      }
+    }
   }
-
-  file = sd.open(path, O_RDONLY);
-  if (!file) {
-    LOG_ERR(moduleName, "Failed to open file for reading: %s", path);
-    return false;
-  }
-  return true;
+  LOG_DBG(moduleName, "File does not exist: %s", path);
+  return false;
 }
 
 bool SDCardManager::openFileForRead(const char* moduleName, const std::string& path, FsFile& file) {
@@ -273,13 +293,22 @@ bool SDCardManager::openFileForRead(const char* moduleName, const String& path, 
 }
 
 bool SDCardManager::openFileForWrite(const char* moduleName, const char* path, FsFile& file) {
-  snapix::spi::SharedBusLock lk;
-  file = sd.open(path, O_RDWR | O_CREAT | O_TRUNC);
-  if (!file) {
-    LOG_ERR(moduleName, "Failed to open file for writing: %s", path);
-    return false;
+  // Same defensive retry as openFileForRead — under memory pressure SdFat
+  // occasionally fails to allocate a directory entry slot on the first try
+  // (cache eviction races with the directory walk).  A short pause and a
+  // second attempt usually succeeds.
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) delay(50);
+    {
+      snapix::spi::SharedBusLock lk;
+      file = sd.open(path, O_RDWR | O_CREAT | O_TRUNC);
+      if (file) {
+        return true;
+      }
+    }
   }
-  return true;
+  LOG_ERR(moduleName, "Failed to open file for writing: %s", path);
+  return false;
 }
 
 bool SDCardManager::openFileForWrite(const char* moduleName, const std::string& path, FsFile& file) {

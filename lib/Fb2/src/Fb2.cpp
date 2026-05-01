@@ -605,6 +605,11 @@ bool Fb2::saveMetaCache() const {
     serialization::writePod(file, item.depth);
   }
 
+  // Explicit sync flushes both file data and the parent directory entry to the
+  // SD card before close().  Without this, SdFat keeps the directory cluster
+  // dirty in its single-sector cache; if the next file operation evicts that
+  // sector, the freshly written meta.bin appears to vanish on the next open.
+  file.sync();
   file.close();
   LOG_INF(TAG, "Saved meta cache (%u TOC items)", tocItemCount);
   return true;
