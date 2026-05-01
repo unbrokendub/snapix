@@ -15,6 +15,7 @@
 #define IRAM_ATTR
 #endif
 
+#include <algorithm>
 #include <cassert>
 
 #define TAG "GFX"
@@ -42,6 +43,7 @@ namespace {
 struct TextScriptFlags {
   bool hasArabic = false;
   bool hasThai = false;
+  bool hasCjk = false;
 };
 
 inline TextScriptFlags detectTextScripts(const char* text) {
@@ -55,9 +57,11 @@ inline TextScriptFlags detectTextScripts(const char* text) {
       flags.hasArabic = true;
     } else if (!flags.hasThai && ScriptDetector::isThaiCodepoint(cp)) {
       flags.hasThai = true;
+    } else if (!flags.hasCjk && ScriptDetector::isCjkCodepoint(cp)) {
+      flags.hasCjk = true;
     }
 
-    if (flags.hasArabic && flags.hasThai) {
+    if (flags.hasArabic && flags.hasThai && flags.hasCjk) {
       break;
     }
   }
@@ -215,14 +219,14 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     w = getArabicTextWidth(fontId, text, style);
   } else if (scripts.hasThai) {
     w = getThaiTextWidth(fontId, text, style);
-  } else if (isExternalFontAllowed(fontId) &&
+  } else if (scripts.hasCjk && isExternalFontAllowed(fontId) &&
              ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont())) {
     // Character-by-character: try external font first, then builtin fallback
     const auto& font = fontIt->second;
     const char* ptr = text;
     uint32_t cp;
     while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&ptr)))) {
-      const int extWidth = getExternalGlyphWidth(cp);
+      const int extWidth = ScriptDetector::isCjkCodepoint(cp) ? getExternalGlyphWidth(cp) : 0;
       if (extWidth > 0) {
         w += extWidth;
       } else {
@@ -291,7 +295,8 @@ IRAM_ATTR int GfxRenderer::getTextAdvanceWidth(const int fontId, const char* tex
     }
 
     const int extWidth =
-        (isExternalFontAllowed(fontId) && ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont()))
+        (ScriptDetector::isCjkCodepoint(cp) && isExternalFontAllowed(fontId) &&
+         ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont()))
             ? getExternalGlyphWidth(cp)
             : 0;
     if (extWidth > 0) {
@@ -353,11 +358,13 @@ void GfxRenderer::warmCodepointsBatch(const int fontId, const uint32_t* codepoin
   if (!codepoints || count == 0) return;
 
   StreamingEpdFont* streamingFont = getStreamingFont(fontId, style);
-  const bool externalAvailable =
-      isExternalFontAllowed(fontId) && ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont());
-
   if (streamingFont) {
-    for (size_t i = 0; i < count; i++) {
+    const size_t warmCount = std::min(count, static_cast<size_t>(StreamingEpdFont::getCacheSize()));
+    if (count > warmCount) {
+      LOG_DBG(TAG, "Streaming glyph warm capped: count=%zu cap=%zu style=%u", count, warmCount,
+              static_cast<unsigned>(style));
+    }
+    for (size_t i = 0; i < warmCount; i++) {
       const EpdGlyph* glyph = streamingFont->getGlyph(codepoints[i]);
       if (glyph) {
         streamingFont->getGlyphBitmap(glyph);
@@ -365,15 +372,18 @@ void GfxRenderer::warmCodepointsBatch(const int fontId, const uint32_t* codepoin
     }
   }
 
+  std::vector<uint32_t> cjkCodepoints;
+  cjkCodepoints.reserve(count);
+  for (size_t i = 0; i < count; i++) {
+    if (ScriptDetector::isCjkCodepoint(codepoints[i])) {
+      cjkCodepoints.push_back(codepoints[i]);
+    }
+  }
+
+  const bool externalAvailable = !cjkCodepoints.empty() && isExternalFontAllowed(fontId) &&
+                                 ((_externalFont && _externalFont->isLoaded()) || tryResolveExternalFont());
   if (externalAvailable) {
-    // Find first codepoint >= 0x80 (ASCII handled by built-in font, not external)
-    size_t firstExternal = 0;
-    while (firstExternal < count && codepoints[firstExternal] < 0x80) {
-      firstExternal++;
-    }
-    if (firstExternal < count) {
-      _externalFont->preloadGlyphs(&codepoints[firstExternal], count - firstExternal);
-    }
+    _externalFont->preloadGlyphs(cjkCodepoints.data(), cjkCodepoints.size());
   }
 }
 
@@ -1143,8 +1153,9 @@ void GfxRenderer::cleanupGrayscaleWithFrameBuffer() const { einkDisplay.cleanupG
 
 IRAM_ATTR void GfxRenderer::renderChar(const EpdFontFamily& fontFamily, const uint32_t cp, int* x, const int* y,
                              const bool pixelState, const EpdFontFamily::Style style, const int fontId) const {
-  // Try external font first — covers CJK and optionally Latin from .bin fonts
-  if (isExternalFontAllowed(fontId) && (_externalFont || tryResolveExternalFont()) && _externalFont->isLoaded()) {
+  // Try external font first for CJK; Cyrillic/Latin stay on the streaming reader font.
+  if (ScriptDetector::isCjkCodepoint(cp) && isExternalFontAllowed(fontId) &&
+      (_externalFont || tryResolveExternalFont()) && _externalFont->isLoaded()) {
     const uint8_t* extBitmap = _externalFont->getGlyph(cp);
     if (extBitmap) {
       renderExternalGlyph(cp, x, *y - fontFamily.getData(EpdFontFamily::REGULAR)->ascender, pixelState, extBitmap);
@@ -1354,6 +1365,9 @@ void GfxRenderer::renderExternalGlyph(const uint32_t cp, int* x, const int y, co
 }
 
 int GfxRenderer::getExternalGlyphWidth(const uint32_t cp) const {
+  if (!ScriptDetector::isCjkCodepoint(cp)) {
+    return 0;
+  }
   if (!_externalFont && ScriptDetector::isCjkCodepoint(cp)) {
     tryResolveExternalFont();
   }

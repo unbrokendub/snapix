@@ -127,7 +127,8 @@ class ReaderState : public State {
   void renderXtcPage(Core& core);
   bool renderCoverPage(Core& core);
   void renderLoadedPage(Core& core, const std::shared_ptr<Page>& page, size_t pageCount, bool cacheIsPartial,
-                        const Theme& theme, const Viewport& vp, uint32_t totalStartMs, bool allowPagePrefetch);
+                        const Theme& theme, const Viewport& vp, uint32_t totalStartMs, bool allowPagePrefetch,
+                        bool pageGlyphsWarm = false);
   bool tryFastNavigateNext(Core& core);
   bool tryFastNavigateWithinCurrentCache(Core& core, int direction);
   void enqueuePendingPageTurn(int direction, const char* reason);

@@ -20,6 +20,14 @@
 namespace {
 constexpr uint8_t kMetaCacheVersion = 4;
 constexpr char kMetaCacheFile[] = "/meta.bin";
+
+void closeFileProtected(FsFile& file) {
+  if (!file) {
+    return;
+  }
+  snapix::spi::SharedBusLock lk;
+  file.close();
+}
 }  // namespace
 
 std::string Fb2::metaCachePath() const { return cachePath + kMetaCacheFile; }
@@ -74,8 +82,11 @@ bool Fb2::load() {
     return false;
   }
 
-  fileSize = file.size();
-  file.close();
+  {
+    snapix::spi::SharedBusLock lk;
+    fileSize = file.size();
+    file.close();
+  }
 
   // Stream-parse in chunks (file may exceed available RAM)
   if (!parseXmlStream()) {
@@ -307,7 +318,7 @@ bool Fb2::parseXmlStream() {
   xmlParser_ = XML_ParserCreate("UTF-8");
   if (!xmlParser_) {
     LOG_ERR(TAG, "Failed to create XML parser");
-    file.close();
+    closeFileProtected(file);
     return false;
   }
 
@@ -319,11 +330,17 @@ bool Fb2::parseXmlStream() {
   uint8_t buffer[kChunkSize];
   bool success = true;
 
-  while (file.available() > 0) {
-    const int bytesRead = file.read(buffer, kChunkSize);
-    if (bytesRead <= 0) break;
+  while (true) {
+    int bytesRead = 0;
+    int done = 0;
+    {
+      snapix::spi::SharedBusLock lk;
+      if (file.available() <= 0) break;
+      bytesRead = file.read(buffer, kChunkSize);
+      if (bytesRead <= 0) break;
+      done = (file.available() == 0) ? 1 : 0;
+    }
 
-    const int done = (file.available() == 0) ? 1 : 0;
     if (XML_Parse(xmlParser_, reinterpret_cast<const char*>(buffer), bytesRead, done) ==
         XML_STATUS_ERROR) {
       LOG_ERR(TAG, "XML parse error: %s", XML_ErrorString(XML_GetErrorCode(xmlParser_)));
@@ -332,7 +349,7 @@ bool Fb2::parseXmlStream() {
     }
   }
 
-  file.close();
+  closeFileProtected(file);
 
   if (success) {
     postProcessMetadata();
@@ -631,11 +648,16 @@ size_t Fb2::readContent(uint8_t* buffer, size_t offset, size_t length) const {
   }
 
   if (offset > 0) {
+    snapix::spi::SharedBusLock lk;
     file.seek(offset);
   }
 
-  const int readResult = file.read(buffer, length);
-  file.close();
+  int readResult = 0;
+  {
+    snapix::spi::SharedBusLock lk;
+    readResult = file.read(buffer, length);
+    file.close();
+  }
 
   return readResult > 0 ? static_cast<size_t>(readResult) : 0;
 }

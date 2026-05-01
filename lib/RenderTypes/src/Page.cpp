@@ -17,6 +17,16 @@
 
 #define TAG "PAGE"
 
+namespace {
+
+inline void appendUniqueCodepoint(std::vector<uint32_t>& codepoints, const uint32_t cp) {
+  if (std::find(codepoints.begin(), codepoints.end(), cp) == codepoints.end()) {
+    codepoints.push_back(cp);
+  }
+}
+
+}  // namespace
+
 IRAM_ATTR void PageLine::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset, const bool black) {
   block->render(renderer, fontId, xPos + xOffset, yPos + yOffset, black);
 }
@@ -79,11 +89,10 @@ IRAM_ATTR void Page::render(GfxRenderer& renderer, const int fontId, const int x
 
 void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
   // Batch glyph warming across the entire page.  Per-line warming caused
-  // LRU thrashing in the external font cache (~80 entries) when Cyrillic /
-  // CJK pages had 100+ unique codepoints split across many words; cold
-  // first-render took 15s.  Collecting all codepoints once and dispatching
-  // a single batch per style amortises sort/dedup and lets preloadGlyphs
-  // see the full page set so the LRU never evicts a glyph the page needs.
+  // LRU thrashing when Cyrillic / CJK pages had 100+ unique codepoints split
+  // across many words.  Keep first-seen render order instead of sorting by
+  // Unicode value: if the page exceeds the bitmap cache, the warmed LRU now
+  // favors the glyphs that will be drawn first.
   //
   // Codepoints are bucketed per style (REGULAR / BOLD / ITALIC / BOLD_ITALIC)
   // because each style has its own glyph data.  When fakeBold is enabled,
@@ -107,15 +116,13 @@ void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
       const unsigned char* ptr = reinterpret_cast<const unsigned char*>(text);
       uint32_t cp;
       while ((cp = utf8NextCodepoint(&ptr))) {
-        bucket[idx].push_back(cp);
+        appendUniqueCodepoint(bucket[idx], cp);
       }
     }
   }
 
   for (int s = 0; s < 4; s++) {
     if (bucket[s].empty()) continue;
-    std::sort(bucket[s].begin(), bucket[s].end());
-    bucket[s].erase(std::unique(bucket[s].begin(), bucket[s].end()), bucket[s].end());
     renderer.warmCodepointsBatch(fontId, bucket[s].data(), bucket[s].size(),
                                   static_cast<EpdFontFamily::Style>(s));
   }

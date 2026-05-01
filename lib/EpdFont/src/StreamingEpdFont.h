@@ -105,10 +105,15 @@ class StreamingEpdFont {
   static constexpr int getCacheSize() { return CACHE_SIZE; }
 
  private:
-  // Cache configuration
-  // 32 entries balances hit rate vs RAM — halves scattered bitmap allocations vs 64.
-  // Latin/Western pages rarely exceed 30 unique glyphs; CJK uses ExternalFont.
-  static constexpr int CACHE_SIZE = 32;
+  // Cache configuration.
+  // Cyrillic reader pages routinely exceed 80 unique glyphs once uppercase,
+  // punctuation, digits and soft-hyphen variants are included.  Keeping the
+  // page-warmed glyph set resident avoids cold first-render stalls where the
+  // renderer repeatedly reloads bitmap data from SD through the shared SPI bus.
+#ifndef STREAMING_EPDFONT_CACHE_SIZE
+#define STREAMING_EPDFONT_CACHE_SIZE 192
+#endif
+  static constexpr int CACHE_SIZE = STREAMING_EPDFONT_CACHE_SIZE;
   static constexpr uint32_t INVALID_CODEPOINT = 0xFFFFFFFF;
 
   // Maximum allowed glyph bitmap size (defense against corrupted font files)

@@ -96,9 +96,15 @@ bool evictCacheFile(const std::string& cachePath, const char* reason) {
     return true;
   }
 
-  if (SdMan.remove(cachePath.c_str())) {
-    LOG_INF(TAG, "Removed stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());
-    return true;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    if (attempt > 0) delay(25);
+    if (!SdMan.exists(cachePath.c_str())) {
+      return true;
+    }
+    if (SdMan.remove(cachePath.c_str())) {
+      LOG_INF(TAG, "Removed stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());
+      return true;
+    }
   }
 
   const std::string quarantinePath = cachePath + ".stale";
@@ -106,10 +112,16 @@ bool evictCacheFile(const std::string& cachePath, const char* reason) {
     SdMan.remove(quarantinePath.c_str());
   }
 
-  if (SdMan.rename(cachePath.c_str(), quarantinePath.c_str())) {
-    LOG_INF(TAG, "Quarantined stale cache file reason=%s path=%s quarantine=%s", reason ? reason : "unknown",
-            cachePath.c_str(), quarantinePath.c_str());
-    return true;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    if (attempt > 0) delay(25);
+    if (!SdMan.exists(cachePath.c_str())) {
+      return true;
+    }
+    if (SdMan.rename(cachePath.c_str(), quarantinePath.c_str())) {
+      LOG_INF(TAG, "Quarantined stale cache file reason=%s path=%s quarantine=%s", reason ? reason : "unknown",
+              cachePath.c_str(), quarantinePath.c_str());
+      return true;
+    }
   }
 
   LOG_ERR(TAG, "Failed to evict stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());

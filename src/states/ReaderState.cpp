@@ -1550,7 +1550,7 @@ void ReaderState::renderCachedPage(Core& core) {
     renderOverridePage_.clear();
     LOG_DBG(TAG, "Rendered via detached warm page spine=%d page=%d", currentSpineIndex_, currentSectionPage_);
     renderLoadedPage(core, pageSlot.page, pageSlot.pageCount, pageSlot.isPartial, theme, vp, totalStartMs,
-                     !isWorkerRunning());
+                     !isWorkerRunning(), true);
     return;
   }
 
@@ -1664,11 +1664,20 @@ void ReaderState::renderCachedPage(Core& core) {
 
 void ReaderState::renderLoadedPage(Core& core, const std::shared_ptr<Page>& page, const size_t pageCount,
                                    const bool cacheIsPartial, const Theme& theme, const Viewport& vp,
-                                   const uint32_t totalStartMs, const bool allowPagePrefetch) {
+                                   const uint32_t totalStartMs, const bool allowPagePrefetch,
+                                   const bool pageGlyphsWarm) {
   renderer_.clearScreen(theme.backgroundColor);
 
   const int fontId = core.settings.getReaderFontId(theme);
   const bool aaEnabled = core.settings.textAntiAliasing && renderer_.fontSupportsGrayscale(fontId);
+
+  TextBlock::bionicReading = core.settings.bionicReading;
+  TextBlock::fakeBold = core.settings.fakeBold;
+  if (!pageGlyphsWarm) {
+    const uint32_t glyphWarmMs = reader::perfMsNow();
+    page->warmGlyphs(renderer_, fontId);
+    readerPerfLog("reader-glyph-warm", glyphWarmMs, nullptr);
+  }
 
   const uint32_t renderBwMs = reader::perfMsNow();
   renderPageContents(core, *page, vp.marginTop, vp.marginRight, vp.marginBottom, vp.marginLeft);

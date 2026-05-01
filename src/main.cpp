@@ -463,8 +463,10 @@ bool earlyInit() {
 
   LOG_INF(TAG, "Starting Snapix version " SNAPIX_VERSION);
 
-  // Initialize battery ADC pin with proper attenuation for 0-3.3V range
-  analogSetPinAttenuation(BAT_GPIO0, ADC_11db);
+  // Set the default ADC attenuation before the first battery/button read.
+  // Pin-specific attenuation requires the pin to be registered by analogRead()
+  // first on Arduino-ESP32 3.x, otherwise it logs "Pin is not configured".
+  analogSetAttenuation(ADC_11db);
 
   // Initialize internal flash filesystem for font storage
   if (!LittleFS.begin(false)) {

@@ -2,6 +2,7 @@
 
 #include <RenderConfig.h>
 #include <SdFat.h>
+#include <SharedSpiLock.h>
 
 #include <functional>
 #include <memory>
@@ -64,7 +65,19 @@ class PageCache {
 
  public:
   explicit PageCache(std::string cachePath);
-  ~PageCache() = default;
+  ~PageCache() {
+    snapix::spi::SharedBusLock lk;
+    if (readFile_) {
+      readFile_.close();
+    }
+    if (file_) {
+#ifdef ARDUINO
+      file_.sync();
+#endif
+      file_.close();
+    }
+    residentPages_.clear();
+  }
 
   /**
    * Try to load existing cache from disk.

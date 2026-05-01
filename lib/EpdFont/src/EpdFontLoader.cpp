@@ -3,6 +3,7 @@
 #include <LittleFS.h>
 #include <Logging.h>
 #include <SDCardManager.h>
+#include <SharedSpiLock.h>
 
 #include <cstring>
 
@@ -41,6 +42,11 @@ EpdFontLoader::LoadResult EpdFontLoader::loadFromFile(const char* path) {
     FsFile file = SdMan.open(path, O_RDONLY);
     if (!file) {
       LOG_ERR(TAG, "Cannot open file: %s (attempt %d)", path, attempt + 1);
+      continue;
+    }
+    snapix::spi::SharedBusLock lk;
+    if (!lk) {
+      file.close();
       continue;
     }
 
@@ -180,6 +186,11 @@ EpdFontLoader::StreamingLoadResult EpdFontLoader::loadForStreaming(const char* p
 
     FsFile file = SdMan.open(path, O_RDONLY);
     if (!file) {
+      continue;
+    }
+    snapix::spi::SharedBusLock lk;
+    if (!lk) {
+      file.close();
       continue;
     }
 
