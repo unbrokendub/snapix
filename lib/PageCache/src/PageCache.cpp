@@ -722,8 +722,21 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     isPartial_ = true;
     if (!writeLut(lut)) {
       closeFileProtected(file_);
+      // writeLut failed BEFORE updating the on-disk header — the file (if kept)
+      // still references the previous LUT and pre-extend page count.  Roll the
+      // in-memory state back to match what's actually on disk; otherwise
+      // pageCount_ overshoots pageLut_ and a subsequent loadPage(N) reads
+      // pageLut_[N] out of bounds.
       if (!isExtendPass) {
         evictCacheFile(cachePath_, "create-partial-write-lut-failed");
+        pageCount_ = 0;
+        isPartial_ = false;
+        pageLut_.clear();
+        clearResidentPages();
+      } else {
+        pageCount_ = initialPageCount;
+        // pageLut_ already holds the pre-extend snapshot from loadLut().
+        // isPartial_ stays true — that's the on-disk state we're preserving.
       }
       return false;
     }
@@ -837,9 +850,19 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
       // invalidate the parser so the next attempt uses cold extend.
       isPartial_ = true;
       parser.reset();
-      // Save whatever progress was made.
+      // Save whatever progress was made.  If writeLut() fails (e.g. a zero
+      // position in the LUT signals file corruption), the on-disk header still
+      // points to the old LUT but pageCount_ in memory reflects new appended
+      // pages.  Roll back in-memory state to match what's actually on disk —
+      // otherwise the next loadPage(N) reads pageLut_[N] out-of-bounds.
       if (pageCount_ > pagesBefore) {
-        writeLut(lut);
+        if (!writeLut(lut)) {
+          LOG_ERR(TAG, "writeLut failed in OOM recovery — rolling back in-memory state");
+          pageCount_ = pagesBefore;
+          // pageLut_ stays at its pre-extend snapshot via existing loadLut() path.
+          closeFileProtected(file_);
+          return false;
+        }
       }
       closeFileProtected(file_);
       return pageCount_ > pagesBefore;
