@@ -118,31 +118,19 @@ class StreamingEpdFont {
   static constexpr int getCacheSize() { return CACHE_SIZE; }
 
  private:
-  // Cache configuration — pool-allocated to eliminate heap fragmentation.
-  //
-  // Previous design used CACHE_SIZE separate `new uint8_t[size]` allocations
-  // for each cached glyph bitmap.  On Cyrillic / extended-Latin pages with
-  // 70-100 unique glyphs, the resulting hundred-odd small allocations
-  // pulverised the heap into 100-byte fragments — heap.largest dropped from
-  // ~65 KB to ~7 KB during a single first-render, blocking the background
-  // cache extender ('skip background cache: heap critical') and stretching
-  // page-0 of subsequent books to 10-30 seconds.
-  //
-  // Current design: one contiguous 32 KB pool allocated per font instance.
-  // Each cache slot owns a fixed POOL_SLOT_SIZE-byte slice indexed by
-  // (slot_index * POOL_SLOT_SIZE).  LRU eviction overwrites the slice
-  // in-place — zero per-glyph allocations, zero heap fragmentation.
-  //
-  // Glyphs whose bitmap exceeds POOL_SLOT_SIZE (rare: only large CJK) bypass
-  // the cache and render through a single scratch buffer.  Rendering still
-  // works, but those glyphs read SD on every access.
-  static constexpr size_t POOL_BYTES = 32 * 1024;       // 32 KB single contiguous allocation
-  static constexpr uint16_t POOL_SLOT_SIZE = 384;       // bytes per slot — covers 2-bit Cyrillic / Latin glyphs
-  static constexpr int CACHE_SIZE = POOL_BYTES / POOL_SLOT_SIZE;  // 85 slots
+  // Cache configuration.
+  // Cyrillic reader pages routinely exceed 80 unique glyphs once uppercase,
+  // punctuation, digits and soft-hyphen variants are included.  Keeping the
+  // page-warmed glyph set resident avoids cold first-render stalls where the
+  // renderer repeatedly reloads bitmap data from SD through the shared SPI bus.
+#ifndef STREAMING_EPDFONT_CACHE_SIZE
+#define STREAMING_EPDFONT_CACHE_SIZE 192
+#endif
+  static constexpr int CACHE_SIZE = STREAMING_EPDFONT_CACHE_SIZE;
   static constexpr uint32_t INVALID_CODEPOINT = 0xFFFFFFFF;
 
-  // Maximum allowed glyph bitmap size (defense against corrupted font files,
-  // also the size of the scratch buffer for rare oversized glyphs).
+  // Maximum allowed glyph bitmap size (defense against corrupted font files)
+  // Typical glyph is ~200 bytes; 4KB allows for large CJK characters
   static constexpr uint16_t MAX_GLYPH_BITMAP_SIZE = 4096;
 
   // Hash table markers
@@ -167,24 +155,17 @@ class StreamingEpdFont {
   size_t _glyphsSize = 0;
   size_t _intervalsSize = 0;
 
-  // Pool storage — single contiguous allocation, lives for the lifetime
-  // of the font instance.  Slot N's bitmap data lives at _pool + N*POOL_SLOT_SIZE.
-  uint8_t* _pool = nullptr;
-  // Scratch buffer for glyphs whose bitmap exceeds POOL_SLOT_SIZE.  These
-  // bypass the cache (no LRU storage), but rendering still works.  Allocated
-  // lazily on first oversized glyph encounter.
-  uint8_t* _scratch = nullptr;
-
-  // LRU bitmap cache — slot metadata only, the bitmap data lives in _pool.
+  // LRU bitmap cache
   struct CachedBitmap {
     uint32_t glyphIndex = INVALID_CODEPOINT;  // Which glyph this bitmap belongs to
-    uint16_t bitmapSize = 0;                  // Actual bytes used in this slot's pool slice
+    uint8_t* bitmap = nullptr;                // Dynamically allocated per glyph size
+    uint16_t bitmapSize = 0;                  // Size of bitmap allocation
     uint32_t lastUsed = 0;                    // For LRU eviction
   };
   CachedBitmap _cache[CACHE_SIZE];
   int16_t _hashTable[CACHE_SIZE];
   uint32_t _accessCounter = 0;
-  size_t _totalCacheAllocation = 0;  // Live bytes used across cache slots (≤ POOL_BYTES)
+  size_t _totalCacheAllocation = 0;  // Track total bytes allocated in cache
   int _tombstoneCount = 0;           // Track tombstones to trigger rehashing
 
   // Cache statistics
@@ -203,10 +184,7 @@ class StreamingEpdFont {
   static int hashIndex(uint32_t index) { return index % CACHE_SIZE; }
   int findInBitmapCache(uint32_t glyphIndex);
   int getLruSlot();
-  // Read glyph bitmap from SD into the supplied buffer.  bufLen must be ≥ glyph dataLength.
-  bool readGlyphBitmap(uint32_t glyphIndex, uint8_t* buf, uint16_t bufLen);
-  // Pool slice for a given cache slot — stable for the font's lifetime.
-  uint8_t* slotBuffer(int slotIdx) const { return _pool + slotIdx * POOL_SLOT_SIZE; }
+  bool loadGlyphBitmap(uint32_t glyphIndex, CachedBitmap& entry);
   const EpdGlyph* lookupGlyph(uint32_t cp) const;
   void rehashTable();  // Rebuild hash table to clear tombstones
 };
