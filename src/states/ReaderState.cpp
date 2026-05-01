@@ -508,6 +508,18 @@ void ReaderState::enter(Core& core) {
   if (!sameReaderFontAsBefore) {
     FONT_MANAGER.unloadReaderFonts();
     renderer_.clearWidthCache();
+  } else {
+    // Same font is preserved across the book switch — the streaming font
+    // bitmap cache holds glyphs from the previous book.  Across many book
+    // switches these scattered allocations fragment the heap (we've seen
+    // largest=7668 after 3 books) and block background cache extension.
+    //
+    // Drop the bitmap cache (cheap: only re-warmed on first page render of
+    // the new book, ~200ms) but KEEP the font's intervals + glyph table +
+    // open SD file.  This defragments the heap without paying the cold-load
+    // penalty of a full unload+reload.
+    FONT_MANAGER.clearStreamingBitmapCaches();
+    renderer_.clearWidthCache();
   }
   const reader::HeapState heapAfterTrim = reader::readHeapState();
   LOG_INF(TAG, "Entry heap trim: free=%u->%u largest=%u->%u fontBytes=%u sameFont=%u",

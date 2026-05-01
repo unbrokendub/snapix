@@ -95,6 +95,19 @@ class StreamingEpdFont {
   size_t getMemoryUsage() const;
 
   /**
+   * Free all cached glyph bitmaps WITHOUT unloading the font.
+   *
+   * The intervals + glyph table + open file handle remain in RAM, so the font
+   * stays usable.  Frees the up to CACHE_SIZE scattered bitmap allocations
+   * that accumulate across book transitions and fragment the heap.
+   *
+   * Call this on book switch (when the font is preserved via sameFont) to
+   * defragment the heap without paying the cold-load penalty of a full
+   * unload + reload.
+   */
+  void clearBitmapCache();
+
+  /**
    * Log cache statistics for debugging.
    */
   void logCacheStats() const;

@@ -64,6 +64,35 @@ bool StreamingEpdFont::load(const char* path) {
   return true;
 }
 
+void StreamingEpdFont::clearBitmapCache() {
+  if (!_isLoaded) return;
+
+  // Free all cached bitmap allocations.  Each bitmap is a small (~50-500 byte)
+  // heap chunk; over many book transitions these accumulate as scattered
+  // fragments that prevent larger contiguous allocations.
+  for (int i = 0; i < CACHE_SIZE; i++) {
+    delete[] _cache[i].bitmap;
+    _cache[i].bitmap = nullptr;
+    _cache[i].glyphIndex = INVALID_CODEPOINT;
+    _cache[i].bitmapSize = 0;
+    _cache[i].lastUsed = 0;
+    _hashTable[i] = HASH_EMPTY;
+  }
+
+  // Glyph lookup cache (codepoint -> glyph*) doesn't allocate, but reset it
+  // anyway so stale pointers can't be returned.
+  for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
+    _glyphCache[i].codepoint = INVALID_CODEPOINT;
+    _glyphCache[i].glyph = nullptr;
+  }
+
+  _accessCounter = 0;
+  _totalCacheAllocation = 0;
+  _tombstoneCount = 0;
+  _cacheHits = 0;
+  _cacheMisses = 0;
+}
+
 void StreamingEpdFont::unload() {
   if (_fontFile) {
     snapix::spi::SharedBusLock lk;

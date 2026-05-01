@@ -465,6 +465,16 @@ void FontManager::unloadReaderFonts() {
   unloadExternalFont();
 }
 
+void FontManager::clearStreamingBitmapCaches() {
+  for (auto& pair : loadedFamilies) {
+    for (auto& font : pair.second.fonts) {
+      if (font.streamingFont) {
+        font.streamingFont->clearBitmapCache();
+      }
+    }
+  }
+}
+
 bool FontManager::isReaderFontAlreadyActive(const char* familyName) const {
   // Builtin font (empty/null name) or deferred .bin external font:
   // both result in _activeReaderFontId == 0.  Same if active is also 0.

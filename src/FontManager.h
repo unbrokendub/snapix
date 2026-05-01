@@ -169,6 +169,15 @@ class FontManager {
   void unloadReaderFonts();
 
   /**
+   * Defragment heap by clearing the streaming-font glyph bitmap caches
+   * WITHOUT unloading the fonts themselves.  Use this on book transitions
+   * where the same font is preserved (sameFont path) — frees the up to
+   * CACHE_SIZE scattered bitmap allocations that fragment the heap across
+   * book switches.
+   */
+  void clearStreamingBitmapCaches();
+
+  /**
    * Get total RAM usage by all loaded custom fonts (from SD card).
    * Does not include built-in fonts (they are in Flash).
    * @return Total bytes used by custom fonts
