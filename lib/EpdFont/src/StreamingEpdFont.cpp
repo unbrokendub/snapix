@@ -60,6 +60,35 @@ bool StreamingEpdFont::load(const char* path) {
     return false;
   }
 
+  // Allocate the bitmap pool — one contiguous 32 KB buffer that stays put
+  // for the lifetime of the font.  Each cache slot owns a fixed slice.
+  // This eliminates the per-glyph `new[]` calls that previously fragmented
+  // the heap during a single page render.
+  _pool = new (std::nothrow) uint8_t[POOL_BYTES];
+  if (!_pool) {
+    snapix::spi::SharedBusLock lk;
+    _fontFile.close();
+    delete[] _glyphs;
+    delete[] _intervals;
+    _glyphs = nullptr;
+    _intervals = nullptr;
+    return false;
+  }
+
+  // Reset cache state.  All slots already have INVALID glyphIndex from the
+  // default initialiser; only the hash table needs explicit reset.
+  for (int i = 0; i < CACHE_SIZE; i++) {
+    _hashTable[i] = HASH_EMPTY;
+    _cache[i].glyphIndex = INVALID_CODEPOINT;
+    _cache[i].bitmapSize = 0;
+    _cache[i].lastUsed = 0;
+  }
+  _accessCounter = 0;
+  _totalCacheAllocation = 0;
+  _tombstoneCount = 0;
+  _cacheHits = 0;
+  _cacheMisses = 0;
+
   _isLoaded = true;
   return true;
 }
@@ -67,20 +96,18 @@ bool StreamingEpdFont::load(const char* path) {
 void StreamingEpdFont::clearBitmapCache() {
   if (!_isLoaded) return;
 
-  // Free all cached bitmap allocations.  Each bitmap is a small (~50-500 byte)
-  // heap chunk; over many book transitions these accumulate as scattered
-  // fragments that prevent larger contiguous allocations.
+  // With the pool design there is nothing to free here — the pool is one
+  // contiguous allocation that lives until unload().  Resetting metadata
+  // simply marks every slot as available so the next render's glyph warm
+  // starts fresh (useful on book transitions where the previous book's
+  // codepoint set is irrelevant to the new one).
   for (int i = 0; i < CACHE_SIZE; i++) {
-    delete[] _cache[i].bitmap;
-    _cache[i].bitmap = nullptr;
     _cache[i].glyphIndex = INVALID_CODEPOINT;
     _cache[i].bitmapSize = 0;
     _cache[i].lastUsed = 0;
     _hashTable[i] = HASH_EMPTY;
   }
 
-  // Glyph lookup cache (codepoint -> glyph*) doesn't allocate, but reset it
-  // anyway so stale pointers can't be returned.
   for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
     _glyphCache[i].codepoint = INVALID_CODEPOINT;
     _glyphCache[i].glyph = nullptr;
@@ -102,10 +129,14 @@ void StreamingEpdFont::unload() {
   delete[] _glyphs;
   delete[] _intervals;
 
-  // Free all cached bitmaps
+  // Free pool and scratch buffer (single allocations).
+  delete[] _pool;
+  _pool = nullptr;
+  delete[] _scratch;
+  _scratch = nullptr;
+
+  // Reset cache slots metadata
   for (int i = 0; i < CACHE_SIZE; i++) {
-    delete[] _cache[i].bitmap;
-    _cache[i].bitmap = nullptr;
     _cache[i].glyphIndex = INVALID_CODEPOINT;
     _cache[i].bitmapSize = 0;
     _cache[i].lastUsed = 0;
@@ -214,47 +245,34 @@ int StreamingEpdFont::getLruSlot() {
   return lruIndex;
 }
 
-bool StreamingEpdFont::loadGlyphBitmap(uint32_t glyphIndex, CachedBitmap& entry) {
-  if (!_fontFile || glyphIndex >= _glyphCount) {
+bool StreamingEpdFont::readGlyphBitmap(uint32_t glyphIndex, uint8_t* buf, uint16_t bufLen) {
+  if (!_fontFile || glyphIndex >= _glyphCount || !buf) {
     return false;
   }
 
   const EpdGlyph& glyph = _glyphs[glyphIndex];
   const uint16_t dataLen = glyph.dataLength;
 
-  // Validate dataLength against maximum (defense against corrupted font files)
-  if (dataLen > MAX_GLYPH_BITMAP_SIZE) {
+  if (dataLen == 0 || dataLen > MAX_GLYPH_BITMAP_SIZE || dataLen > bufLen) {
     return false;
   }
 
-  // Reallocate bitmap buffer if needed
-  if (entry.bitmapSize < dataLen) {
-    const uint16_t oldSize = entry.bitmapSize;
-    delete[] entry.bitmap;
-    entry.bitmap = new (std::nothrow) uint8_t[dataLen];
-    if (!entry.bitmap) {
-      entry.bitmapSize = 0;
-      return false;
-    }
-    entry.bitmapSize = dataLen;
-  }
-
-  // Calculate file position: bitmapOffset + glyph's dataOffset
-  // Retry seek+read on transient SD card failures (file handle stays valid)
-  uint32_t filePos = _bitmapOffset + glyph.dataOffset;
+  // Calculate file position: bitmapOffset + glyph's dataOffset.
+  // Retry seek+read on transient SD card failures (file handle stays valid).
+  const uint32_t filePos = _bitmapOffset + glyph.dataOffset;
   for (int attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) delay(50);
     snapix::spi::SharedBusLock lk;
     if (!lk) continue;
     if (!_fontFile.seek(filePos)) continue;
-    if (_fontFile.read(entry.bitmap, dataLen) == dataLen) return true;
+    if (_fontFile.read(buf, dataLen) == dataLen) return true;
   }
 
   return false;
 }
 
 const uint8_t* StreamingEpdFont::getGlyphBitmap(const EpdGlyph* glyph) {
-  if (!_isLoaded || !glyph) return nullptr;
+  if (!_isLoaded || !glyph || !_pool) return nullptr;
 
   // Validate glyph pointer belongs to this font instance (defense against wrong font)
   if (glyph < _glyphs || glyph >= _glyphs + _glyphCount) {
@@ -262,22 +280,40 @@ const uint8_t* StreamingEpdFont::getGlyphBitmap(const EpdGlyph* glyph) {
   }
 
   // Calculate glyph index from pointer arithmetic (now safe after validation)
-  uint32_t glyphIndex = glyph - _glyphs;
+  const uint32_t glyphIndex = glyph - _glyphs;
+  const uint16_t dataLen = _glyphs[glyphIndex].dataLength;
+  if (dataLen == 0 || dataLen > MAX_GLYPH_BITMAP_SIZE) return nullptr;
 
-  // Check bitmap cache
+  // Hot path: cache hit.  Returns a pointer into the stable pool slice.
   int cacheIndex = findInBitmapCache(glyphIndex);
   if (cacheIndex >= 0) {
     _cache[cacheIndex].lastUsed = ++_accessCounter;
     _cacheHits++;
-    return _cache[cacheIndex].bitmap;
+    return slotBuffer(cacheIndex);
   }
 
   _cacheMisses++;
 
-  // Cache miss - need to load from SD
+  // Glyphs whose bitmap exceeds POOL_SLOT_SIZE bypass the cache and render
+  // through a single shared scratch buffer.  No LRU storage, no caching —
+  // the renderer reads the returned pointer for one drawText pass and
+  // doesn't keep it.  Rare in practice (only large CJK glyphs).
+  if (dataLen > POOL_SLOT_SIZE) {
+    if (!_scratch) {
+      _scratch = new (std::nothrow) uint8_t[MAX_GLYPH_BITMAP_SIZE];
+      if (!_scratch) return nullptr;
+    }
+    if (!readGlyphBitmap(glyphIndex, _scratch, MAX_GLYPH_BITMAP_SIZE)) {
+      return nullptr;
+    }
+    return _scratch;
+  }
+
+  // Cache miss within slot capacity — pick LRU slot, overwrite its pool slice.
   int slot = getLruSlot();
 
-  // If replacing an existing entry, mark it as tombstone in hash table
+  // If we are evicting a live entry, mark its hash entry as tombstone so
+  // future lookups on its codepoint correctly miss.
   if (_cache[slot].glyphIndex != INVALID_CODEPOINT) {
     int oldHash = hashIndex(_cache[slot].glyphIndex);
     for (int i = 0; i < CACHE_SIZE; i++) {
@@ -288,21 +324,25 @@ const uint8_t* StreamingEpdFont::getGlyphBitmap(const EpdGlyph* glyph) {
         break;
       }
     }
-    // Rehash if too many tombstones have accumulated
     if (_tombstoneCount >= TOMBSTONE_REHASH_THRESHOLD) {
       rehashTable();
     }
   }
 
-  // Load glyph bitmap from SD
-  if (!loadGlyphBitmap(glyphIndex, _cache[slot])) {
+  // Read directly into the slot's fixed pool slice.  No allocation, no
+  // realloc — the slice was carved out at font load.
+  if (!readGlyphBitmap(glyphIndex, slotBuffer(slot), POOL_SLOT_SIZE)) {
+    // Read failed.  Mark slot empty so we don't return stale data on next hit.
+    _cache[slot].glyphIndex = INVALID_CODEPOINT;
+    _cache[slot].bitmapSize = 0;
     return nullptr;
   }
 
   _cache[slot].glyphIndex = glyphIndex;
+  _cache[slot].bitmapSize = dataLen;
   _cache[slot].lastUsed = ++_accessCounter;
 
-  // Recompute actual live allocation for this slot after potential reuse/realloc.
+  // Live bytes used across all slots — for memory profiling.
   size_t totalAllocation = 0;
   for (int i = 0; i < CACHE_SIZE; i++) {
     totalAllocation += _cache[i].bitmapSize;
@@ -335,7 +375,7 @@ const uint8_t* StreamingEpdFont::getGlyphBitmap(const EpdGlyph* glyph) {
     }
   }
 
-  return _cache[slot].bitmap;
+  return slotBuffer(slot);
 }
 
 void StreamingEpdFont::rehashTable() {
@@ -414,7 +454,9 @@ size_t StreamingEpdFont::getMemoryUsage() const {
   size_t usage = sizeof(StreamingEpdFont);
   usage += _glyphsSize;
   usage += _intervalsSize;
-  usage += _totalCacheAllocation;
+  // Pool is one fixed-size allocation that lives for the font's lifetime.
+  if (_pool) usage += POOL_BYTES;
+  if (_scratch) usage += MAX_GLYPH_BITMAP_SIZE;
   return usage;
 }
 
