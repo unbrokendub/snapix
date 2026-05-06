@@ -187,4 +187,5 @@ class StreamingEpdFont {
   bool loadGlyphBitmap(uint32_t glyphIndex, CachedBitmap& entry);
   const EpdGlyph* lookupGlyph(uint32_t cp) const;
   void rehashTable();  // Rebuild hash table to clear tombstones
+  uint32_t advanceAccessCounter();  // Wrap-aware LRU stamp
 };

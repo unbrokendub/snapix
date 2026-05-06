@@ -197,6 +197,36 @@ int StreamingEpdFont::findInBitmapCache(uint32_t glyphIndex) {
   return -1;
 }
 
+uint32_t StreamingEpdFont::advanceAccessCounter() {
+  // _accessCounter is uint32_t — wraps after ~4B glyph accesses (rare but
+  // theoretically reachable on long-running devices).  After wrap, the naive
+  // `lastUsed < minUsed` LRU comparison in getLruSlot() inverts: fresh entries
+  // get tiny stamps and are evicted before stale ones holding pre-wrap values.
+  // On wrap, renumber all live timestamps down to a contiguous low range so
+  // ordering is preserved.
+  if (++_accessCounter == 0) {
+    // Collect (slot, lastUsed) pairs and sort by lastUsed to assign 1..N.
+    // CACHE_SIZE is small (typ. 64) so an O(N²) selection sort is fine.
+    bool used[CACHE_SIZE] = {};
+    for (int rank = 1; rank <= CACHE_SIZE; rank++) {
+      int oldest = -1;
+      uint32_t oldestStamp = 0;
+      for (int i = 0; i < CACHE_SIZE; i++) {
+        if (used[i]) continue;
+        if (oldest < 0 || _cache[i].lastUsed < oldestStamp) {
+          oldest = i;
+          oldestStamp = _cache[i].lastUsed;
+        }
+      }
+      if (oldest < 0) break;
+      _cache[oldest].lastUsed = static_cast<uint32_t>(rank);
+      used[oldest] = true;
+    }
+    _accessCounter = static_cast<uint32_t>(CACHE_SIZE) + 1;
+  }
+  return _accessCounter;
+}
+
 int StreamingEpdFont::getLruSlot() {
   int lruIndex = 0;
   uint32_t minUsed = _cache[0].lastUsed;
@@ -267,7 +297,7 @@ const uint8_t* StreamingEpdFont::getGlyphBitmap(const EpdGlyph* glyph) {
   // Check bitmap cache
   int cacheIndex = findInBitmapCache(glyphIndex);
   if (cacheIndex >= 0) {
-    _cache[cacheIndex].lastUsed = ++_accessCounter;
+    _cache[cacheIndex].lastUsed = advanceAccessCounter();
     _cacheHits++;
     return _cache[cacheIndex].bitmap;
   }
@@ -300,7 +330,7 @@ const uint8_t* StreamingEpdFont::getGlyphBitmap(const EpdGlyph* glyph) {
   }
 
   _cache[slot].glyphIndex = glyphIndex;
-  _cache[slot].lastUsed = ++_accessCounter;
+  _cache[slot].lastUsed = advanceAccessCounter();
 
   // Recompute actual live allocation for this slot after potential reuse/realloc.
   size_t totalAllocation = 0;
