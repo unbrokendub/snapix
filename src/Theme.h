@@ -141,6 +141,13 @@ inline Theme getBuiltinMonoTheme() {
   theme.readerFontId = JETBRAINS_MONO_11_FONT_ID;
   theme.readerFontIdMedium = JETBRAINS_MONO_12_FONT_ID;
   theme.readerFontIdLarge = JETBRAINS_MONO_13_FONT_ID;
+  // Anchor the status bar bottom to where the default small14 status font
+  // would sit.  small14 metrics: ascender 23, descender -5 → text spans
+  // textY..textY+28.  jetbrains_mono_4 metrics: ascender 9, descender -3 →
+  // text spans textY..textY+12.  Offset = 28 − 12 = 16 makes the descender
+  // bottoms coincide so the small mono font does not appear to float above
+  // the natural status bar baseline.
+  theme.statusBarOffsetY = 16;
   return theme;
 }
 
