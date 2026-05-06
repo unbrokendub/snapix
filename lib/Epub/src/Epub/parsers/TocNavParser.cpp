@@ -178,7 +178,15 @@ void XMLCALL TocNavParser::endElement(void* userData, const XML_Char* name) {
   }
 
   if (strcmp(name, "ol") == 0 && self->state >= IN_NAV_TOC) {
-    self->olDepth--;
+    // olDepth is uint8_t — guard against underflow when nav.xhtml is malformed
+    // with extra/unmatched </ol> tags.  Without the guard, olDepth wraps to
+    // 255 and every subsequent createTocEntry() reports an absurd depth,
+    // breaking the TOC tree visualisation.
+    if (self->olDepth > 0) {
+      self->olDepth--;
+    } else {
+      LOG_ERR(TAG, "Unmatched </ol> in nav.xhtml — ignoring");
+    }
     if (self->olDepth == 0) {
       self->state = IN_NAV_TOC;
     } else {
