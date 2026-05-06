@@ -195,15 +195,30 @@ Result<void> Settings::load(drivers::Storage& storage) {
 }
 
 int Settings::getReaderFontId(const Theme& theme) const {
+  // The theme's pre-set readerFontId* fields are honoured as the fallback
+  // when no external SD font is requested.  This lets builtin themes that
+  // bake their own embedded-font selection (e.g. the "JetBrains Mono"
+  // theme) actually flow through to the renderer — without this, the
+  // FONT_MANAGER fallback was always READER_FONT_ID (the existing
+  // reader_2b family) and the embedded JetBrains Mono variants were never
+  // consulted on book render.
   switch (fontSize) {
-    case FontXSmall:
-      return FONT_MANAGER.getReaderFontId(theme.readerFontFamilyXSmall, READER_FONT_ID_XSMALL);
-    case FontMedium:
-      return FONT_MANAGER.getReaderFontId(theme.readerFontFamilyMedium, READER_FONT_ID_MEDIUM);
-    case FontLarge:
-      return FONT_MANAGER.getReaderFontId(theme.readerFontFamilyLarge, READER_FONT_ID_LARGE);
-    default:  // FontSmall
-      return FONT_MANAGER.getReaderFontId(theme.readerFontFamilySmall, READER_FONT_ID);
+    case FontXSmall: {
+      const int builtin = (theme.readerFontIdXSmall != 0) ? theme.readerFontIdXSmall : READER_FONT_ID_XSMALL;
+      return FONT_MANAGER.getReaderFontId(theme.readerFontFamilyXSmall, builtin);
+    }
+    case FontMedium: {
+      const int builtin = (theme.readerFontIdMedium != 0) ? theme.readerFontIdMedium : READER_FONT_ID_MEDIUM;
+      return FONT_MANAGER.getReaderFontId(theme.readerFontFamilyMedium, builtin);
+    }
+    case FontLarge: {
+      const int builtin = (theme.readerFontIdLarge != 0) ? theme.readerFontIdLarge : READER_FONT_ID_LARGE;
+      return FONT_MANAGER.getReaderFontId(theme.readerFontFamilyLarge, builtin);
+    }
+    default: {  // FontSmall
+      const int builtin = (theme.readerFontId != 0) ? theme.readerFontId : READER_FONT_ID;
+      return FONT_MANAGER.getReaderFontId(theme.readerFontFamilySmall, builtin);
+    }
   }
 }
 
