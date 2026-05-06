@@ -60,13 +60,18 @@ jobs:
           cp .pio/build/release/firmware.bin "snapix-${{ steps.version.outputs.version }}-firmware.bin"
           cp .pio/build/release/bootloader.bin "snapix-${{ steps.version.outputs.version }}-bootloader.bin"
           cp .pio/build/release/partitions.bin "snapix-${{ steps.version.outputs.version }}-partitions.bin"
-          ls -lah snapix-*.bin
+          # SIL OFL 1.1 §56-61 requires the license to ride alongside each
+          # copy of the bundled font.  Ship the OFL text in the release.
+          cp scripts/jetbrains/OFL.txt "snapix-${{ steps.version.outputs.version }}-OFL.txt"
+          ls -lah snapix-*
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: snapix-firmware-${{ steps.version.outputs.version }}
-          path: snapix-*.bin
+          path: |
+            snapix-*.bin
+            snapix-*-OFL.txt
           retention-days: 30
 
       - name: Create GitHub Release
@@ -78,6 +83,7 @@ jobs:
             snapix-${{ steps.version.outputs.version }}-firmware.bin
             snapix-${{ steps.version.outputs.version }}-bootloader.bin
             snapix-${{ steps.version.outputs.version }}-partitions.bin
+            snapix-${{ steps.version.outputs.version }}-OFL.txt
           body: |
             ## Snapix ${{ steps.version.outputs.version }}
 
@@ -116,6 +122,14 @@ jobs:
             - `snapix-*-firmware.bin` — app only, for OTA or overwriting `app0`
             - `snapix-*-bootloader.bin` — 2nd-stage bootloader (offset `0x0`)
             - `snapix-*-partitions.bin` — partition table (offset `0x8000`)
+            - `snapix-*-OFL.txt` — SIL Open Font License 1.1 (mandatory companion to the bundled JetBrains Mono derivative; do not strip)
+
+            ### Third-party fonts
+
+            This release embeds the **Snapix Mono** font family (sizes 4 / 10 / 11 / 12 / 13, regular only),
+            a derivative of [JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono) by JetBrains s.r.o.
+            licensed under the [SIL Open Font License 1.1](https://openfontlicense.org). The accompanying
+            `OFL.txt` must be redistributed with any copy of the firmware.
           draft: false
           prerelease: false
         env:
