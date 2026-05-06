@@ -188,6 +188,13 @@ bool SDCardManager::writeFile(const char* path, const String& content) {
   }
 
   const size_t written = f.print(content);
+  // Explicit sync flushes file data + parent directory entry to the SD card
+  // before close().  Without this, SdFat keeps the directory cluster dirty
+  // in its single-sector cache; the next file operation can evict that
+  // sector and the freshly-written file appears to vanish.  Same fix as
+  // saveMetaCache; lifted into the SDCardManager primitive so all callers
+  // (settings, progress, bookmarks, generic writes) get it for free.
+  f.sync();
   f.close();
   return written == content.length();
 }
