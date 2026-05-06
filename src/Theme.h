@@ -151,7 +151,58 @@ inline Theme getBuiltinMonoTheme() {
   return theme;
 }
 
+/**
+ * "PT Mono" — geometric monospace by ParaType, optimised for Cyrillic.
+ * Status bar offset: small14 height 28, pt_mono_4 height 10, offset = 18.
+ */
+inline Theme getBuiltinPtMonoTheme() {
+  Theme theme = getBuiltinLightTheme();
+  strncpy(theme.displayName, "PT Mono", sizeof(theme.displayName));
+  theme.statusFontId = PT_MONO_4_FONT_ID;
+  theme.readerFontIdXSmall = PT_MONO_10_FONT_ID;
+  theme.readerFontId = PT_MONO_11_FONT_ID;
+  theme.readerFontIdMedium = PT_MONO_12_FONT_ID;
+  theme.readerFontIdLarge = PT_MONO_13_FONT_ID;
+  theme.statusBarOffsetY = 18;
+  return theme;
+}
+
+/**
+ * "IBM Plex Mono" — humanist monospace by IBM.  Status bar offset 16
+ * (same as JetBrains Mono — both have size-4 ascender 9, descender -3).
+ */
+inline Theme getBuiltinIbmPlexMonoTheme() {
+  Theme theme = getBuiltinLightTheme();
+  strncpy(theme.displayName, "IBM Plex Mono", sizeof(theme.displayName));
+  theme.statusFontId = IBM_PLEX_MONO_4_FONT_ID;
+  theme.readerFontIdXSmall = IBM_PLEX_MONO_10_FONT_ID;
+  theme.readerFontId = IBM_PLEX_MONO_11_FONT_ID;
+  theme.readerFontIdMedium = IBM_PLEX_MONO_12_FONT_ID;
+  theme.readerFontIdLarge = IBM_PLEX_MONO_13_FONT_ID;
+  theme.statusBarOffsetY = 16;
+  return theme;
+}
+
+/**
+ * "Literata" — serif designed for ebook reading by Type Network.  Status
+ * bar offset 15 (size-4 ascender 10, descender -3, height 13).
+ */
+inline Theme getBuiltinLiterataTheme() {
+  Theme theme = getBuiltinLightTheme();
+  strncpy(theme.displayName, "Literata", sizeof(theme.displayName));
+  theme.statusFontId = LITERATA_4_FONT_ID;
+  theme.readerFontIdXSmall = LITERATA_10_FONT_ID;
+  theme.readerFontId = LITERATA_11_FONT_ID;
+  theme.readerFontIdMedium = LITERATA_12_FONT_ID;
+  theme.readerFontIdLarge = LITERATA_13_FONT_ID;
+  theme.statusBarOffsetY = 15;
+  return theme;
+}
+
 // For use in initialization
 #define BUILTIN_LIGHT_THEME getBuiltinLightTheme()
 #define BUILTIN_DARK_THEME getBuiltinDarkTheme()
 #define BUILTIN_MONO_THEME getBuiltinMonoTheme()
+#define BUILTIN_PT_MONO_THEME getBuiltinPtMonoTheme()
+#define BUILTIN_IBM_PLEX_MONO_THEME getBuiltinIbmPlexMonoTheme()
+#define BUILTIN_LITERATA_THEME getBuiltinLiterataTheme()

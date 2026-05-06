@@ -61,8 +61,12 @@ jobs:
           cp .pio/build/release/bootloader.bin "snapix-${{ steps.version.outputs.version }}-bootloader.bin"
           cp .pio/build/release/partitions.bin "snapix-${{ steps.version.outputs.version }}-partitions.bin"
           # SIL OFL 1.1 §56-61 requires the license to ride alongside each
-          # copy of the bundled font.  Ship the OFL text in the release.
-          cp scripts/jetbrains/OFL.txt "snapix-${{ steps.version.outputs.version }}-OFL.txt"
+          # copy of the bundled font.  Ship the OFL text for each embedded
+          # family — JetBrains Mono, PT Mono, IBM Plex Mono, Literata.
+          cp scripts/jetbrains/OFL.txt        "snapix-${{ steps.version.outputs.version }}-OFL-JetBrainsMono.txt"
+          cp scripts/pt-mono/OFL.txt          "snapix-${{ steps.version.outputs.version }}-OFL-PTMono.txt"
+          cp scripts/ibm-plex-mono/OFL.txt    "snapix-${{ steps.version.outputs.version }}-OFL-IBMPlexMono.txt"
+          cp scripts/literata/OFL.txt         "snapix-${{ steps.version.outputs.version }}-OFL-Literata.txt"
           ls -lah snapix-*
 
       - name: Upload build artifacts
@@ -71,7 +75,7 @@ jobs:
           name: snapix-firmware-${{ steps.version.outputs.version }}
           path: |
             snapix-*.bin
-            snapix-*-OFL.txt
+            snapix-*-OFL-*.txt
           retention-days: 30
 
       - name: Create GitHub Release
@@ -83,7 +87,10 @@ jobs:
             snapix-${{ steps.version.outputs.version }}-firmware.bin
             snapix-${{ steps.version.outputs.version }}-bootloader.bin
             snapix-${{ steps.version.outputs.version }}-partitions.bin
-            snapix-${{ steps.version.outputs.version }}-OFL.txt
+            snapix-${{ steps.version.outputs.version }}-OFL-JetBrainsMono.txt
+            snapix-${{ steps.version.outputs.version }}-OFL-PTMono.txt
+            snapix-${{ steps.version.outputs.version }}-OFL-IBMPlexMono.txt
+            snapix-${{ steps.version.outputs.version }}-OFL-Literata.txt
           body: |
             ## Snapix ${{ steps.version.outputs.version }}
 
@@ -122,14 +129,23 @@ jobs:
             - `snapix-*-firmware.bin` — app only, for OTA or overwriting `app0`
             - `snapix-*-bootloader.bin` — 2nd-stage bootloader (offset `0x0`)
             - `snapix-*-partitions.bin` — partition table (offset `0x8000`)
-            - `snapix-*-OFL.txt` — SIL Open Font License 1.1 (mandatory companion to the bundled JetBrains Mono derivative; do not strip)
+            - `snapix-*-OFL-JetBrainsMono.txt` — SIL OFL 1.1 for JetBrains Mono NL (do not strip)
+            - `snapix-*-OFL-PTMono.txt` — SIL OFL 1.1 for PT Mono
+            - `snapix-*-OFL-IBMPlexMono.txt` — SIL OFL 1.1 for IBM Plex Mono
+            - `snapix-*-OFL-Literata.txt` — SIL OFL 1.1 for Literata
 
             ### Third-party fonts
 
-            This release embeds **[JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono)** by
-            JetBrains s.r.o. (sizes 4 / 10 / 11 / 12 / 13, regular only) for the in-flash "JetBrains Mono"
-            theme. Licensed under the [SIL Open Font License 1.1](https://openfontlicense.org); the
-            accompanying `OFL.txt` must be redistributed with any copy of the firmware.
+            This release embeds four font families (each in 5 sizes — 4 / 10 / 11 / 12 / 13 pt, regular
+            only, 2-bit grayscale) selectable via builtin themes:
+
+            - **[JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono)** by JetBrains s.r.o.
+            - **[PT Mono](https://www.paratype.com/fonts/pt/pt-mono)** by ParaType Ltd.
+            - **[IBM Plex Mono](https://github.com/IBM/plex)** by IBM Corp. (Mike Abbink, Bold Monday)
+            - **[Literata](https://fonts.google.com/specimen/Literata)** by Type Network for Google Fonts
+
+            All four are licensed under the [SIL Open Font License 1.1](https://openfontlicense.org);
+            the accompanying `OFL-*.txt` files must be redistributed with any copy of the firmware.
           draft: false
           prerelease: false
         env:

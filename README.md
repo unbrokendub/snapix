@@ -197,6 +197,13 @@ Snapix is a fork of **[Papyrix](https://github.com/bigbag/papyrix-reader)** by b
 
 ## Third-party fonts
 
-The firmware embeds **[JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono)** by JetBrains s.r.o. in five sizes (4 / 10 / 11 / 12 / 13 pt, regular only) for the in-flash "JetBrains Mono" theme. Format conversion (TTF → `.epdfont` → C array) is permitted under the SIL Open Font License 1.1, §39-42.
+The firmware embeds four font families — each in five sizes (4 / 10 / 11 / 12 / 13 pt, regular only, 2-bit grayscale) — selectable via builtin themes. Format conversion (TTF → C array) is permitted under SIL OFL 1.1 §39-42.
 
-The full license text lives at [`scripts/jetbrains/OFL.txt`](scripts/jetbrains/OFL.txt) and is bundled alongside every release artifact as `snapix-*-OFL.txt` per OFL §56-61. The OFL.txt accompanying JetBrains Mono does not declare a Reserved Font Name (per OFL §28-37 RFN must be specified explicitly after the copyright statement), so the original family name is retained here with credit; we do not claim authorship.
+| Theme | Font | Designer | License | OFL.txt |
+|---|---|---|---|---|
+| **JetBrains Mono** | [JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono) | JetBrains s.r.o. | SIL OFL 1.1 | [`scripts/jetbrains/OFL.txt`](scripts/jetbrains/OFL.txt) |
+| **PT Mono** | [PT Mono](https://www.paratype.com/fonts/pt/pt-mono) | ParaType Ltd. | SIL OFL 1.1 | [`scripts/pt-mono/OFL.txt`](scripts/pt-mono/OFL.txt) |
+| **IBM Plex Mono** | [IBM Plex Mono](https://github.com/IBM/plex) | IBM Corp. (Mike Abbink, Bold Monday) | SIL OFL 1.1 | [`scripts/ibm-plex-mono/OFL.txt`](scripts/ibm-plex-mono/OFL.txt) |
+| **Literata** | [Literata](https://fonts.google.com/specimen/Literata) | Type Network for Google Fonts | SIL OFL 1.1 | [`scripts/literata/OFL.txt`](scripts/literata/OFL.txt) |
+
+Per OFL 1.1 §56-61, every release artifact bundle includes the corresponding `OFL-*.txt` files. They MUST be redistributed alongside any copy of the firmware. The original family names are retained as user-facing display names — we do not claim authorship of any font, only embed and credit them.

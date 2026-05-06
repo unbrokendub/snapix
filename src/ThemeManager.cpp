@@ -40,6 +40,12 @@ bool ThemeManager::loadTheme(const char* name) {
     applyDarkTheme();
   } else if (strcmp(name, "mono") == 0) {
     applyMonoTheme();
+  } else if (strcmp(name, "pt-mono") == 0) {
+    applyPtMonoTheme();
+  } else if (strcmp(name, "ibm-plex-mono") == 0) {
+    applyIbmPlexMonoTheme();
+  } else if (strcmp(name, "literata") == 0) {
+    applyLiterataTheme();
   } else {
     applyLightTheme();
   }
@@ -225,6 +231,21 @@ void ThemeManager::applyMonoTheme() {
   strncpy(themeName, "mono", sizeof(themeName));
 }
 
+void ThemeManager::applyPtMonoTheme() {
+  activeTheme = BUILTIN_PT_MONO_THEME;
+  strncpy(themeName, "pt-mono", sizeof(themeName));
+}
+
+void ThemeManager::applyIbmPlexMonoTheme() {
+  activeTheme = BUILTIN_IBM_PLEX_MONO_THEME;
+  strncpy(themeName, "ibm-plex-mono", sizeof(themeName));
+}
+
+void ThemeManager::applyLiterataTheme() {
+  activeTheme = BUILTIN_LITERATA_THEME;
+  strncpy(themeName, "literata", sizeof(themeName));
+}
+
 const Theme* ThemeManager::getCachedTheme(const char* name) const {
   if (!name) return nullptr;
   auto it = themeCache.find(name);
@@ -243,9 +264,15 @@ std::vector<std::string> ThemeManager::listAvailableThemes(bool forceRefresh) {
   themes.push_back("light");
   themes.push_back("dark");
   themes.push_back("mono");
+  themes.push_back("pt-mono");
+  themes.push_back("ibm-plex-mono");
+  themes.push_back("literata");
   themeCache["light"] = BUILTIN_LIGHT_THEME;
   themeCache["dark"] = BUILTIN_DARK_THEME;
   themeCache["mono"] = BUILTIN_MONO_THEME;
+  themeCache["pt-mono"] = BUILTIN_PT_MONO_THEME;
+  themeCache["ibm-plex-mono"] = BUILTIN_IBM_PLEX_MONO_THEME;
+  themeCache["literata"] = BUILTIN_LITERATA_THEME;
 
   // List theme files from SD
   FsFile dir = SdMan.open(CONFIG_THEMES_DIR);

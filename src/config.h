@@ -69,6 +69,30 @@
 #define JETBRAINS_MONO_12_FONT_ID 419397466
 #define JETBRAINS_MONO_13_FONT_ID 2006126113
 
+// Embedded "PT Mono" — ParaType Ltd. derivative, 5 sizes, regular only.
+// SIL OFL 1.1; see scripts/pt-mono/OFL.txt.
+#define PT_MONO_4_FONT_ID         394929841
+#define PT_MONO_10_FONT_ID        (-169993709)
+#define PT_MONO_11_FONT_ID        1597081734
+#define PT_MONO_12_FONT_ID        1746552986
+#define PT_MONO_13_FONT_ID        (-1556258063)
+
+// Embedded "IBM Plex Mono" — IBM Corp. (Mike Abbink, Bold Monday) derivative.
+// SIL OFL 1.1; see scripts/ibm-plex-mono/OFL.txt.
+#define IBM_PLEX_MONO_4_FONT_ID   1613856708
+#define IBM_PLEX_MONO_10_FONT_ID  (-1624760916)
+#define IBM_PLEX_MONO_11_FONT_ID  (-1570173100)
+#define IBM_PLEX_MONO_12_FONT_ID  (-1563447629)
+#define IBM_PLEX_MONO_13_FONT_ID  (-535477073)
+
+// Embedded "Literata" — Type Network for Google Fonts derivative.
+// SIL OFL 1.1; see scripts/literata/OFL.txt.
+#define LITERATA_4_FONT_ID        (-897024207)
+#define LITERATA_10_FONT_ID       938590645
+#define LITERATA_11_FONT_ID       (-1210268069)
+#define LITERATA_12_FONT_ID       (-1241594796)
+#define LITERATA_13_FONT_ID       (-1524126485)
+
 // System directory for settings and cache
 #define SNAPIX_DIR "/.snapix"
 #define SNAPIX_CACHE_DIR SNAPIX_DIR "/cache"

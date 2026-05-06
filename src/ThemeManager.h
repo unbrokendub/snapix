@@ -67,6 +67,15 @@ class ThemeManager {
    */
   void applyMonoTheme();
 
+  /** Apply builtin "PT Mono" theme (ParaType, OFL 1.1). */
+  void applyPtMonoTheme();
+
+  /** Apply builtin "IBM Plex Mono" theme (IBM, OFL 1.1). */
+  void applyIbmPlexMonoTheme();
+
+  /** Apply builtin "Literata" theme (Type Network, OFL 1.1) — serif body. */
+  void applyLiterataTheme();
+
   /**
    * List available theme files on SD card.
    * Also pre-caches theme configurations for instant switching.
