@@ -116,6 +116,12 @@ bool ThemeManager::loadFromFileToTheme(const char* path, Theme& theme) {
         // than the legacy 23 px default sized for small14.
         const int reserved = IniParser::parseInt(value, 23);
         theme.statusBarReservedHeight = static_cast<uint8_t>(std::clamp(reserved, 6, 40));
+      } else if (strcmp(key, "reader_margin_top_reduction") == 0) {
+        // Px to subtract from the orientation-default top margin in the
+        // reader (floored at 2 px in getReaderViewport).  Useful for dense
+        // body fonts that look better closer to the top bezel.
+        const int reduction = IniParser::parseInt(value, 0);
+        theme.readerMarginTopReduction = static_cast<uint8_t>(std::clamp(reduction, 0, 8));
       }
     }
     // [fonts] section
@@ -210,6 +216,7 @@ bool ThemeManager::saveToFile(const char* path, const Theme& theme) {
   file.printf("item_value_padding = %d\n", theme.itemValuePadding);
   file.printf("status_bar_offset_y = %d\n", theme.statusBarOffsetY);
   file.printf("status_bar_reserved_height = %d\n", theme.statusBarReservedHeight);
+  file.printf("reader_margin_top_reduction = %d\n", theme.readerMarginTopReduction);
   file.println();
 
   file.println("[fonts]");

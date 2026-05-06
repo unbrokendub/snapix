@@ -42,6 +42,10 @@ struct Theme {
   uint8_t statusBarReservedHeight;  // Reader-content margin below baseline (overrides
                                     // the legacy 23 px reservation when non-zero —
                                     // lets small status fonts free up content space)
+  uint8_t readerMarginTopReduction;  // Pixels to subtract from the orientation-default
+                                     // top margin in the reader.  Floored at 2 px to
+                                     // keep glyph ascenders off the bezel.  Lets small
+                                     // builtin themes raise body text by a few pixels.
 
   // Font IDs
   int uiFontId;
@@ -83,6 +87,8 @@ inline Theme getBuiltinLightTheme() {
                                        // status font (28 px tall → fills the
                                        // reserved area).  Builtin themes with
                                        // smaller status fonts override below.
+  theme.readerMarginTopReduction = 0;  // No top-margin reduction by default;
+                                       // builtin small-font themes opt in.
   theme.uiFontId = UI_FONT_ID;
   theme.smallFontId = SMALL_FONT_ID;
   theme.statusFontId = SMALL_FONT_ID;
@@ -121,6 +127,8 @@ inline Theme getBuiltinDarkTheme() {
                                        // status font (28 px tall → fills the
                                        // reserved area).  Builtin themes with
                                        // smaller status fonts override below.
+  theme.readerMarginTopReduction = 0;  // No top-margin reduction by default;
+                                       // builtin small-font themes opt in.
   theme.uiFontId = UI_FONT_ID;
   theme.smallFontId = SMALL_FONT_ID;
   theme.statusFontId = SMALL_FONT_ID;
@@ -161,6 +169,10 @@ inline Theme getBuiltinMonoTheme() {
   // previous offset=16/reserved=23 layout — visual position unchanged.
   theme.statusBarOffsetY = 4;
   theme.statusBarReservedHeight = 11;
+  // Portrait default top margin is 9 px (VIEWABLE_MARGIN_TOP).  Pull body
+  // text up by 4 px so the small mono ascenders sit closer to the top
+  // bezel — matches the visual density the user expects from a code font.
+  theme.readerMarginTopReduction = 4;
   return theme;
 }
 
@@ -179,6 +191,7 @@ inline Theme getBuiltinPtMonoTheme() {
   // pt_mono_4 height = 10; reserved = 9; offset = 4 → text bottom at 800.
   theme.statusBarOffsetY = 4;
   theme.statusBarReservedHeight = 9;
+  theme.readerMarginTopReduction = 4;
   return theme;
 }
 
@@ -197,6 +210,7 @@ inline Theme getBuiltinIbmPlexMonoTheme() {
   // ibm_plex_mono_4 height = 12 (same as jetbrains_mono_4); reserved = 11; offset = 4.
   theme.statusBarOffsetY = 4;
   theme.statusBarReservedHeight = 11;
+  theme.readerMarginTopReduction = 4;
   return theme;
 }
 
@@ -215,6 +229,7 @@ inline Theme getBuiltinLiterataTheme() {
   // literata_4 height = 13; reserved = 12; offset = 4.
   theme.statusBarOffsetY = 4;
   theme.statusBarReservedHeight = 12;
+  theme.readerMarginTopReduction = 4;
   return theme;
 }
 

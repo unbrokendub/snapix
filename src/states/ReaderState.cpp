@@ -1976,12 +1976,18 @@ ReaderState::Viewport ReaderState::getReaderViewport(bool showStatusBar) const {
   renderer_.getOrientedViewableTRBL(&vp.marginTop, &vp.marginRight, &vp.marginBottom, &vp.marginLeft);
   vp.marginLeft += horizontalPadding;
   vp.marginRight += horizontalPadding;
+  const Theme& theme = THEME_MANAGER.current();
+  // Optional per-theme reduction of the top margin so dense fonts can ride
+  // closer to the bezel.  Floor at 2 px to keep glyph ascenders off the very
+  // top edge regardless of the configured reduction.
+  if (theme.readerMarginTopReduction > 0) {
+    vp.marginTop = std::max(2, vp.marginTop - static_cast<int>(theme.readerMarginTopReduction));
+  }
   if (showStatusBar) {
     // The legacy default of 23 px is sized for the small14 status font (28 px
     // tall, descender at screen edge).  Themes with a smaller status font can
     // override via theme.statusBarReservedHeight to free up content area for
     // an extra line.  A zero value falls back to the legacy constant.
-    const Theme& theme = THEME_MANAGER.current();
     const int reserved = (theme.statusBarReservedHeight > 0) ? theme.statusBarReservedHeight : statusBarMargin;
     vp.marginBottom += reserved;
   }
