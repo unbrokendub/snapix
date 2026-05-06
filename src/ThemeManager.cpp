@@ -110,6 +110,12 @@ bool ThemeManager::loadFromFileToTheme(const char* path, Theme& theme) {
       } else if (strcmp(key, "status_bar_offset_y") == 0) {
         const int offset = IniParser::parseInt(value, 0);
         theme.statusBarOffsetY = static_cast<uint8_t>(std::clamp(offset, 0, 20));
+      } else if (strcmp(key, "status_bar_reserved_height") == 0) {
+        // Reader-content reservation below the page text.  A smaller value
+        // gives more content space when the active status font is smaller
+        // than the legacy 23 px default sized for small14.
+        const int reserved = IniParser::parseInt(value, 23);
+        theme.statusBarReservedHeight = static_cast<uint8_t>(std::clamp(reserved, 6, 40));
       }
     }
     // [fonts] section
@@ -203,6 +209,7 @@ bool ThemeManager::saveToFile(const char* path, const Theme& theme) {
   file.printf("item_padding_x = %d\n", theme.itemPaddingX);
   file.printf("item_value_padding = %d\n", theme.itemValuePadding);
   file.printf("status_bar_offset_y = %d\n", theme.statusBarOffsetY);
+  file.printf("status_bar_reserved_height = %d\n", theme.statusBarReservedHeight);
   file.println();
 
   file.println("[fonts]");

@@ -38,7 +38,10 @@ struct Theme {
   uint8_t itemSpacing;
   uint8_t itemPaddingX;      // Horizontal padding inside items
   uint8_t itemValuePadding;  // Right padding for values
-  uint8_t statusBarOffsetY;  // Additional downward shift for status bar
+  uint8_t statusBarOffsetY;       // Additional downward shift for status bar
+  uint8_t statusBarReservedHeight;  // Reader-content margin below baseline (overrides
+                                    // the legacy 23 px reservation when non-zero —
+                                    // lets small status fonts free up content space)
 
   // Font IDs
   int uiFontId;
@@ -76,6 +79,10 @@ inline Theme getBuiltinLightTheme() {
   theme.itemPaddingX = 8;
   theme.itemValuePadding = 20;
   theme.statusBarOffsetY = 0;
+  theme.statusBarReservedHeight = 23;  // Legacy default sized for the small14
+                                       // status font (28 px tall → fills the
+                                       // reserved area).  Builtin themes with
+                                       // smaller status fonts override below.
   theme.uiFontId = UI_FONT_ID;
   theme.smallFontId = SMALL_FONT_ID;
   theme.statusFontId = SMALL_FONT_ID;
@@ -110,6 +117,10 @@ inline Theme getBuiltinDarkTheme() {
   theme.itemPaddingX = 8;
   theme.itemValuePadding = 20;
   theme.statusBarOffsetY = 0;
+  theme.statusBarReservedHeight = 23;  // Legacy default sized for the small14
+                                       // status font (28 px tall → fills the
+                                       // reserved area).  Builtin themes with
+                                       // smaller status fonts override below.
   theme.uiFontId = UI_FONT_ID;
   theme.smallFontId = SMALL_FONT_ID;
   theme.statusFontId = SMALL_FONT_ID;
@@ -141,13 +152,15 @@ inline Theme getBuiltinMonoTheme() {
   theme.readerFontId = JETBRAINS_MONO_11_FONT_ID;
   theme.readerFontIdMedium = JETBRAINS_MONO_12_FONT_ID;
   theme.readerFontIdLarge = JETBRAINS_MONO_13_FONT_ID;
-  // Anchor the status bar bottom to where the default small14 status font
-  // would sit.  small14 metrics: ascender 23, descender -5 → text spans
-  // textY..textY+28.  jetbrains_mono_4 metrics: ascender 9, descender -3 →
-  // text spans textY..textY+12.  Offset = 28 − 12 = 16 makes the descender
-  // bottoms coincide so the small mono font does not appear to float above
-  // the natural status bar baseline.
-  theme.statusBarOffsetY = 16;
+  // Status bar text bottom anchored at screenH (touches bottom edge), with
+  // a tight reserved height so the reader gets ~12 extra pixels of content
+  // area — enough to cross the 25 px line-height threshold and fit one more
+  // line in compact spacing.  jetbrains_mono_4 height = 12; reserved = 11
+  // (12 − 1 = textHeight − 1); offset = 4 (small breathing room above text
+  // within the reserved area).  textY = 800 − 14 − 2 + 4 = 788, same as the
+  // previous offset=16/reserved=23 layout — visual position unchanged.
+  theme.statusBarOffsetY = 4;
+  theme.statusBarReservedHeight = 11;
   return theme;
 }
 
@@ -163,7 +176,9 @@ inline Theme getBuiltinPtMonoTheme() {
   theme.readerFontId = PT_MONO_11_FONT_ID;
   theme.readerFontIdMedium = PT_MONO_12_FONT_ID;
   theme.readerFontIdLarge = PT_MONO_13_FONT_ID;
-  theme.statusBarOffsetY = 18;
+  // pt_mono_4 height = 10; reserved = 9; offset = 4 → text bottom at 800.
+  theme.statusBarOffsetY = 4;
+  theme.statusBarReservedHeight = 9;
   return theme;
 }
 
@@ -179,7 +194,9 @@ inline Theme getBuiltinIbmPlexMonoTheme() {
   theme.readerFontId = IBM_PLEX_MONO_11_FONT_ID;
   theme.readerFontIdMedium = IBM_PLEX_MONO_12_FONT_ID;
   theme.readerFontIdLarge = IBM_PLEX_MONO_13_FONT_ID;
-  theme.statusBarOffsetY = 16;
+  // ibm_plex_mono_4 height = 12 (same as jetbrains_mono_4); reserved = 11; offset = 4.
+  theme.statusBarOffsetY = 4;
+  theme.statusBarReservedHeight = 11;
   return theme;
 }
 
@@ -195,7 +212,9 @@ inline Theme getBuiltinLiterataTheme() {
   theme.readerFontId = LITERATA_11_FONT_ID;
   theme.readerFontIdMedium = LITERATA_12_FONT_ID;
   theme.readerFontIdLarge = LITERATA_13_FONT_ID;
-  theme.statusBarOffsetY = 15;
+  // literata_4 height = 13; reserved = 12; offset = 4.
+  theme.statusBarOffsetY = 4;
+  theme.statusBarReservedHeight = 12;
   return theme;
 }
 

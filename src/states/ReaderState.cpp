@@ -1977,7 +1977,13 @@ ReaderState::Viewport ReaderState::getReaderViewport(bool showStatusBar) const {
   vp.marginLeft += horizontalPadding;
   vp.marginRight += horizontalPadding;
   if (showStatusBar) {
-    vp.marginBottom += statusBarMargin;
+    // The legacy default of 23 px is sized for the small14 status font (28 px
+    // tall, descender at screen edge).  Themes with a smaller status font can
+    // override via theme.statusBarReservedHeight to free up content area for
+    // an extra line.  A zero value falls back to the legacy constant.
+    const Theme& theme = THEME_MANAGER.current();
+    const int reserved = (theme.statusBarReservedHeight > 0) ? theme.statusBarReservedHeight : statusBarMargin;
+    vp.marginBottom += reserved;
   }
   vp.width = renderer_.getScreenWidth() - vp.marginLeft - vp.marginRight;
   vp.height = renderer_.getScreenHeight() - vp.marginTop - vp.marginBottom;
