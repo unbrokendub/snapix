@@ -462,8 +462,18 @@ void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const
       self->startNewTextBlock(style);
     }
   } else if (strcmp(localName, "emphasis") == 0) {
+    // Flush any partial word collected under the *outer* (non-italic) style
+    // before italic takes effect.  Otherwise text like "abc<emphasis>def"
+    // would emit "abcdef" attributed to whichever style is active at the
+    // next flush boundary.
+    if (self->partWordBufferIndex_ > 0) {
+      self->flushPartWordBuffer();
+    }
     self->italicUntilDepth_ = std::min(self->italicUntilDepth_, self->depth_);
   } else if (strcmp(localName, "strong") == 0) {
+    if (self->partWordBufferIndex_ > 0) {
+      self->flushPartWordBuffer();
+    }
     self->boldUntilDepth_ = std::min(self->boldUntilDepth_, self->depth_);
   } else if (strcmp(localName, "empty-line") == 0) {
     self->flushPartWordBuffer();
@@ -488,11 +498,22 @@ void XMLCALL Fb2Parser::endElement(void* userData, const XML_Char* name) {
 
   self->depth_--;
 
-  // Check bold/italic depth AFTER decrementing (depth_ now matches startElement's value)
-  if (self->depth_ <= self->boldUntilDepth_) {
+  // If the closing tag is about to turn bold or italic OFF, flush any partial
+  // word still in the buffer *before* clearing the style anchor — otherwise
+  // the last word inside `<strong>...</strong>` (with no trailing whitespace,
+  // e.g. when followed immediately by `</p>`) gets emitted under the post-tag
+  // style.  This is what makes the last bold word in a line render as regular
+  // under fakeBold.
+  const bool willClearBold = self->depth_ <= self->boldUntilDepth_;
+  const bool willClearItalic = self->depth_ <= self->italicUntilDepth_;
+  if ((willClearBold || willClearItalic) && self->partWordBufferIndex_ > 0) {
+    self->flushPartWordBuffer();
+  }
+
+  if (willClearBold) {
     self->boldUntilDepth_ = INT_MAX;
   }
-  if (self->depth_ <= self->italicUntilDepth_) {
+  if (willClearItalic) {
     self->italicUntilDepth_ = INT_MAX;
   }
 
