@@ -89,6 +89,13 @@ class ThemeManager {
   bool isThemeCached(const char* themeName) const;
 
   /**
+   * Get a cached theme by key without applying it.  Returns nullptr if the
+   * key is not cached.  Used by the Settings UI to read the human-friendly
+   * displayName for each theme entry.
+   */
+  const Theme* getCachedTheme(const char* themeName) const;
+
+  /**
    * Clear the theme cache to free memory.
    * Call before entering memory-intensive states.
    */

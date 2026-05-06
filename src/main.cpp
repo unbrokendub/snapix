@@ -371,13 +371,14 @@ void prepareLightSleepWakeBaseline() {
 void applyThemeFonts() {
   Theme& theme = THEME_MANAGER.mutableCurrent();
 
-  // Reset UI font to builtin first in case custom font loading fails
+  // UI font is always the builtin — no theme exposes external UI fonts today.
   theme.uiFontId = UI_FONT_ID;
-  theme.statusFontId = SMALL_FONT_ID;
-  theme.readerFontIdXSmall = READER_FONT_ID_XSMALL;
-  theme.readerFontId = READER_FONT_ID;
-  theme.readerFontIdMedium = READER_FONT_ID_MEDIUM;
-  theme.readerFontIdLarge = READER_FONT_ID_LARGE;
+
+  // For status / reader fonts: honour the theme's *FontId values that were
+  // baked in by the theme itself (e.g. the embedded "JetBrains Mono" theme
+  // assigns JETBRAINS_MONO_*_FONT_ID directly).  Only override when the
+  // theme requests an external (SD) font via *FontFamily — and only fall
+  // back to the global builtin if that external font fails to load.
 
   if (theme.statusFontFamily[0] != '\0') {
     int customStatusFontId = FONT_MANAGER.getStatusFontId(theme.statusFontFamily, SMALL_FONT_ID);
@@ -385,52 +386,63 @@ void applyThemeFonts() {
       theme.statusFontId = customStatusFontId;
       LOG_INF(TAG, "Status font: %s (ID: %d)", theme.statusFontFamily, customStatusFontId);
     } else {
-      LOG_ERR(TAG, "Status font unavailable, falling back to builtin: %s", theme.statusFontFamily);
+      // External font failed — fall back to the theme's pre-set ID if it was
+      // not already SMALL_FONT_ID; otherwise stick with SMALL_FONT_ID.
+      if (theme.statusFontId == 0) theme.statusFontId = SMALL_FONT_ID;
+      LOG_ERR(TAG, "Status font unavailable, falling back: %s (theme ID %d)", theme.statusFontFamily,
+              theme.statusFontId);
     }
   } else {
-    FONT_MANAGER.getStatusFontId(nullptr, SMALL_FONT_ID);
+    // No external requested — keep theme.statusFontId as the theme set it.
+    if (theme.statusFontId == 0) theme.statusFontId = SMALL_FONT_ID;
+    FONT_MANAGER.getStatusFontId(nullptr, theme.statusFontId);
   }
 
   // Only load the reader font that matches current font size setting
   // This saves ~500KB+ of RAM by not loading all three sizes
   const char* fontFamilyName = nullptr;
   int* targetFontId = nullptr;
-  int builtinFontId = 0;
+  int globalBuiltinFontId = 0;
 
   switch (snapix::core.settings.fontSize) {
     case snapix::Settings::FontXSmall:
       fontFamilyName = theme.readerFontFamilyXSmall;
       targetFontId = &theme.readerFontIdXSmall;
-      builtinFontId = READER_FONT_ID_XSMALL;
+      globalBuiltinFontId = READER_FONT_ID_XSMALL;
       break;
     case snapix::Settings::FontMedium:
       fontFamilyName = theme.readerFontFamilyMedium;
       targetFontId = &theme.readerFontIdMedium;
-      builtinFontId = READER_FONT_ID_MEDIUM;
+      globalBuiltinFontId = READER_FONT_ID_MEDIUM;
       break;
     case snapix::Settings::FontLarge:
       fontFamilyName = theme.readerFontFamilyLarge;
       targetFontId = &theme.readerFontIdLarge;
-      builtinFontId = READER_FONT_ID_LARGE;
+      globalBuiltinFontId = READER_FONT_ID_LARGE;
       break;
     default:  // FontSmall
       fontFamilyName = theme.readerFontFamilySmall;
       targetFontId = &theme.readerFontId;
-      builtinFontId = READER_FONT_ID;
+      globalBuiltinFontId = READER_FONT_ID;
       break;
   }
 
-  // Reset to builtin first in case custom font loading fails
-  *targetFontId = builtinFontId;
+  // The theme's preferred ID for this slot.  May be a global builtin like
+  // READER_FONT_ID_MEDIUM, or an embedded family ID like JETBRAINS_MONO_12.
+  const int themePreferredId = (*targetFontId != 0) ? *targetFontId : globalBuiltinFontId;
 
   if (fontFamilyName && fontFamilyName[0] != '\0') {
-    int customFontId = FONT_MANAGER.getReaderFontId(fontFamilyName, builtinFontId);
-    if (customFontId != builtinFontId) {
-      *targetFontId = customFontId;
+    int customFontId = FONT_MANAGER.getReaderFontId(fontFamilyName, themePreferredId);
+    *targetFontId = customFontId;
+    if (customFontId != themePreferredId) {
       LOG_INF(TAG, "Reader font: %s (ID: %d)", fontFamilyName, customFontId);
     } else {
-      LOG_ERR(TAG, "Reader font unavailable, falling back to builtin: %s", fontFamilyName);
+      LOG_ERR(TAG, "Reader font unavailable, falling back to theme's builtin (ID %d): %s",
+              themePreferredId, fontFamilyName);
     }
+  } else {
+    // No external requested — preserve theme's pre-set ID.
+    *targetFontId = themePreferredId;
   }
 }
 

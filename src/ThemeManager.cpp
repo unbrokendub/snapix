@@ -225,6 +225,12 @@ void ThemeManager::applyMonoTheme() {
   strncpy(themeName, "mono", sizeof(themeName));
 }
 
+const Theme* ThemeManager::getCachedTheme(const char* name) const {
+  if (!name) return nullptr;
+  auto it = themeCache.find(name);
+  return (it != themeCache.end()) ? &it->second : nullptr;
+}
+
 std::vector<std::string> ThemeManager::listAvailableThemes(bool forceRefresh) {
   std::vector<std::string> themes;
 

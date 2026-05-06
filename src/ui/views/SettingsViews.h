@@ -127,7 +127,12 @@ struct ReaderSettingsView {
 
   ButtonBar buttons{"Back", "", "<", ">"};
 
-  // Theme selection state (loaded from ThemeManager)
+  // Theme selection state (loaded from ThemeManager).  themeKeys[i] holds
+  // the underlying identifier used for loadTheme() / settings persistence;
+  // themeNames[i] holds the human-readable display label rendered in the
+  // Settings UI (e.g. "JetBrains Mono" vs. key "mono").  Both arrays are
+  // populated from ThemeManager::getCachedTheme() in SettingsState::loadReaderSettings.
+  char themeKeys[MAX_THEMES][32] = {};
   char themeNames[MAX_THEMES][32] = {};
   int themeCount = 0;
   int currentThemeIndex = 0;
@@ -179,9 +184,10 @@ struct ReaderSettingsView {
     return def.enumValues[values[index]];
   }
 
+  // Returns the theme KEY (passed to loadTheme / saved as settings.themeName).
   const char* getCurrentThemeName() const {
     if (themeCount > 0 && currentThemeIndex < themeCount) {
-      return themeNames[currentThemeIndex];
+      return themeKeys[currentThemeIndex];
     }
     return "light";
   }

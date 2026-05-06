@@ -551,13 +551,26 @@ void SettingsState::handleLeftRight(int delta) {
 void SettingsState::loadReaderSettings() {
   auto& settings = core_->settings;
 
-  // Index 0: Theme (ThemeSelect) - load available themes from SD card
+  // Index 0: Theme (ThemeSelect) - load available themes from SD card.
+  // Populate themeKeys[] (used as identifier for loadTheme / settings.themeName)
+  // and themeNames[] (human-readable label for the Settings UI).  When the
+  // theme has no .theme file (builtin only) we still get displayName from the
+  // BUILTIN_*_THEME via themeCache.
   auto themes = THEME_MANAGER.listAvailableThemes();
   readerView_.themeCount = 0;
   readerView_.currentThemeIndex = 0;
   for (size_t i = 0; i < themes.size() && i < ui::ReaderSettingsView::MAX_THEMES; i++) {
-    strncpy(readerView_.themeNames[i], themes[i].c_str(), sizeof(readerView_.themeNames[i]) - 1);
+    strncpy(readerView_.themeKeys[i], themes[i].c_str(), sizeof(readerView_.themeKeys[i]) - 1);
+    readerView_.themeKeys[i][sizeof(readerView_.themeKeys[i]) - 1] = '\0';
+
+    const Theme* cached = THEME_MANAGER.getCachedTheme(themes[i].c_str());
+    if (cached && cached->displayName[0] != '\0') {
+      strncpy(readerView_.themeNames[i], cached->displayName, sizeof(readerView_.themeNames[i]) - 1);
+    } else {
+      strncpy(readerView_.themeNames[i], themes[i].c_str(), sizeof(readerView_.themeNames[i]) - 1);
+    }
     readerView_.themeNames[i][sizeof(readerView_.themeNames[i]) - 1] = '\0';
+
     if (themes[i] == settings.themeName) {
       readerView_.currentThemeIndex = static_cast<int>(i);
     }
