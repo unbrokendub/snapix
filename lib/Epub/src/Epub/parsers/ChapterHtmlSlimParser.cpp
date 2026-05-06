@@ -909,9 +909,17 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
     // We don't want to flush out content when closing inline tags like <span>.
     // Currently this also flushes out on closing <b> and <i> tags, but they are line tags so that shouldn't happen,
     // text styling needs to be overhauled to fix it.
+    //
+    // Also flush when this close will clear css-driven bold/italic — without
+    // it, `<span style="font-weight:bold">word</span>` emits the buffered
+    // word ("word") with the post-close style (regular) because the css
+    // depth is reset below before the next flush boundary fires.  Same class
+    // of bug as the FB2 endElement fix.
+    const bool willClearCssBold = self->cssBoldUntilDepth == self->depth;
+    const bool willClearCssItalic = self->cssItalicUntilDepth == self->depth;
     const bool shouldBreakText = hasTagFlag(tagFlags, TAG_Block) || hasTagFlag(tagFlags, TAG_Header) ||
                                  hasTagFlag(tagFlags, TAG_Bold) || hasTagFlag(tagFlags, TAG_Italic) ||
-                                 self->depth == 1;
+                                 willClearCssBold || willClearCssItalic || self->depth == 1;
 
     if (shouldBreakText) {
       self->flushPartWordBuffer();
