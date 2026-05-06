@@ -197,6 +197,6 @@ Snapix is a fork of **[Papyrix](https://github.com/bigbag/papyrix-reader)** by b
 
 ## Third-party fonts
 
-The firmware embeds **Snapix Mono** — a derivative of [JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono) by JetBrains s.r.o., used in five sizes (4 / 10 / 11 / 12 / 13 pt, regular only) for the optional in-flash "Snapix Mono" theme. Format conversion (TTF → `.epdfont` → C array) is permitted under the SIL Open Font License 1.1, §39-42.
+The firmware embeds **[JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono)** by JetBrains s.r.o. in five sizes (4 / 10 / 11 / 12 / 13 pt, regular only) for the in-flash "JetBrains Mono" theme. Format conversion (TTF → `.epdfont` → C array) is permitted under the SIL Open Font License 1.1, §39-42.
 
-The full license text lives at [`scripts/jetbrains/OFL.txt`](scripts/jetbrains/OFL.txt) and is bundled alongside every release artifact as `snapix-*-OFL.txt` per OFL §56-61. Per OFL §63-66 the JetBrains Mono reserved font name is **not** used as the user-facing display name; the embedded family is presented to users as "Snapix Mono".
+The full license text lives at [`scripts/jetbrains/OFL.txt`](scripts/jetbrains/OFL.txt) and is bundled alongside every release artifact as `snapix-*-OFL.txt` per OFL §56-61. The OFL.txt accompanying JetBrains Mono does not declare a Reserved Font Name (per OFL §28-37 RFN must be specified explicitly after the copyright statement), so the original family name is retained here with credit; we do not claim authorship.

@@ -61,8 +61,8 @@ class ThemeManager {
   void applyDarkTheme();
 
   /**
-   * Apply builtin "Snapix Mono" theme — uses the embedded JetBrains Mono NL
-   * derivative (regular only, sizes 4/10/11/12/13).  No SD .theme file or
+   * Apply builtin "JetBrains Mono" theme — uses the embedded JetBrains Mono
+   * NL family (regular only, sizes 4/10/11/12/13).  No SD .theme file or
    * .epdfont required; ideal as a fallback when SD is flaky.
    */
   void applyMonoTheme();

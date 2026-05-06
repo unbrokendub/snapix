@@ -126,10 +126,10 @@ jobs:
 
             ### Third-party fonts
 
-            This release embeds the **Snapix Mono** font family (sizes 4 / 10 / 11 / 12 / 13, regular only),
-            a derivative of [JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono) by JetBrains s.r.o.
-            licensed under the [SIL Open Font License 1.1](https://openfontlicense.org). The accompanying
-            `OFL.txt` must be redistributed with any copy of the firmware.
+            This release embeds **[JetBrains Mono NL](https://github.com/JetBrains/JetBrainsMono)** by
+            JetBrains s.r.o. (sizes 4 / 10 / 11 / 12 / 13, regular only) for the in-flash "JetBrains Mono"
+            theme. Licensed under the [SIL Open Font License 1.1](https://openfontlicense.org); the
+            accompanying `OFL.txt` must be redistributed with any copy of the firmware.
           draft: false
           prerelease: false
         env:

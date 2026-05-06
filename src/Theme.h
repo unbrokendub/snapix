@@ -126,14 +126,16 @@ inline Theme getBuiltinDarkTheme() {
 }
 
 /**
- * "Snapix Mono" theme — uses the embedded JetBrains Mono NL derivative
- * (regular only, sizes 4/10/11/12/13).  Selectable from Settings without
- * any SD .theme file.  Does not use the JetBrains reserved font name as
- * the user-facing display name (OFL 1.1 §63-66).
+ * "JetBrains Mono" builtin theme — uses the embedded JetBrains Mono NL
+ * derivative (regular only, sizes 4/10/11/12/13).  Selectable from Settings
+ * without any SD .theme file.  OFL.txt does not declare a Reserved Font
+ * Name (per §28-37 RFN must be specified explicitly after the copyright
+ * statement), so OFL §63-66 does not restrict naming here; the original
+ * font is credited in README under "Third-party fonts".
  */
 inline Theme getBuiltinMonoTheme() {
   Theme theme = getBuiltinLightTheme();
-  strncpy(theme.displayName, "Snapix Mono", sizeof(theme.displayName));
+  strncpy(theme.displayName, "JetBrains Mono", sizeof(theme.displayName));
   theme.statusFontId = JETBRAINS_MONO_4_FONT_ID;
   theme.readerFontIdXSmall = JETBRAINS_MONO_10_FONT_ID;
   theme.readerFontId = JETBRAINS_MONO_11_FONT_ID;

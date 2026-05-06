@@ -27,7 +27,7 @@
 #include <builtinFonts/small14.h>
 #include <builtinFonts/ui_12.h>
 #include <builtinFonts/ui_bold_12.h>
-// Embedded "Snapix Mono" (derivative of JetBrains Mono NL, OFL 1.1).
+// Embedded JetBrains Mono NL (OFL 1.1; see scripts/jetbrains/OFL.txt).
 // Sizes 4 / 10 / 11 / 12 / 13 — regular only.  Removes per-glyph SD I/O
 // from cold-render paths and survives SD failures.  Bold/italic styles
 // degrade to fakeBold (multi-pass regular draw); see TextBlock::render.
@@ -125,7 +125,7 @@ EpdFont ui12Font(&ui_12);
 EpdFont uiBold12Font(&ui_bold_12);
 EpdFontFamily uiFontFamily(&ui12Font, &uiBold12Font);
 
-// Embedded Snapix Mono — single style each, bold/italic via fakeBold
+// Embedded JetBrains Mono — single style each, bold/italic via fakeBold
 // (TextBlock::render multi-pass).  Lazy-init via static locals so unused
 // sizes do not allocate EpdFont objects.
 static EpdFontFamily& jetbrainsMono4Family() {
@@ -325,7 +325,7 @@ void setupDisplayAndFonts(bool allReaderSizes = true, bool preservePanelState = 
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
   renderer.excludeExternalFont(UI_FONT_ID);
   renderer.excludeExternalFont(SMALL_FONT_ID);
-  // Register embedded Snapix Mono variants — exclude from external override
+  // Register embedded JetBrains Mono variants — exclude from external override
   // path so the SD copy (if any) does not displace the in-flash version.
   renderer.insertFont(JETBRAINS_MONO_4_FONT_ID, jetbrainsMono4Family());
   renderer.insertFont(JETBRAINS_MONO_10_FONT_ID, jetbrainsMono10Family());
