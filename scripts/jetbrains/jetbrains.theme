@@ -1,5 +1,7 @@
 [theme]
-name = JetBrains    # Display name shown in Settings UI (optional)
+# OFL 1.1 §63-66 forbids the JetBrains Mono reserved name as the
+# user-facing display name of any derivative.  Use a non-reserved name.
+name = Snapix Mono    # Display name shown in Settings UI (optional)
 
 [colors]
 inverted_mode = false     # true = dark mode, false = light mode

@@ -125,6 +125,24 @@ inline Theme getBuiltinDarkTheme() {
   return theme;
 }
 
+/**
+ * "Snapix Mono" theme — uses the embedded JetBrains Mono NL derivative
+ * (regular only, sizes 4/10/11/12/13).  Selectable from Settings without
+ * any SD .theme file.  Does not use the JetBrains reserved font name as
+ * the user-facing display name (OFL 1.1 §63-66).
+ */
+inline Theme getBuiltinMonoTheme() {
+  Theme theme = getBuiltinLightTheme();
+  strncpy(theme.displayName, "Snapix Mono", sizeof(theme.displayName));
+  theme.statusFontId = JETBRAINS_MONO_4_FONT_ID;
+  theme.readerFontIdXSmall = JETBRAINS_MONO_10_FONT_ID;
+  theme.readerFontId = JETBRAINS_MONO_11_FONT_ID;
+  theme.readerFontIdMedium = JETBRAINS_MONO_12_FONT_ID;
+  theme.readerFontIdLarge = JETBRAINS_MONO_13_FONT_ID;
+  return theme;
+}
+
 // For use in initialization
 #define BUILTIN_LIGHT_THEME getBuiltinLightTheme()
 #define BUILTIN_DARK_THEME getBuiltinDarkTheme()
+#define BUILTIN_MONO_THEME getBuiltinMonoTheme()

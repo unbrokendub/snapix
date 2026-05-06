@@ -38,6 +38,8 @@ bool ThemeManager::loadTheme(const char* name) {
   // Fallback to builtin themes
   if (strcmp(name, "dark") == 0) {
     applyDarkTheme();
+  } else if (strcmp(name, "mono") == 0) {
+    applyMonoTheme();
   } else {
     applyLightTheme();
   }
@@ -218,6 +220,11 @@ void ThemeManager::applyDarkTheme() {
   strncpy(themeName, "dark", sizeof(themeName));
 }
 
+void ThemeManager::applyMonoTheme() {
+  activeTheme = BUILTIN_MONO_THEME;
+  strncpy(themeName, "mono", sizeof(themeName));
+}
+
 std::vector<std::string> ThemeManager::listAvailableThemes(bool forceRefresh) {
   std::vector<std::string> themes;
 
@@ -229,8 +236,10 @@ std::vector<std::string> ThemeManager::listAvailableThemes(bool forceRefresh) {
   // Always include builtin themes and cache them
   themes.push_back("light");
   themes.push_back("dark");
+  themes.push_back("mono");
   themeCache["light"] = BUILTIN_LIGHT_THEME;
   themeCache["dark"] = BUILTIN_DARK_THEME;
+  themeCache["mono"] = BUILTIN_MONO_THEME;
 
   // List theme files from SD
   FsFile dir = SdMan.open(CONFIG_THEMES_DIR);

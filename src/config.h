@@ -57,6 +57,18 @@
  */
 #define SMALL_FONT_ID 96157773
 
+// Embedded "Snapix Mono" font family — Snapix derivative of JetBrains Mono NL
+// (SIL OFL 1.1; see scripts/jetbrains/OFL.txt).  Sizes 4 / 10 / 11 / 12 / 13
+// are baked into the firmware so font rendering survives SD failures and
+// removes per-glyph SD I/O on cold-render paths.  Generated via:
+//   ruby -rdigest -e 'puts (Digest::SHA256.hexdigest(File.read(F)).to_i(16) %
+//                          (2**32) - (2**31))'
+#define JETBRAINS_MONO_4_FONT_ID  (-536722457)
+#define JETBRAINS_MONO_10_FONT_ID 1386934901
+#define JETBRAINS_MONO_11_FONT_ID 1652182926
+#define JETBRAINS_MONO_12_FONT_ID 419397466
+#define JETBRAINS_MONO_13_FONT_ID 2006126113
+
 // System directory for settings and cache
 #define SNAPIX_DIR "/.snapix"
 #define SNAPIX_CACHE_DIR SNAPIX_DIR "/cache"
