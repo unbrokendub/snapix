@@ -142,10 +142,34 @@ void XMLCALL TocNcxParser::characterData(void* userData, const XML_Char* s, cons
     if (self->currentLabel.size() + static_cast<size_t>(len) <= MAX_LABEL_LENGTH) {
       self->currentLabel.append(s, len);
     } else if (self->currentLabel.size() < MAX_LABEL_LENGTH) {
-      // Truncate at limit
-      const size_t remaining = MAX_LABEL_LENGTH - self->currentLabel.size();
+      // Truncate at limit, but stop at a UTF-8 boundary — utf8NormalizeNfc()
+      // assumes well-formed UTF-8 input.  Splitting a multi-byte sequence
+      // (Cyrillic / CJK chapter titles near 512-byte boundary) produced
+      // garbled TOC labels and undefined NFC output.  Walk back over any
+      // continuation bytes and, if we land on an incomplete start byte,
+      // drop it unless the full sequence fits within our remaining window.
+      size_t remaining = MAX_LABEL_LENGTH - self->currentLabel.size();
+      while (remaining > 0 && (static_cast<unsigned char>(s[remaining - 1]) & 0xC0) == 0x80) {
+        remaining--;
+      }
+      if (remaining > 0) {
+        const unsigned char c = static_cast<unsigned char>(s[remaining - 1]);
+        if ((c & 0xC0) == 0xC0) {
+          size_t charLen = 1;
+          if ((c & 0xE0) == 0xC0) charLen = 2;
+          else if ((c & 0xF0) == 0xE0) charLen = 3;
+          else if ((c & 0xF8) == 0xF0) charLen = 4;
+          const size_t startIdx = remaining - 1;
+          if (startIdx + charLen <= static_cast<size_t>(len) &&
+              startIdx + charLen <= MAX_LABEL_LENGTH - self->currentLabel.size()) {
+            remaining = startIdx + charLen;
+          } else {
+            remaining = startIdx;
+          }
+        }
+      }
       self->currentLabel.append(s, remaining);
-      LOG_DBG(TAG, "Label truncated at %zu bytes", MAX_LABEL_LENGTH);
+      LOG_DBG(TAG, "Label truncated at %zu bytes", self->currentLabel.size());
     }
   }
 }
