@@ -118,37 +118,53 @@ BmpReaderError Bitmap::parseHeaders() {
   if (!file) return BmpReaderError::FileInvalid;
   if (!file.seek(0)) return BmpReaderError::SeekStartFailed;
 
-  // --- BMP FILE HEADER ---
-  const uint16_t bfType = readLE16(file);
+  // Bulk-read the entire 54-byte fixed header (BMP file header + DIB
+  // BITMAPINFOHEADER) in ONE file.read.  Replaces ~10 individual
+  // readLE16/readLE32 calls that were each issuing 2-4 single-byte
+  // file.read() invocations — those add up to 30+ small SD ops which,
+  // during post-write SD-card recovery, take 20-50 ms each and turn a
+  // ~5 ms parse into a ~1 second one.  Combined with the redundant
+  // double-parse in ImageBlock::render (probe + actual), the original
+  // path was 60+ small reads = 1.2 s of pure file-system overhead.
+  uint8_t hdr[54];
+  if (file.read(hdr, sizeof(hdr)) != static_cast<int>(sizeof(hdr))) {
+    return BmpReaderError::FileInvalid;
+  }
+
+  auto leU16 = [](const uint8_t* p) -> uint16_t {
+    return static_cast<uint16_t>(p[0] | (uint16_t(p[1]) << 8));
+  };
+  auto leU32 = [](const uint8_t* p) -> uint32_t {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+  };
+  auto leI32 = [&leU32](const uint8_t* p) -> int32_t { return static_cast<int32_t>(leU32(p)); };
+
+  // --- BMP FILE HEADER (offsets 0..13) ---
+  const uint16_t bfType = leU16(hdr + 0);
   if (bfType != 0x4D42) return BmpReaderError::NotBMP;
+  // hdr[2..9] = bfSize + reserved (skipped)
+  bfOffBits = leU32(hdr + 10);
 
-  file.seekCur(8);
-  bfOffBits = readLE32(file);
-
-  // --- DIB HEADER ---
-  const uint32_t biSize = readLE32(file);
+  // --- DIB HEADER (offsets 14..53 for the 40-byte BITMAPINFOHEADER) ---
+  const uint32_t biSize = leU32(hdr + 14);
   if (biSize < 40) return BmpReaderError::DIBTooSmall;
-
-  width = static_cast<int32_t>(readLE32(file));
-  const auto rawHeight = static_cast<int32_t>(readLE32(file));
+  width = leI32(hdr + 18);
+  const int32_t rawHeight = leI32(hdr + 22);
   topDown = rawHeight < 0;
   height = topDown ? -rawHeight : rawHeight;
+  const uint16_t planes = leU16(hdr + 26);
+  bpp = leU16(hdr + 28);
+  const uint32_t comp = leU32(hdr + 30);
+  // hdr[34..45] = biSizeImage + biXPelsPerMeter + biYPelsPerMeter (skipped)
+  const uint32_t colorsUsed = leU32(hdr + 46);
+  // hdr[50..53] = biClrImportant (skipped)
 
-  const uint16_t planes = readLE16(file);
-  bpp = readLE16(file);
-  const uint32_t comp = readLE32(file);
   const bool validBpp = bpp == 1 || bpp == 2 || bpp == 8 || bpp == 24 || bpp == 32;
-
   if (planes != 1) return BmpReaderError::BadPlanes;
   if (!validBpp) return BmpReaderError::UnsupportedBpp;
-  // Allow BI_RGB (0) for all, and BI_BITFIELDS (3) for 32bpp which is common for BGRA masks.
   if (!(comp == 0 || (bpp == 32 && comp == 3))) return BmpReaderError::UnsupportedCompression;
-
-  file.seekCur(12);  // biSizeImage, biXPelsPerMeter, biYPelsPerMeter
-  const uint32_t colorsUsed = readLE32(file);
   if (colorsUsed > 256u) return BmpReaderError::PaletteTooLarge;
-  file.seekCur(4);  // biClrImportant
-
   if (width <= 0 || height <= 0) return BmpReaderError::BadDimensions;
 
   // Safety limits to prevent memory issues on ESP32
@@ -163,9 +179,14 @@ BmpReaderError Bitmap::parseHeaders() {
 
   for (int i = 0; i < 256; i++) paletteLum[i] = static_cast<uint8_t>(i);
   if (colorsUsed > 0) {
+    // Bulk-read the entire palette in one go (4 bytes/entry, BGRA).
+    uint8_t paletteBuf[256 * 4];
+    const int paletteBytes = static_cast<int>(colorsUsed * 4);
+    if (file.read(paletteBuf, paletteBytes) != paletteBytes) {
+      return BmpReaderError::FileInvalid;
+    }
     for (uint32_t i = 0; i < colorsUsed; i++) {
-      uint8_t rgb[4];
-      file.read(rgb, 4);  // Read B, G, R, Reserved in one go
+      const uint8_t* rgb = paletteBuf + i * 4;
       paletteLum[i] = (77u * rgb[2] + 150u * rgb[1] + 29u * rgb[0]) >> 8;
     }
   }
