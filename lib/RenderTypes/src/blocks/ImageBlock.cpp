@@ -29,17 +29,33 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
     return;
   }
 
+  // Render path tries the full BMP first, then falls back to the BG
+  // worker's reduce=1 preview at <id>.preview.bmp (drawBitmap upscales it
+  // ~8× to fill the slot — pixelated but visually located).  If neither
+  // exists we draw the "[Image]" placeholder.
+  std::string activePath = cachedBmpPath;
+  bool isPreview = false;
   FsFile bmpFile;
-  if (!SdMan.openFileForRead("IMB", cachedBmpPath, bmpFile)) {
-    LOG_ERR(TAG, "Failed to open cached BMP: %s", cachedBmpPath.c_str());
-    renderPlaceholder("open-failed");
-    return;
+  if (!SdMan.openFileForRead("IMB", activePath, bmpFile)) {
+    // Probe preview path: replace trailing ".bmp" with ".preview.bmp".
+    if (cachedBmpPath.size() > 4 && cachedBmpPath.compare(cachedBmpPath.size() - 4, 4, ".bmp") == 0) {
+      const std::string previewPath = cachedBmpPath.substr(0, cachedBmpPath.size() - 4) + ".preview.bmp";
+      if (SdMan.openFileForRead("IMB", previewPath, bmpFile)) {
+        activePath = previewPath;
+        isPreview = true;
+      }
+    }
+    if (!isPreview) {
+      LOG_ERR(TAG, "Failed to open cached BMP: %s", cachedBmpPath.c_str());
+      renderPlaceholder("open-failed");
+      return;
+    }
   }
 
   Bitmap bitmap(bmpFile, true);
   const BmpReaderError err = bitmap.parseHeaders();
   if (err != BmpReaderError::Ok) {
-    LOG_ERR(TAG, "BMP parse error: %s", Bitmap::errorToString(err));
+    LOG_ERR(TAG, "BMP parse error (%s): %s", isPreview ? "preview" : "full", Bitmap::errorToString(err));
     bmpFile.close();
     renderPlaceholder("bmp-parse-failed", Bitmap::errorToString(err));
     return;

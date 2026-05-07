@@ -887,17 +887,13 @@ int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
 
   int decoded = 0;
   for (const auto& name : pendingFiles) {
-    // Abort BETWEEN images, not inside the converter.  picojpeg / pngle
-    // can't resume — every preempted decode restarts from MCU 0 / IDAT byte 0
-    // on the next sweep, so pressing buttons every 1-3 s while a 600x900-ish
-    // image needs ~6 s to decode means the image NEVER finishes.  Once we've
-    // committed to decoding an image, we let it run to completion; the
-    // ReaderState page-turn path already defers user input until the worker
-    // returns, which means the user's perceived lag is bounded by a single
-    // image's decode time (~6-10 s) instead of the BG sweep dragging on
-    // forever in pending purgatory.
+    // Abort BETWEEN phases / images, not inside the converter.  picojpeg
+    // can't resume mid-decode (every preempted attempt restarts at MCU 0),
+    // so we commit to finishing each phase once started.  ReaderState defers
+    // user input via deferPageTurnUntilWorkerStops, so the lag is bounded by
+    // a single phase's decode time.
     if (shouldAbort && shouldAbort()) {
-      LOG_INF(TAG, "decodePendingImages: aborted after %d image(s)", decoded);
+      LOG_INF(TAG, "decodePendingImages: aborted after %d phase(s)", decoded);
       break;
     }
 
@@ -906,37 +902,73 @@ int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
     const std::string binaryId = name.substr(0, len - 4);
     const std::string pendingPath = pendingDir + "/" + name;
     const std::string bmpPath = imagesDir + "/" + binaryId + ".bmp";
+    const std::string previewPath = imagesDir + "/" + binaryId + ".preview.bmp";
     const std::string failPath = imagesDir + "/" + binaryId + ".failed";
 
-    // Skip if BMP somehow already exists (idempotent).
+    // Skip if final BMP already exists (idempotent).  Clean up any stale
+    // preview as well — drawBitmap would prefer the full BMP anyway, no need
+    // to keep both on SD.
     if (SdMan.exists(bmpPath.c_str())) {
+      if (SdMan.exists(previewPath.c_str())) SdMan.remove(previewPath.c_str());
       SdMan.remove(pendingPath.c_str());
       continue;
     }
 
-    // Pass nullptr — the converter will run to completion.  We only check
-    // shouldAbort at the top of the for-loop, so the user's input lag is
-    // capped at one image's decode time, not the whole pending queue.
+    // Phase 1: blurry preview via picojpeg reduce=1 mode (~5-10× faster than
+    // full decode).  Skipped for PNG because pngle has no equivalent — PNGs
+    // go straight to phase 2.  After preview is written, break out of the
+    // sweep so the reader gets a chance to render it; the next BG trigger
+    // (post-render or idle) picks up phase 2 for the same image.
+    const bool needPreview = !isPng && !SdMan.exists(previewPath.c_str());
+    if (needPreview) {
+      FsFile srcFile;
+      if (!SdMan.openFileForRead("FB2", pendingPath, srcFile)) {
+        SdMan.remove(pendingPath.c_str());
+        continue;
+      }
+      FsFile previewFile;
+      if (!SdMan.openFileForWrite("FB2", previewPath, previewFile)) {
+        srcFile.close();
+        SdMan.remove(pendingPath.c_str());
+        continue;
+      }
+      const bool ok = JpegToBmpConverter::jpegFileToBmpStreamPreview(srcFile, previewFile);
+      srcFile.close();
+      previewFile.close();
+      if (ok) {
+        LOG_INF(TAG, "decodePendingImages[preview]: %s -> %s", binaryId.c_str(), previewPath.c_str());
+        ++decoded;
+        // Yield: let the reader re-render with the preview before we eat the
+        // 5-6 s that the full decode costs.
+        break;
+      }
+      // Preview failed — drop the empty file and fall through to phase 2 so
+      // we still get a full decode if possible.
+      SdMan.remove(previewPath.c_str());
+    }
+
+    // Phase 2: full decode via the standard quick path (Atkinson-thresholded
+    // 2-bit BMP).  shouldAbort=nullptr — we're committed once started.
     if (decodeOnePending(pendingPath, isPng, bmpPath, kMaxBoxWidth, kMaxBoxHeight, nullptr)) {
       SdMan.remove(pendingPath.c_str());
+      if (SdMan.exists(previewPath.c_str())) SdMan.remove(previewPath.c_str());
       ++decoded;
       uint16_t w = 0, h = 0;
       if (readBmpDimensions(bmpPath, w, h)) {
-        LOG_INF(TAG, "decodePendingImages: %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
+        LOG_INF(TAG, "decodePendingImages[full]: %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
                 static_cast<unsigned>(w), static_cast<unsigned>(h));
       } else {
-        LOG_INF(TAG, "decodePendingImages: %s -> %s (dim read failed)", binaryId.c_str(), bmpPath.c_str());
+        LOG_INF(TAG, "decodePendingImages[full]: %s -> %s (dim read failed)", binaryId.c_str(), bmpPath.c_str());
       }
-      // Hard cap: at most one image per BG sweep.  Combined with the
-      // pendingBackgroundEpubRefresh_ repaint the BG worker schedules after
-      // didWork=true, the next post-render trigger will fire another sweep
-      // for the next pending image.  Caps user-perceived input lag at
-      // roughly one image's decode time (~3-10 s on ESP32-C3) instead of
-      // the full pending queue.
+      // Hard cap: at most one image per BG sweep.  The
+      // pendingBackgroundEpubRefresh_ repaint flag schedules a redraw, and
+      // the next post-render / idle trigger fires another sweep for the
+      // next image.
       break;
     }
     LOG_ERR(TAG, "decodePendingImages: %s decode failed (id=%s)", isPng ? "PNG" : "JPEG", binaryId.c_str());
     SdMan.remove(bmpPath.c_str());
+    if (SdMan.exists(previewPath.c_str())) SdMan.remove(previewPath.c_str());
     SdMan.remove(pendingPath.c_str());
     FsFile m;
     if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();

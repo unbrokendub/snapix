@@ -29,4 +29,11 @@ class JpegToBmpConverter {
   // ~10× cheaper than a full decode — used by FB2 fast-mode image registration so the
   // page layout has correct dimensions before the BG worker decodes pixels.
   static bool peekDimensions(FsFile& jpegFile, int& outWidth, int& outHeight);
+
+  // Tiny preview decode: picojpeg's reduce=1 mode skips AC dequant + IDCT + chroma
+  // upsampling, producing a 1-pixel-per-MCU image that's 5-10× faster than a full
+  // decode but at 1/8 linear resolution (8× pixelated when displayed at full size).
+  // Used by the BG worker to flash a blurry preview within ~1 s before swapping in
+  // the full-quality decode.  Output BMP dimensions are MCUS-per-row × MCUS-per-col.
+  static bool jpegFileToBmpStreamPreview(FsFile& jpegFile, Print& bmpOut);
 };

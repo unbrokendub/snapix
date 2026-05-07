@@ -818,3 +818,95 @@ bool JpegToBmpConverter::peekDimensions(FsFile& jpegFile, int& outWidth, int& ou
   outHeight = imageInfo.m_height;
   return true;
 }
+
+// Preview decode using picojpeg's reduce=1 mode.  picojpeg still walks the
+// Huffman bitstream (mandatory — it's stateful across MCUs), but skips the
+// per-pixel AC dequant + IDCT + chroma upsampling for each 8×8 block.
+// transformBlockReduce() (picojpeg.c:1728) writes only the [0] pixel of each
+// MCU buffer, so we sample one pixel per MCU and emit a tiny BMP whose linear
+// dimensions are 1/8 of the original.  drawBitmap() upscales it on render.
+//
+// On a typical 650×880 JPEG (~6 s full decode) this returns in ~0.7-1 s —
+// the FB2 BG worker writes it as <id>.preview.bmp before queuing the full
+// decode in a follow-up sweep, so the user sees a blurry-but-located image
+// well before the final pixels arrive.
+bool JpegToBmpConverter::jpegFileToBmpStreamPreview(FsFile& jpegFile, Print& bmpOut) {
+  if (!jpegFile) return false;
+
+  {
+    snapix::spi::SharedBusLock lk;
+    if (!jpegFile.seek(0)) return false;
+  }
+
+  if (isUnsupportedJpeg(jpegFile)) {
+    LOG_DBG(TAG, "preview: unsupported JPEG");
+    return false;
+  }
+
+  JpegReadContext context = {.file = jpegFile, .bufferPos = 0, .bufferFilled = 0};
+  pjpeg_image_info_t imageInfo;
+  if (pjpeg_decode_init(&imageInfo, jpegReadCallback, &context, /*reduce=*/1) != 0) {
+    LOG_DBG(TAG, "preview: decode_init failed");
+    return false;
+  }
+  if (imageInfo.m_width == 0 || imageInfo.m_height == 0 || imageInfo.m_MCUSPerRow == 0 ||
+      imageInfo.m_MCUSPerCol == 0) {
+    return false;
+  }
+
+  // Output dims = MCUs per row / col (one output pixel per MCU).
+  const int outW = imageInfo.m_MCUSPerRow;
+  const int outH = imageInfo.m_MCUSPerCol;
+  const int bytesPerRow = ((outW * 2 + 31) / 32) * 4;
+
+  uint8_t* outRow = static_cast<uint8_t*>(malloc(bytesPerRow));
+  if (!outRow) {
+    LOG_ERR(TAG, "preview: malloc(%d) failed", bytesPerRow);
+    return false;
+  }
+
+  writeBmpHeader2bit(bmpOut, outW, outH);
+
+  bool ok = true;
+  for (int mcuY = 0; mcuY < outH && ok; mcuY++) {
+    memset(outRow, 0, bytesPerRow);
+    for (int mcuX = 0; mcuX < outW; mcuX++) {
+      const unsigned char status = pjpeg_decode_mcu();
+      if (status != 0) {
+        if (status == PJPG_NO_MORE_BLOCKS) {
+          // End of bitstream — pad remaining cells with white and bail out
+          // of both loops cleanly.
+          break;
+        }
+        LOG_ERR(TAG, "preview: decode_mcu err=%d at mcu=%d,%d", status, mcuX, mcuY);
+        ok = false;
+        break;
+      }
+      uint8_t gray;
+      if (imageInfo.m_comps == 1) {
+        gray = imageInfo.m_pMCUBufR[0];
+      } else {
+        gray = rgbToGray(imageInfo.m_pMCUBufR[0], imageInfo.m_pMCUBufG[0], imageInfo.m_pMCUBufB[0]);
+      }
+      const uint8_t twoBit = quantizeSimple(adjustPixel(gray));
+      const int byteIdx = mcuX >> 2;
+      const int bitOff = 6 - ((mcuX & 3) << 1);
+      outRow[byteIdx] |= (twoBit << bitOff);
+    }
+    {
+      snapix::spi::SharedBusLock lk;
+      if (!lk || bmpOut.write(outRow, bytesPerRow) != static_cast<size_t>(bytesPerRow)) {
+        ok = false;
+      }
+    }
+    // Yield between MCU rows so a concurrent display refresh doesn't starve
+    // — preview is on the user's perceived-latency path.
+    if ((mcuY & 0x7) == 0) taskYIELD();
+  }
+
+  free(outRow);
+  if (ok) {
+    LOG_INF(TAG, "preview: %dx%d decoded", outW, outH);
+  }
+  return ok;
+}

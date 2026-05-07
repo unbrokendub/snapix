@@ -492,14 +492,24 @@ void GfxRenderer::drawImage(const uint8_t bitmap[], const int x, const int y, co
 
 void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, const int maxWidth,
                              const int maxHeight) const {
+  // Fit-to-box scaling (both up AND down).  When the JPEG converter writes a
+  // 1/8 reduce-mode preview BMP, the cached file is small but the slot in
+  // the page is full size — we upscale by ~8× until the full decode replaces
+  // it.  Pixelated but visible, so the user sees image content within ~1 s
+  // instead of waiting for the full decode.
   float scale = 1.0f;
   bool isScaled = false;
-  if (maxWidth > 0 && bitmap.getWidth() > maxWidth) {
+  if (maxWidth > 0 && maxHeight > 0 && bitmap.getWidth() > 0 && bitmap.getHeight() > 0) {
+    const float sx = static_cast<float>(maxWidth) / static_cast<float>(bitmap.getWidth());
+    const float sy = static_cast<float>(maxHeight) / static_cast<float>(bitmap.getHeight());
+    scale = std::min(sx, sy);
+    isScaled = (scale < 0.999f || scale > 1.001f);
+  } else if (maxWidth > 0 && bitmap.getWidth() > maxWidth) {
+    // Legacy single-axis path (callers that pass maxHeight=0).
     scale = static_cast<float>(maxWidth) / static_cast<float>(bitmap.getWidth());
     isScaled = true;
-  }
-  if (maxHeight > 0 && bitmap.getHeight() > maxHeight) {
-    scale = std::min(scale, static_cast<float>(maxHeight) / static_cast<float>(bitmap.getHeight()));
+  } else if (maxHeight > 0 && bitmap.getHeight() > maxHeight) {
+    scale = static_cast<float>(maxHeight) / static_cast<float>(bitmap.getHeight());
     isScaled = true;
   }
 
