@@ -130,13 +130,17 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
       if (resolveFb2SectionContext(fb2Provider, config, activeSpineForCache, &cachePath, &startOffset,
                                    &startingSectionIndex, &endOffset)) {
         if (!parser_ || parserSpineIndex_ != activeSpineForCache) {
-          parser_.reset(new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset));
+          auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset);
+          if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+          parser_.reset(fb2Parser);
           parserSpineIndex_ = activeSpineForCache;
         }
       } else {
         cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
         if (!parser_) {
-          parser_.reset(new Fb2Parser(contentPath_, renderer_, config));
+          auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config);
+          if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+          parser_.reset(fb2Parser);
           parserSpineIndex_ = 0;
         }
       }
@@ -311,6 +315,7 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
   auto* fb2 = provider ? provider->getFb2() : nullptr;
   const uint32_t targetSourceOffset = resolveFb2AnchorSourceOffset(fb2, targetAnchor);
   Fb2Parser parser(contentPath_, renderer_, config);
+  if (fb2) parser.setFb2(fb2);
   PageCache cache(cachePath);
   bool cacheLoaded = cache.load(config);
   int targetPageHint = request.targetPageHint;
@@ -453,10 +458,14 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
         int startingSectionIndex = 0;
         if (resolveFb2SectionContext(fb2Provider, config, request.targetSpine, nullptr, &startOffset,
                                      &startingSectionIndex, &endOffset)) {
-          parser_.reset(new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset));
+          auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset);
+          if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+          parser_.reset(fb2Parser);
           parserSpineIndex_ = request.targetSpine;
         } else {
-          parser_.reset(new Fb2Parser(contentPath_, renderer_, config));
+          auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config);
+          if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+          parser_.reset(fb2Parser);
           parserSpineIndex_ = 0;
         }
       } else if (type == ContentType::Markdown) {

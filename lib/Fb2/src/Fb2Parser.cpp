@@ -1,5 +1,6 @@
 #include "Fb2Parser.h"
 
+#include "Fb2.h"
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Page.h>
@@ -7,6 +8,7 @@
 #include <SDCardManager.h>
 #include <SharedSpiLock.h>
 #include <Utf8.h>
+#include <blocks/ImageBlock.h>
 
 #define TAG "FB2_PARSE"
 
@@ -486,7 +488,48 @@ void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const
     }
     self->addVerticalSpacing(1);
   } else if (strcmp(localName, "image") == 0) {
-    // Skip images in v1
+    // Inline FB2 image (<image l:href="#binary_id"/>).  When an Fb2 instance
+    // is wired (setFb2) and showImages is on, materialise the referenced
+    // <binary> base64 block into a cached BMP and emit it as a PageImage.
+    // Otherwise silently skip — keeps legacy behaviour intact.
+    if (!self->fb2_ || !self->config_.showImages || self->stopRequested_) return;
+
+    const char* href = nullptr;
+    if (atts) {
+      for (int i = 0; atts[i]; i += 2) {
+        const char* an = atts[i];
+        const char* p = strrchr(an, ':');
+        p = p ? (p + 1) : an;
+        if (strcmp(p, "href") == 0) {
+          href = atts[i + 1];
+          break;
+        }
+      }
+    }
+    if (!href || href[0] != '#' || !href[1]) return;
+    std::string binaryId(href + 1);
+
+    // Cap output dimensions to the viewport so the JPEG is downscaled by the
+    // converter rather than blown up at render time.  Leave room for at
+    // least a couple of text lines around the image.
+    const int maxW = std::max(64, static_cast<int>(self->config_.viewportWidth) - 12);
+    const int maxH = std::max(64, static_cast<int>(self->config_.viewportHeight) - 80);
+
+    std::string bmpPath;
+    uint16_t w = 0, h = 0;
+    if (!self->fb2_->cacheImage(binaryId, bmpPath, w, h, maxW, maxH) || w == 0 || h == 0) {
+      LOG_DBG(TAG, "image <%s>: cache miss, falling back to skip", binaryId.c_str());
+      return;
+    }
+
+    auto imageBlock = std::make_shared<ImageBlock>(bmpPath, w, h, /*nodeId*/ "", binaryId, /*resolved*/ "");
+
+    // Flush the current text run so the image lands on its own paragraph.
+    if (self->currentTextBlock_ && !self->currentTextBlock_->isEmpty()) {
+      self->makePages();
+      if (self->stopRequested_) return;
+    }
+    self->addImageToPage(std::move(imageBlock));
   }
 
   self->depth_++;
@@ -757,6 +800,47 @@ void Fb2Parser::addLineToPage(std::shared_ptr<TextBlock> line) {
 
   currentPage_->elements.push_back(std::make_unique<PageLine>(std::move(line), 0, currentPageNextY_));
   currentPageNextY_ += lineHeight;
+}
+
+void Fb2Parser::addImageToPage(std::shared_ptr<ImageBlock> image) {
+  if (!image || stopRequested_) return;
+
+  const int imageHeight = image->getHeight();
+  const int imageWidth = image->getWidth();
+  if (imageHeight <= 0 || imageWidth <= 0) return;
+
+  if (!currentPage_) {
+    startNewPage();
+  }
+
+  // If the image won't fit in the remaining space on the current page,
+  // complete the current page first.  This avoids clipping at the bottom.
+  if (currentPageNextY_ + imageHeight > config_.viewportHeight) {
+    if (currentPage_ && !currentPage_->elements.empty()) {
+      onPageComplete_(std::move(currentPage_));
+      pagesCreated_++;
+      if (maxPages_ > 0 && pagesCreated_ >= maxPages_) {
+        hitMaxPages_ = true;
+        requestXmlSuspend();
+        return;
+      }
+    }
+    startNewPage();
+  }
+
+  // Centre the image horizontally within the viewport.  When the cached BMP
+  // is wider than the viewport (shouldn't happen given cacheImage's downscale
+  // but defensive), clamp xPos to 0.
+  int xPos = (static_cast<int>(config_.viewportWidth) - imageWidth) / 2;
+  if (xPos < 0) xPos = 0;
+
+  const int yPos = currentPageNextY_;
+  currentPage_->elements.push_back(std::make_unique<PageImage>(std::move(image), xPos, yPos));
+
+  // Add a single line height of breathing room below the image so the next
+  // paragraph doesn't bump into it.
+  const int lineHeight = std::max(8, static_cast<int>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression));
+  currentPageNextY_ = static_cast<int16_t>(std::min(yPos + imageHeight + lineHeight, 32767));
 }
 
 void Fb2Parser::startNewPage() {

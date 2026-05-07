@@ -883,13 +883,24 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     if (resolveFb2SectionContext(provider, config, position_.currentSpineIndex, &cachePath, &startOffset,
                                  &startingSectionIndex, &endOffset)) {
       if (!state.parser || state.parserSpineIndex != position_.currentSpineIndex) {
-        state.parser.reset(new Fb2Parser(contentPath_, resources_.renderer(), config, startOffset, startingSectionIndex,
-                                         true, endOffset));
+        auto newParser = std::unique_ptr<ContentParser>(new Fb2Parser(contentPath_, resources_.renderer(), config,
+                                                                      startOffset, startingSectionIndex, true, endOffset));
+        // Hand the parser an Fb2 reference so it can resolve <image> tags
+        // through the binary index.  Without this the parser silently skips
+        // inline FB2 images.
+        if (provider && provider->getFb2()) {
+          static_cast<Fb2Parser*>(newParser.get())->setFb2(provider->getFb2());
+        }
+        state.parser = std::move(newParser);
         state.parserSpineIndex = position_.currentSpineIndex;
       }
     } else {
       if (!state.parser) {
-        state.parser.reset(new Fb2Parser(contentPath_, resources_.renderer(), config));
+        auto newParser = std::unique_ptr<ContentParser>(new Fb2Parser(contentPath_, resources_.renderer(), config));
+        if (provider && provider->getFb2()) {
+          static_cast<Fb2Parser*>(newParser.get())->setFb2(provider->getFb2());
+        }
+        state.parser = std::move(newParser);
         state.parserSpineIndex = 0;
       }
       cachePath = contentCachePath(core.content.cacheDir(), config.fontId);

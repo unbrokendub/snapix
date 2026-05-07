@@ -16,6 +16,8 @@
 class Page;
 class GfxRenderer;
 class ParsedText;
+class Fb2;
+class ImageBlock;
 
 class Fb2Parser : public ContentParser {
  public:
@@ -30,6 +32,14 @@ class Fb2Parser : public ContentParser {
   void reset() override;
   const std::vector<std::pair<std::string, uint16_t>>& getAnchorMap() const override { return anchorMap_; }
   uint32_t lastParsedOffset() const { return lastParsedOffset_; }
+
+  /**
+   * Wire an Fb2 instance for image rendering.  The parser uses fb2->cacheImage()
+   * to materialise <image l:href="#id"/> references during page layout — base64
+   * → JPEG → BMP on first encounter, then a fast cache hit thereafter.  Pass
+   * nullptr (or never call) to disable images entirely (legacy behaviour).
+   */
+  void setFb2(const Fb2* fb2) { fb2_ = fb2; }
 
  private:
   std::string filepath_;
@@ -83,6 +93,11 @@ class Fb2Parser : public ContentParser {
   std::unique_ptr<Page> currentPage_;
   int16_t currentPageNextY_ = 0;
 
+  // Image resolver — non-owning.  When non-null and config_.showImages is
+  // true, <image> tags are decoded via fb2_->cacheImage() and emitted as
+  // PageImage elements instead of being silently skipped.
+  const Fb2* fb2_ = nullptr;
+
   // Anchor map for TOC navigation (section_N → page index)
   std::vector<std::pair<std::string, uint16_t>> anchorMap_;
 
@@ -113,6 +128,7 @@ class Fb2Parser : public ContentParser {
   void requestXmlSuspend();
   void makePages();
   void addLineToPage(std::shared_ptr<TextBlock> line);
+  void addImageToPage(std::shared_ptr<ImageBlock> image);
   void startNewPage();
   EpdFontFamily::Style getCurrentFontFamily() const;
   void addVerticalSpacing(int lines);

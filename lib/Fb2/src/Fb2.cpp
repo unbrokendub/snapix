@@ -8,6 +8,7 @@
 
 #include <CoverHelpers.h>
 #include <FsHelpers.h>
+#include <JpegToBmpConverter.h>
 #include <Logging.h>
 
 #define TAG "FB2"
@@ -15,10 +16,11 @@
 #include <Serialization.h>
 #include <SharedSpiLock.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace {
-constexpr uint8_t kMetaCacheVersion = 4;
+constexpr uint8_t kMetaCacheVersion = 5;  // v5: adds binary index for inline images
 constexpr char kMetaCacheFile[] = "/meta.bin";
 
 void closeFileProtected(FsFile& file) {
@@ -27,6 +29,104 @@ void closeFileProtected(FsFile& file) {
   }
   snapix::spi::SharedBusLock lk;
   file.close();
+}
+
+// Base64 alphabet decode table.  Returns -1 for non-base64 / whitespace,
+// -2 for the '=' padding character, [0..63] for valid base64 chars.
+// Used by streamDecodeBase64ToFile to decode FB2 <binary> blocks without
+// holding the entire encoded string in RAM.
+int8_t base64DecodeChar(uint8_t c) {
+  if (c >= 'A' && c <= 'Z') return static_cast<int8_t>(c - 'A');
+  if (c >= 'a' && c <= 'z') return static_cast<int8_t>(c - 'a' + 26);
+  if (c >= '0' && c <= '9') return static_cast<int8_t>(c - '0' + 52);
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  if (c == '=') return -2;
+  return -1;
+}
+
+// Stream-decode a base64 chunk inside an FB2 file directly to an output JPEG
+// file.  Ranges from `offset` (start of `<binary` opening tag) for `length`
+// bytes (up to start of `</binary>`).  The opening-tag prefix is detected
+// and skipped — first '>' encountered marks the start of base64 content.
+//
+// Streaming keeps RAM usage bounded to ~(in 256B + out 192B) ≈ 450 B.  This
+// matters because the largest <binary> in a Russian FB2 commonly hits 200 KB
+// of base64 → 150 KB of JPEG, which won't fit in a single allocation on
+// ESP32-C3 under load.
+bool streamDecodeBase64ToJpegFile(const std::string& srcPath, uint32_t offset, uint32_t length,
+                                  const std::string& dstPath) {
+  FsFile src;
+  if (!SdMan.openFileForRead("FB2", srcPath, src)) return false;
+  FsFile dst;
+  if (!SdMan.openFileForWrite("FB2", dstPath, dst)) {
+    src.close();
+    return false;
+  }
+
+  {
+    snapix::spi::SharedBusLock lk;
+    if (!src.seek(offset)) {
+      src.close();
+      dst.close();
+      return false;
+    }
+  }
+
+  uint8_t inBuf[256];
+  uint8_t outBuf[192];
+  size_t outIdx = 0;
+  uint32_t accum = 0;
+  int accumBits = 0;
+  bool foundOpenTagEnd = false;
+  uint32_t remaining = length;
+  bool ok = true;
+
+  while (remaining > 0) {
+    int toRead = static_cast<int>(std::min<uint32_t>(sizeof(inBuf), remaining));
+    int got = 0;
+    {
+      snapix::spi::SharedBusLock lk;
+      got = src.read(inBuf, toRead);
+    }
+    if (got <= 0) {
+      ok = (got == 0);  // genuine EOF is fine; negative is an SD read error
+      break;
+    }
+    remaining -= static_cast<uint32_t>(got);
+
+    for (int i = 0; i < got; i++) {
+      const uint8_t c = inBuf[i];
+      if (!foundOpenTagEnd) {
+        if (c == '>') foundOpenTagEnd = true;
+        continue;
+      }
+      const int8_t v = base64DecodeChar(c);
+      if (v < 0) continue;  // skip whitespace, '=' padding, anything non-base64
+      accum = (accum << 6) | static_cast<uint8_t>(v);
+      accumBits += 6;
+      if (accumBits >= 8) {
+        accumBits -= 8;
+        outBuf[outIdx++] = static_cast<uint8_t>((accum >> accumBits) & 0xFF);
+        if (outIdx >= sizeof(outBuf)) {
+          snapix::spi::SharedBusLock lk;
+          dst.write(outBuf, outIdx);
+          outIdx = 0;
+        }
+      }
+    }
+  }
+  if (outIdx > 0) {
+    snapix::spi::SharedBusLock lk;
+    dst.write(outBuf, outIdx);
+  }
+  {
+    snapix::spi::SharedBusLock lk;
+    dst.sync();
+    dst.close();
+    src.close();
+  }
+  return ok;
 }
 }  // namespace
 
@@ -130,9 +230,37 @@ void XMLCALL Fb2::startElement(void* userData, const XML_Char* name, const XML_C
     tag = name;
   }
 
-  // Skip binary content (base64-encoded images)
+  // <binary id="..." content-type="..."> — capture the offset / length so we
+  // can resolve <image l:href="#id"/> references at chapter parse time
+  // without a second full-file scan.  We still skip the base64 content
+  // here (skipUntilDepth) — we don't want to materialise it through Expat.
   if (strcmp(tag, "binary") == 0) {
     self->skipUntilDepth = self->depth - 1;
+
+    self->currentBinaryId_.clear();
+    self->currentBinaryMime_ = 2;  // 2 = "other / unknown"
+    self->currentBinaryStart_ = 0;
+    if (atts) {
+      for (int i = 0; atts[i]; i += 2) {
+        const char* aname = atts[i];
+        const char* avalue = atts[i + 1];
+        const char* an = strrchr(aname, ':');
+        an = an ? (an + 1) : aname;
+        if (strcmp(an, "id") == 0 && avalue) {
+          self->currentBinaryId_ = avalue;
+        } else if (strcmp(an, "content-type") == 0 && avalue) {
+          if (strcmp(avalue, "image/jpeg") == 0) self->currentBinaryMime_ = 0;
+          else if (strcmp(avalue, "image/png") == 0) self->currentBinaryMime_ = 1;
+          else self->currentBinaryMime_ = 2;
+        }
+      }
+    }
+    if (!self->currentBinaryId_.empty() && self->xmlParser_) {
+      const long byteIndex = XML_GetCurrentByteIndex(self->xmlParser_);
+      if (byteIndex >= 0) {
+        self->currentBinaryStart_ = static_cast<uint32_t>(byteIndex);
+      }
+    }
     return;
   }
 
@@ -243,6 +371,20 @@ void XMLCALL Fb2::endElement(void* userData, const XML_Char* name) {
   } else if (strcmp(tag, "binary") == 0) {
     // Exit binary tag - stop skipping
     self->skipUntilDepth = INT_MAX;
+    if (!self->currentBinaryId_.empty() && self->xmlParser_) {
+      const long byteIndex = XML_GetCurrentByteIndex(self->xmlParser_);
+      if (byteIndex >= 0 && self->currentBinaryStart_ > 0 &&
+          static_cast<uint32_t>(byteIndex) > self->currentBinaryStart_) {
+        BinaryEntry entry;
+        entry.fileOffset = self->currentBinaryStart_;
+        entry.byteLength = static_cast<uint32_t>(byteIndex) - self->currentBinaryStart_;
+        entry.mimeType = self->currentBinaryMime_;
+        self->binaryIndex_[self->currentBinaryId_] = entry;
+      }
+    }
+    self->currentBinaryId_.clear();
+    self->currentBinaryStart_ = 0;
+    self->currentBinaryMime_ = 0;
   } else if (strcmp(tag, "body") == 0) {
     self->inBody = false;
   } else if (strcmp(tag, "title") == 0 && self->inSectionTitle_ && self->depth == self->sectionTitleDepth_) {
@@ -470,6 +612,135 @@ bool Fb2::generateCoverBmp(bool use1BitDithering) const {
   return success;
 }
 
+bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint16_t& outWidth, uint16_t& outHeight,
+                     int maxBoxWidth, int maxBoxHeight) const {
+  if (binaryId.empty()) return false;
+  auto it = binaryIndex_.find(binaryId);
+  if (it == binaryIndex_.end()) {
+    LOG_DBG(TAG, "cacheImage: binary id not in index: %s", binaryId.c_str());
+    return false;
+  }
+  const BinaryEntry& entry = it->second;
+  if (entry.byteLength == 0 || entry.mimeType >= 2) {
+    return false;  // Empty or unsupported MIME (we only handle JPEG / PNG; PNG decode TBD).
+  }
+  if (entry.mimeType != 0) {
+    // Only JPEG decode is wired up today.  PNG support is a future addition.
+    LOG_DBG(TAG, "cacheImage: skipping non-JPEG binary id=%s mime=%u", binaryId.c_str(),
+            static_cast<unsigned>(entry.mimeType));
+    return false;
+  }
+
+  const std::string imagesDir = cachePath + "/images";
+  const std::string bmpPath = imagesDir + "/" + binaryId + ".bmp";
+  const std::string failPath = imagesDir + "/" + binaryId + ".failed";
+  const std::string tmpJpgPath = imagesDir + "/" + binaryId + ".tmp.jpg";
+
+  // Already cached (idempotent path).
+  if (SdMan.exists(bmpPath.c_str())) {
+    FsFile bf;
+    if (SdMan.openFileForRead("FB2", bmpPath, bf)) {
+      uint8_t hdr[26];
+      int got = 0;
+      {
+        snapix::spi::SharedBusLock lk;
+        got = bf.read(hdr, sizeof(hdr));
+      }
+      bf.close();
+      if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
+        outWidth = static_cast<uint16_t>(hdr[18] | (hdr[19] << 8));
+        outHeight = static_cast<uint16_t>(hdr[22] | (hdr[23] << 8));
+        outBmpPath = bmpPath;
+        return outWidth > 0 && outHeight > 0;
+      }
+    }
+    // Header read failed — fall through and re-decode.
+  }
+
+  // Previous attempt failed sentinel — don't retry the same JPEG decode every
+  // page render in case it's malformed / OOM-bait.
+  if (SdMan.exists(failPath.c_str())) {
+    return false;
+  }
+
+  // Ensure target directory exists.
+  if (!SdMan.exists(imagesDir.c_str())) {
+    if (!SdMan.mkdir(imagesDir.c_str())) {
+      LOG_ERR(TAG, "cacheImage: failed to create images dir: %s", imagesDir.c_str());
+      return false;
+    }
+  }
+
+  // Step 1: stream-decode base64 chunk from the FB2 source into a temp JPEG.
+  if (!streamDecodeBase64ToJpegFile(filepath, entry.fileOffset, entry.byteLength, tmpJpgPath)) {
+    LOG_ERR(TAG, "cacheImage: base64 decode failed for id=%s", binaryId.c_str());
+    SdMan.remove(tmpJpgPath.c_str());
+    FsFile m;
+    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+    return false;
+  }
+
+  // Step 2: JPEG → BMP via the existing converter.  Quick mode trades dither
+  // quality for speed / RAM — acceptable on e-ink given the user's
+  // explicit "можно пожертвовать качеством картинок" tradeoff.
+  FsFile jpgFile;
+  if (!SdMan.openFileForRead("FB2", tmpJpgPath, jpgFile)) {
+    SdMan.remove(tmpJpgPath.c_str());
+    FsFile m;
+    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+    return false;
+  }
+  FsFile bmpFile;
+  if (!SdMan.openFileForWrite("FB2", bmpPath, bmpFile)) {
+    jpgFile.close();
+    SdMan.remove(tmpJpgPath.c_str());
+    FsFile m;
+    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+    return false;
+  }
+
+  const bool ok = JpegToBmpConverter::jpegFileToBmpStreamQuick(jpgFile, bmpFile, maxBoxWidth, maxBoxHeight, nullptr);
+  jpgFile.close();
+  bmpFile.close();
+  SdMan.remove(tmpJpgPath.c_str());
+
+  if (!ok) {
+    LOG_ERR(TAG, "cacheImage: JPEG decode failed for id=%s", binaryId.c_str());
+    SdMan.remove(bmpPath.c_str());
+    FsFile m;
+    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+    return false;
+  }
+
+  // Step 3: read back BMP dimensions for the caller (ImageBlock needs w/h).
+  FsFile bf;
+  if (SdMan.openFileForRead("FB2", bmpPath, bf)) {
+    uint8_t hdr[26];
+    int got = 0;
+    {
+      snapix::spi::SharedBusLock lk;
+      got = bf.read(hdr, sizeof(hdr));
+    }
+    bf.close();
+    if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
+      outWidth = static_cast<uint16_t>(hdr[18] | (hdr[19] << 8));
+      outHeight = static_cast<uint16_t>(hdr[22] | (hdr[23] << 8));
+      if (outWidth > 0 && outHeight > 0) {
+        outBmpPath = bmpPath;
+        LOG_INF(TAG, "cacheImage: decoded %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
+                static_cast<unsigned>(outWidth), static_cast<unsigned>(outHeight));
+        return true;
+      }
+    }
+  }
+
+  // BMP exists but unreadable header — give up and mark failed.
+  SdMan.remove(bmpPath.c_str());
+  FsFile m;
+  if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+  return false;
+}
+
 std::string Fb2::getThumbBmpPath() const { return cachePath + "/thumb.bmp"; }
 
 bool Fb2::generateThumbBmp() const {
@@ -568,6 +839,27 @@ bool Fb2::loadMetaCache() {
     }
   }
 
+  // Binary (image) index — added in meta v5.  Read into the in-memory map.
+  binaryIndex_.clear();
+  uint16_t binaryCount = 0;
+  if (serialization::readPodChecked(file, binaryCount)) {
+    binaryIndex_.reserve(binaryCount);
+    for (uint16_t i = 0; i < binaryCount; i++) {
+      std::string id;
+      BinaryEntry entry;
+      if (!serialization::readString(file, id) || !serialization::readPodChecked(file, entry.fileOffset) ||
+          !serialization::readPodChecked(file, entry.byteLength) ||
+          !serialization::readPodChecked(file, entry.mimeType)) {
+        // Truncated index — leave whatever we managed to read; not fatal.
+        LOG_DBG(TAG, "Binary index truncated at %u/%u entries", i, binaryCount);
+        break;
+      }
+      if (!id.empty()) {
+        binaryIndex_.emplace(std::move(id), entry);
+      }
+    }
+  }
+
   file.close();
   return true;
 }
@@ -605,13 +897,27 @@ bool Fb2::saveMetaCache() const {
     serialization::writePod(file, item.depth);
   }
 
+  // Binary (image) index — meta v5.  Written immediately after the TOC so
+  // the on-disk layout matches loadMetaCache's read order.
+  const uint16_t binaryCount = static_cast<uint16_t>(std::min<size_t>(binaryIndex_.size(), 0xFFFFu));
+  serialization::writePod(file, binaryCount);
+  uint16_t written = 0;
+  for (const auto& kv : binaryIndex_) {
+    if (written >= binaryCount) break;
+    serialization::writeString(file, kv.first);
+    serialization::writePod(file, kv.second.fileOffset);
+    serialization::writePod(file, kv.second.byteLength);
+    serialization::writePod(file, kv.second.mimeType);
+    ++written;
+  }
+
   // Explicit sync flushes both file data and the parent directory entry to the
   // SD card before close().  Without this, SdFat keeps the directory cluster
   // dirty in its single-sector cache; if the next file operation evicts that
   // sector, the freshly written meta.bin appears to vanish on the next open.
   file.sync();
   file.close();
-  LOG_INF(TAG, "Saved meta cache (%u TOC items)", tocItemCount);
+  LOG_INF(TAG, "Saved meta cache (%u TOC items, %u binaries)", tocItemCount, binaryCount);
   return true;
 }
 
