@@ -550,7 +550,12 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       int bmpX = isScaled ? static_cast<int>(destX * invScale) : destX;
       if (bmpX >= bitmap.getWidth()) bmpX = bitmap.getWidth() - 1;
 
-      const uint8_t val = bitmapOutputRow_[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
+      // /4 → >>2; (bmpX * 2) % 8 → (bmpX & 3) << 1.  This loop runs ~452 ×
+      // destHeight per image — making the bit math explicit eliminates any
+      // chance of the compiler keeping a real divide instruction here on
+      // ESP32-C3 (no FPU; integer divide is microcoded and slower than
+      // shifts).
+      const uint8_t val = bitmapOutputRow_[bmpX >> 2] >> (6 - ((bmpX & 3) << 1)) & 0x3;
 
       if (renderMode == BW && val < 3) {
         plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, true, this);
@@ -1226,8 +1231,10 @@ IRAM_ATTR void GfxRenderer::renderChar(const EpdFontFamily& fontFamily, const ui
         const int pixelPosition = glyphY * width + glyphX;
 
         if (is2Bit) {
-          const uint8_t byte = bitmap[pixelPosition / 4];
-          const uint8_t bit_index = (3 - pixelPosition % 4) * 2;
+          // /4 → >>2, %4 → &3 (compiler likely already does this, but make it
+          // explicit so it can't get pessimised after refactors).
+          const uint8_t byte = bitmap[pixelPosition >> 2];
+          const uint8_t bit_index = (3 - (pixelPosition & 3)) << 1;
           // the direct bit from the font is 0 -> white, 1 -> light gray, 2 -> dark gray, 3 -> black
           // we swap this to better match the way images and screen think about colors:
           // 0 -> black, 1 -> dark grey, 2 -> light grey, 3 -> white
@@ -1245,8 +1252,9 @@ IRAM_ATTR void GfxRenderer::renderChar(const EpdFontFamily& fontFamily, const ui
             plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, false, this);
           }
         } else {
-          const uint8_t byte = bitmap[pixelPosition / 8];
-          const uint8_t bit_index = 7 - (pixelPosition % 8);
+          // /8 → >>3, %8 → &7
+          const uint8_t byte = bitmap[pixelPosition >> 3];
+          const uint8_t bit_index = 7 - (pixelPosition & 7);
 
           if ((byte >> bit_index) & 1) {
             plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, pixelState, this);
@@ -1353,8 +1361,8 @@ void GfxRenderer::renderExternalGlyph(const uint32_t cp, int* x, const int y, co
       const int screenX = *x + glyphX - minX;
       if (screenX < 0 || screenX >= screenWidth) continue;
 
-      const int byteIdx = glyphY * bytesPerRow + (glyphX / 8);
-      const int bitIdx = 7 - (glyphX % 8);
+      const int byteIdx = glyphY * bytesPerRow + (glyphX >> 3);
+      const int bitIdx = 7 - (glyphX & 7);
       if ((bitmap[byteIdx] >> bitIdx) & 1) {
         plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, pixelState, this);
       }
@@ -1517,8 +1525,8 @@ void GfxRenderer::renderThaiCluster(const EpdFontFamily& fontFamily, const ThaiS
         if (screenX < 0 || screenX >= screenWidth) continue;
 
         if (is2Bit) {
-          const uint8_t byte = bitmap[pixelPosition / 4];
-          const uint8_t bit_index = (3 - pixelPosition % 4) * 2;
+          const uint8_t byte = bitmap[pixelPosition >> 2];
+          const uint8_t bit_index = (3 - (pixelPosition & 3)) << 1;
           const uint8_t bmpVal = 3 - (byte >> bit_index) & 0x3;
 
           if (renderMode == BW && bmpVal < 3) {
@@ -1529,8 +1537,8 @@ void GfxRenderer::renderThaiCluster(const EpdFontFamily& fontFamily, const ThaiS
             drawPixel(screenX, screenY, false);
           }
         } else {
-          const uint8_t byte = bitmap[pixelPosition / 8];
-          const uint8_t bit_index = 7 - (pixelPosition % 8);
+          const uint8_t byte = bitmap[pixelPosition >> 3];
+          const uint8_t bit_index = 7 - (pixelPosition & 7);
 
           if ((byte >> bit_index) & 1) {
             drawPixel(screenX, screenY, pixelState);

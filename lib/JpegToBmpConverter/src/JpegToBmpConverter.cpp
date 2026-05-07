@@ -533,12 +533,12 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
           const int pixelX = mcuX * mcuPixelWidth + blockX;
           if (pixelX >= imageInfo.m_width) continue;
 
-          // Calculate proper block offset for picojpeg buffer
-          const int blockCol = blockX / 8;
-          const int blockRow = blockY / 8;
-          const int localX = blockX % 8;
-          const int localY = blockY % 8;
-          const int blocksPerRow = mcuPixelWidth / 8;
+          // Calculate proper block offset for picojpeg buffer.
+          const int blockCol = blockX >> 3;
+          const int blockRow = blockY >> 3;
+          const int localX = blockX & 7;
+          const int localY = blockY & 7;
+          const int blocksPerRow = mcuPixelWidth >> 3;
           const int blockIndex = blockRow * blocksPerRow + blockCol;
           const int pixelOffset = blockIndex * 64 + localY * 8 + localX;
 
@@ -579,9 +579,9 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
             const uint8_t gray = mcuRowBuffer[bufferY * imageInfo.m_width + x];
             const uint8_t bit =
                 atkinson1BitDitherer ? atkinson1BitDitherer->processPixel(gray, x) : quantize1bit(gray, x, y);
-            // Pack 1-bit value: MSB first, 8 pixels per byte
-            const int byteIndex = x / 8;
-            const int bitOffset = 7 - (x % 8);
+            // Pack 1-bit value: MSB first, 8 pixels per byte.
+            const int byteIndex = x >> 3;
+            const int bitOffset = 7 - (x & 7);
             rowBuffer[byteIndex] |= (bit << bitOffset);
           }
           if (atkinson1BitDitherer) atkinson1BitDitherer->nextRow();
@@ -600,8 +600,9 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
             } else {
               twoBit = quantize(gray, x, y);
             }
-            const int byteIndex = (x * 2) / 8;
-            const int bitOffset = 6 - ((x * 2) % 8);
+            // 2-bit packing: x*2/8 → x>>2; (x*2) % 8 → (x & 3) << 1.
+            const int byteIndex = x >> 2;
+            const int bitOffset = 6 - ((x & 3) << 1);
             rowBuffer[byteIndex] |= (twoBit << bitOffset);
           }
           if (atkinsonDitherer)
@@ -671,9 +672,9 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
               const uint8_t gray = (rowCount[x] > 0) ? (rowAccum[x] / rowCount[x]) : 0;
               const uint8_t bit = atkinson1BitDitherer ? atkinson1BitDitherer->processPixel(gray, x)
                                                        : quantize1bit(gray, x, currentOutY);
-              // Pack 1-bit value: MSB first, 8 pixels per byte
-              const int byteIndex = x / 8;
-              const int bitOffset = 7 - (x % 8);
+              // Pack 1-bit value: MSB first, 8 pixels per byte.
+              const int byteIndex = x >> 3;
+              const int bitOffset = 7 - (x & 7);
               rowBuffer[byteIndex] |= (bit << bitOffset);
             }
             if (atkinson1BitDitherer) atkinson1BitDitherer->nextRow();
@@ -692,8 +693,9 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
               } else {
                 twoBit = quantize(gray, x, currentOutY);
               }
-              const int byteIndex = (x * 2) / 8;
-              const int bitOffset = 6 - ((x * 2) % 8);
+              // 2-bit packing: see jpegFileToBmpStreamInternal non-scaled path.
+              const int byteIndex = x >> 2;
+              const int bitOffset = 6 - ((x & 3) << 1);
               rowBuffer[byteIndex] |= (twoBit << bitOffset);
             }
             if (atkinsonDitherer)

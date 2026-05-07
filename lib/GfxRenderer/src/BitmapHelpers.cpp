@@ -466,15 +466,15 @@ bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxW
         for (int srcX = srcXStart; srcX < srcXEnd && srcX < srcWidth; srcX++) {
           uint8_t gray;
           if (bpp == 2) {
-            // 2-bit: 4 pixels per byte, MSB first
-            const int byteIdx = srcX / 4;
-            const int bitShift = 6 - (srcX % 4) * 2;
+            // 2-bit: 4 pixels per byte, MSB first.
+            const int byteIdx = srcX >> 2;
+            const int bitShift = 6 - ((srcX & 3) << 1);
             const uint8_t pixel = (row[byteIdx] >> bitShift) & 0x03;
             gray = palette2bitToGray(pixel);
           } else {
-            // 1-bit: 8 pixels per byte, MSB first
-            const int byteIdx = srcX / 8;
-            const int bitOffset = 7 - (srcX % 8);
+            // 1-bit: 8 pixels per byte, MSB first.
+            const int byteIdx = srcX >> 3;
+            const int bitOffset = 7 - (srcX & 7);
             const uint8_t pixel = (row[byteIdx] >> bitOffset) & 0x01;
             gray = palette1bitToGray(pixel);
           }
@@ -486,9 +486,9 @@ bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxW
       const uint8_t gray = (count > 0) ? (sum / count) : 0;
       const uint8_t bit = ditherer.processPixel(gray, outX);
 
-      // Pack 1-bit value (MSB first, 8 pixels per byte)
-      const int byteIdx = outX / 8;
-      const int bitOffset = 7 - (outX % 8);
+      // Pack 1-bit value (MSB first, 8 pixels per byte).
+      const int byteIdx = outX >> 3;
+      const int bitOffset = 7 - (outX & 7);
       outRow[byteIdx] |= (bit << bitOffset);
     }
 

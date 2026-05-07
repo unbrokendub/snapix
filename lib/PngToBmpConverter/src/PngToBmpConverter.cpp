@@ -136,8 +136,9 @@ void pngDrawCallback(pngle_t* pngle, uint32_t x, uint32_t y, uint32_t w, uint32_
         } else {
           twoBit = ctx->ditherer ? ctx->ditherer->processPixel(gray, outX) : quantize(gray, outX, y);
         }
-        const int byteIndex = (outX * 2) / 8;
-        const int bitOffset = 6 - ((outX * 2) % 8);
+        // 2-bit packing: outX*2 / 8 → outX>>2; (outX*2) % 8 → (outX & 3) << 1.
+        const int byteIndex = outX >> 2;
+        const int bitOffset = 6 - ((outX & 3) << 1);
         ctx->outRowBuffer[byteIndex] |= (twoBit << bitOffset);
       }
       if (ctx->ditherer && !ctx->quickMode) ctx->ditherer->nextRow();
