@@ -1,0 +1,9 @@
+{
+  "name": "TJpgDec",
+  "version": "0.3.0",
+  "description": "ChaN's TJpgDec R0.03 — Tiny JPEG decompressor (grayscale output, FASTDECODE=2)",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}
