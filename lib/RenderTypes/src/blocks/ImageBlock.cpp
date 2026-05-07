@@ -41,37 +41,36 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
     return std::string{};
   };
 
-  // Single-parse open + render.  v2.0.39 was doing TWO parseHeaders per
-  // image render (probe to validate, then re-parse for actual streaming),
-  // which during post-write SD recovery cost ~600 ms each.  parseHeaders
-  // now leaves the file cursor at bfOffBits (start of pixel data) ready
-  // for drawBitmap's readRow/preload, so we just keep the validated
-  // Bitmap and hand it to the renderer directly.
+  // Single-shot file load: parseAndLoadAll slurps the entire BMP file
+  // (header + palette + pixel data) into ONE heap buffer with ONE
+  // SharedBusLock-protected file.read().  drawBitmap then sees the
+  // bitmap as fully preloaded and never touches SD again — total wall
+  // time is dominated by ~50 ms inner loop instead of ~1 s of file ops
+  // strung across the SD card's post-write-recovery latency cliff.
   FsFile bmpFile;
 
-  auto tryOpenAndParse = [](const std::string& path, FsFile& outFile, Bitmap& outBitmap) -> bool {
+  auto tryOpenAndLoad = [](const std::string& path, FsFile& outFile, Bitmap& outBitmap) -> bool {
     if (!SdMan.openFileForRead("IMB", path, outFile)) return false;
-    if (outBitmap.parseHeaders() != BmpReaderError::Ok) {
+    if (outBitmap.parseAndLoadAll() != BmpReaderError::Ok) {
       outFile.close();
       return false;
     }
     return true;
   };
 
-  // Try full BMP first.
   Bitmap fullBitmap(bmpFile, true);
-  if (tryOpenAndParse(cachedBmpPath, bmpFile, fullBitmap)) {
+  if (tryOpenAndLoad(cachedBmpPath, bmpFile, fullBitmap)) {
     renderer.drawBitmap(fullBitmap, x, y, width, height);
     bmpFile.close();
     return;
   }
 
-  // Fallback: preview BMP (post-v2.0.27 BG decode writes one of these
-  // before the full decode finishes).
+  // Fallback: preview BMP (BG decode writes one of these before the full
+  // decode finishes — see decodePendingImages's two-phase pipeline).
   const std::string previewPath = previewPathFromFull();
   if (!previewPath.empty()) {
     Bitmap previewBitmap(bmpFile, true);
-    if (tryOpenAndParse(previewPath, bmpFile, previewBitmap)) {
+    if (tryOpenAndLoad(previewPath, bmpFile, previewBitmap)) {
       renderer.drawBitmap(previewBitmap, x, y, width, height);
       bmpFile.close();
       return;

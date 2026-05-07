@@ -17,7 +17,148 @@ constexpr bool USE_ATKINSON = true;  // Use Atkinson dithering instead of Floyd-
 Bitmap::~Bitmap() {
   delete atkinsonDitherer;
   delete fsDitherer;
-  delete[] preloadedRows_;
+  // Free whichever pointer actually owns the heap allocation.  After
+  // parseAndLoadAll(), preloadedFileStart_ is the alloc'd block and
+  // preloadedRows_ is offset INTO it.  After preloadAllRows(),
+  // preloadedFileStart_ stays nullptr and preloadedRows_ owns its own
+  // buffer.
+  if (preloadedFileStart_) {
+    delete[] preloadedFileStart_;
+  } else if (preloadedRows_) {
+    delete[] preloadedRows_;
+  }
+  preloadedRows_ = nullptr;
+  preloadedFileStart_ = nullptr;
+}
+
+BmpReaderError Bitmap::parseAndLoadAll() {
+  if (!file) return BmpReaderError::FileInvalid;
+  // Defensive: free any prior allocation so a re-parse starts clean.
+  if (preloadedFileStart_) {
+    delete[] preloadedFileStart_;
+    preloadedFileStart_ = nullptr;
+    preloadedRows_ = nullptr;
+  } else if (preloadedRows_) {
+    delete[] preloadedRows_;
+    preloadedRows_ = nullptr;
+  }
+
+  uint32_t fileSize;
+  {
+    snapix::spi::SharedBusLock lk;
+    if (!lk || !file.seek(0)) return BmpReaderError::SeekStartFailed;
+    fileSize = file.size();
+  }
+  if (fileSize < 62) return BmpReaderError::FileInvalid;
+
+  // Cap at 256 KB — anything bigger and we'd rather stream.  In practice
+  // FB2 inline image BMPs after v2.0.38's 1-bit-at-target redesign top
+  // out around 30 KB; cover thumbs are similar.
+  constexpr uint32_t kMaxLoadAll = 256 * 1024;
+  if (fileSize > kMaxLoadAll) return BmpReaderError::ImageTooLarge;
+
+  preloadedRows_ = new (std::nothrow) uint8_t[fileSize];
+  if (!preloadedRows_) return BmpReaderError::OomRowBuffer;
+
+  // ONE big SharedBusLock-protected read of the entire file.  Pays
+  // SDFat's 100-300 ms post-write-recovery latency exactly once instead
+  // of 6+ times across parseHeaders + preloadAllRows + readRow paths.
+  {
+    snapix::spi::SharedBusLock lk;
+    if (!lk || !file.seek(0)) {
+      delete[] preloadedRows_;
+      preloadedRows_ = nullptr;
+      return BmpReaderError::FileInvalid;
+    }
+    if (file.read(preloadedRows_, fileSize) != static_cast<int>(fileSize)) {
+      delete[] preloadedRows_;
+      preloadedRows_ = nullptr;
+      return BmpReaderError::FileInvalid;
+    }
+  }
+
+  // Parse the header out of preloadedRows_ — same logic as parseHeaders
+  // but reading from RAM instead of via file.read().
+  const uint8_t* hdr = preloadedRows_;
+
+  auto leU16 = [](const uint8_t* p) -> uint16_t {
+    return static_cast<uint16_t>(p[0] | (uint16_t(p[1]) << 8));
+  };
+  auto leU32 = [](const uint8_t* p) -> uint32_t {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+  };
+  auto leI32 = [&leU32](const uint8_t* p) -> int32_t { return static_cast<int32_t>(leU32(p)); };
+
+  if (leU16(hdr + 0) != 0x4D42) {
+    delete[] preloadedRows_;
+    preloadedRows_ = nullptr;
+    return BmpReaderError::NotBMP;
+  }
+  bfOffBits = leU32(hdr + 10);
+  const uint32_t biSize = leU32(hdr + 14);
+  if (biSize < 40) {
+    delete[] preloadedRows_;
+    preloadedRows_ = nullptr;
+    return BmpReaderError::DIBTooSmall;
+  }
+  width = leI32(hdr + 18);
+  const int32_t rawHeight = leI32(hdr + 22);
+  topDown = rawHeight < 0;
+  height = topDown ? -rawHeight : rawHeight;
+  const uint16_t planes = leU16(hdr + 26);
+  bpp = leU16(hdr + 28);
+  const uint32_t comp = leU32(hdr + 30);
+  const uint32_t colorsUsed = leU32(hdr + 46);
+  const bool validBpp = bpp == 1 || bpp == 2 || bpp == 8 || bpp == 24 || bpp == 32;
+
+  auto fail = [&](BmpReaderError e) {
+    delete[] preloadedRows_;
+    preloadedRows_ = nullptr;
+    return e;
+  };
+  if (planes != 1) return fail(BmpReaderError::BadPlanes);
+  if (!validBpp) return fail(BmpReaderError::UnsupportedBpp);
+  if (!(comp == 0 || (bpp == 32 && comp == 3))) return fail(BmpReaderError::UnsupportedCompression);
+  if (colorsUsed > 256u) return fail(BmpReaderError::PaletteTooLarge);
+  if (width <= 0 || height <= 0) return fail(BmpReaderError::BadDimensions);
+
+  constexpr int MAX_IMAGE_WIDTH = 2048;
+  constexpr int MAX_IMAGE_HEIGHT = 3072;
+  if (width > MAX_IMAGE_WIDTH || height > MAX_IMAGE_HEIGHT) return fail(BmpReaderError::ImageTooLarge);
+
+  rowBytes = (width * bpp + 31) / 32 * 4;
+  if (bfOffBits + static_cast<uint32_t>(rowBytes) * static_cast<uint32_t>(height) > fileSize) {
+    return fail(BmpReaderError::FileInvalid);
+  }
+
+  for (int i = 0; i < 256; i++) paletteLum[i] = static_cast<uint8_t>(i);
+  if (colorsUsed > 0) {
+    // Palette starts immediately after the 14+40 = 54-byte header.
+    const uint8_t* pal = hdr + 54;
+    if (54 + colorsUsed * 4 > fileSize) return fail(BmpReaderError::FileInvalid);
+    for (uint32_t i = 0; i < colorsUsed; i++) {
+      const uint8_t* rgb = pal + i * 4;
+      paletteLum[i] = (77u * rgb[2] + 150u * rgb[1] + 29u * rgb[0]) >> 8;
+    }
+  }
+
+  // Clean up any stale ditherers.  parseAndLoadAll is used by FB2 inline
+  // image renders only, where dithering happened at decode time and we
+  // never want a second pass.
+  delete atkinsonDitherer;
+  atkinsonDitherer = nullptr;
+  delete fsDitherer;
+  fsDitherer = nullptr;
+
+  // preloadedRow() will return preloadedRows_ + bfOffBits + rowIndex * rowBytes,
+  // i.e. into the pixel data section of the buffer we just slurped.
+  // Repoint preloadedRows_ to start at the pixel data so existing
+  // preloadedRow() math (no bfOffBits offset) Just Works.  Save the
+  // original allocation pointer so the destructor can free it.
+  preloadedFileStart_ = preloadedRows_;
+  preloadedRows_ = preloadedRows_ + bfOffBits;
+  return BmpReaderError::Ok;
 }
 
 bool Bitmap::preloadAllRows() {

@@ -54,6 +54,18 @@ class Bitmap {
   bool isPreloaded() const { return preloadedRows_ != nullptr; }
   const uint8_t* preloadedRow(int rowIndex) const;
 
+  // Single-shot file load: reads the WHOLE BMP file (header + palette +
+  // pixel data) in ONE big file.read() under SharedBusLock, then parses
+  // the header out of the RAM buffer.  Combines parseHeaders +
+  // preloadAllRows into a single SD round-trip — the difference is huge
+  // post-write SD-card recovery state where each individual SDFat op
+  // pays a 100-300 ms latency cliff.  Subsequent preloadedRow()/readRow()
+  // calls hit only RAM.  Returns Ok on success, or a parse-error code;
+  // file is left untouched on failure (caller can fall back to the
+  // streaming parseHeaders + preloadAllRows path).  Caller should NOT
+  // also call parseHeaders.
+  BmpReaderError parseAndLoadAll();
+
  private:
   static uint16_t readLE16(FsFile& f);
   static uint32_t readLE32(FsFile& f);
@@ -75,5 +87,10 @@ class Bitmap {
 
   // Optional whole-image preload buffer (heap, owned).  When set, readRow()
   // and the renderer's preloadedRow() helper bypass file.read entirely.
+  // For preloadAllRows() this points at a buffer of just the pixel data;
+  // for parseAndLoadAll() it points INTO a larger buffer that also
+  // contains the BMP header — preloadedFileStart_ holds the alloc'd
+  // pointer for the destructor to free.
   uint8_t* preloadedRows_ = nullptr;
+  uint8_t* preloadedFileStart_ = nullptr;
 };
