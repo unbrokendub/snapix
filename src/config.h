@@ -64,6 +64,7 @@
 //   ruby -rdigest -e 'puts (Digest::SHA256.hexdigest(File.read(F)).to_i(16) %
 //                          (2**32) - (2**31))'
 #define JETBRAINS_MONO_4_FONT_ID  (-536722457)
+#define JETBRAINS_MONO_5_FONT_ID  1025770491
 #define JETBRAINS_MONO_10_FONT_ID 1386934901
 #define JETBRAINS_MONO_11_FONT_ID 1652182926
 #define JETBRAINS_MONO_12_FONT_ID 419397466
@@ -72,6 +73,7 @@
 // Embedded "PT Mono" — ParaType Ltd. derivative, 5 sizes, regular only.
 // SIL OFL 1.1; see scripts/pt-mono/OFL.txt.
 #define PT_MONO_4_FONT_ID         394929841
+#define PT_MONO_5_FONT_ID         (-1891215988)
 #define PT_MONO_10_FONT_ID        (-169993709)
 #define PT_MONO_11_FONT_ID        1597081734
 #define PT_MONO_12_FONT_ID        1746552986
@@ -80,6 +82,7 @@
 // Embedded "IBM Plex Mono" — IBM Corp. (Mike Abbink, Bold Monday) derivative.
 // SIL OFL 1.1; see scripts/ibm-plex-mono/OFL.txt.
 #define IBM_PLEX_MONO_4_FONT_ID   1613856708
+#define IBM_PLEX_MONO_5_FONT_ID   909346825
 #define IBM_PLEX_MONO_10_FONT_ID  (-1624760916)
 #define IBM_PLEX_MONO_11_FONT_ID  (-1570173100)
 #define IBM_PLEX_MONO_12_FONT_ID  (-1563447629)
@@ -88,6 +91,7 @@
 // Embedded "Literata" — Type Network for Google Fonts derivative.
 // SIL OFL 1.1; see scripts/literata/OFL.txt.
 #define LITERATA_4_FONT_ID        (-897024207)
+#define LITERATA_5_FONT_ID        (-556886400)
 #define LITERATA_10_FONT_ID       938590645
 #define LITERATA_11_FONT_ID       (-1210268069)
 #define LITERATA_12_FONT_ID       (-1241594796)

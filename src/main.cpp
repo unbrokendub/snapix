@@ -32,18 +32,21 @@
 // from cold-render paths and survives SD failures.  Bold/italic styles
 // degrade to fakeBold (multi-pass regular draw); see TextBlock::render.
 #include <builtinFonts/jetbrains_mono_4_2b.h>
+#include <builtinFonts/jetbrains_mono_5_2b.h>
 #include <builtinFonts/jetbrains_mono_10_2b.h>
 #include <builtinFonts/jetbrains_mono_11_2b.h>
 #include <builtinFonts/jetbrains_mono_12_2b.h>
 #include <builtinFonts/jetbrains_mono_13_2b.h>
 // PT Mono (ParaType, OFL 1.1) — geometric monospace optimised for Cyrillic.
 #include <builtinFonts/pt_mono_4_2b.h>
+#include <builtinFonts/pt_mono_5_2b.h>
 #include <builtinFonts/pt_mono_10_2b.h>
 #include <builtinFonts/pt_mono_11_2b.h>
 #include <builtinFonts/pt_mono_12_2b.h>
 #include <builtinFonts/pt_mono_13_2b.h>
 // IBM Plex Mono (IBM, OFL 1.1) — humanist monospace.
 #include <builtinFonts/ibm_plex_mono_4_2b.h>
+#include <builtinFonts/ibm_plex_mono_5_2b.h>
 #include <builtinFonts/ibm_plex_mono_10_2b.h>
 #include <builtinFonts/ibm_plex_mono_11_2b.h>
 #include <builtinFonts/ibm_plex_mono_12_2b.h>
@@ -51,6 +54,7 @@
 // Literata (Type Network for Google Fonts, OFL 1.1) — serif designed for
 // e-ink reading.  Used as the body font in the Literata builtin theme.
 #include <builtinFonts/literata_4_2b.h>
+#include <builtinFonts/literata_5_2b.h>
 #include <builtinFonts/literata_10_2b.h>
 #include <builtinFonts/literata_11_2b.h>
 #include <builtinFonts/literata_12_2b.h>
@@ -152,6 +156,11 @@ static EpdFontFamily& jetbrainsMono4Family() {
   static EpdFontFamily f(&r);
   return f;
 }
+static EpdFontFamily& jetbrainsMono5Family() {
+  static EpdFont r(&jetbrains_mono_5_2b);
+  static EpdFontFamily f(&r);
+  return f;
+}
 static EpdFontFamily& jetbrainsMono10Family() {
   static EpdFont r(&jetbrains_mono_10_2b);
   static EpdFontFamily f(&r);
@@ -175,6 +184,11 @@ static EpdFontFamily& jetbrainsMono13Family() {
 
 static EpdFontFamily& ptMono4Family() {
   static EpdFont r(&pt_mono_4_2b);
+  static EpdFontFamily f(&r);
+  return f;
+}
+static EpdFontFamily& ptMono5Family() {
+  static EpdFont r(&pt_mono_5_2b);
   static EpdFontFamily f(&r);
   return f;
 }
@@ -204,6 +218,11 @@ static EpdFontFamily& ibmPlexMono4Family() {
   static EpdFontFamily f(&r);
   return f;
 }
+static EpdFontFamily& ibmPlexMono5Family() {
+  static EpdFont r(&ibm_plex_mono_5_2b);
+  static EpdFontFamily f(&r);
+  return f;
+}
 static EpdFontFamily& ibmPlexMono10Family() {
   static EpdFont r(&ibm_plex_mono_10_2b);
   static EpdFontFamily f(&r);
@@ -227,6 +246,11 @@ static EpdFontFamily& ibmPlexMono13Family() {
 
 static EpdFontFamily& literata4Family() {
   static EpdFont r(&literata_4_2b);
+  static EpdFontFamily f(&r);
+  return f;
+}
+static EpdFontFamily& literata5Family() {
+  static EpdFont r(&literata_5_2b);
   static EpdFontFamily f(&r);
   return f;
 }
@@ -425,11 +449,13 @@ void setupDisplayAndFonts(bool allReaderSizes = true, bool preservePanelState = 
   // Register embedded JetBrains Mono variants — exclude from external override
   // path so the SD copy (if any) does not displace the in-flash version.
   renderer.insertFont(JETBRAINS_MONO_4_FONT_ID, jetbrainsMono4Family());
+  renderer.insertFont(JETBRAINS_MONO_5_FONT_ID, jetbrainsMono5Family());
   renderer.insertFont(JETBRAINS_MONO_10_FONT_ID, jetbrainsMono10Family());
   renderer.insertFont(JETBRAINS_MONO_11_FONT_ID, jetbrainsMono11Family());
   renderer.insertFont(JETBRAINS_MONO_12_FONT_ID, jetbrainsMono12Family());
   renderer.insertFont(JETBRAINS_MONO_13_FONT_ID, jetbrainsMono13Family());
   renderer.excludeExternalFont(JETBRAINS_MONO_4_FONT_ID);
+  renderer.excludeExternalFont(JETBRAINS_MONO_5_FONT_ID);
   renderer.excludeExternalFont(JETBRAINS_MONO_10_FONT_ID);
   renderer.excludeExternalFont(JETBRAINS_MONO_11_FONT_ID);
   renderer.excludeExternalFont(JETBRAINS_MONO_12_FONT_ID);
@@ -437,31 +463,37 @@ void setupDisplayAndFonts(bool allReaderSizes = true, bool preservePanelState = 
   // PT Mono / IBM Plex Mono / Literata — same registration pattern as
   // JetBrains Mono.  Each is selectable via its own builtin theme.
   renderer.insertFont(PT_MONO_4_FONT_ID, ptMono4Family());
+  renderer.insertFont(PT_MONO_5_FONT_ID, ptMono5Family());
   renderer.insertFont(PT_MONO_10_FONT_ID, ptMono10Family());
   renderer.insertFont(PT_MONO_11_FONT_ID, ptMono11Family());
   renderer.insertFont(PT_MONO_12_FONT_ID, ptMono12Family());
   renderer.insertFont(PT_MONO_13_FONT_ID, ptMono13Family());
   renderer.excludeExternalFont(PT_MONO_4_FONT_ID);
+  renderer.excludeExternalFont(PT_MONO_5_FONT_ID);
   renderer.excludeExternalFont(PT_MONO_10_FONT_ID);
   renderer.excludeExternalFont(PT_MONO_11_FONT_ID);
   renderer.excludeExternalFont(PT_MONO_12_FONT_ID);
   renderer.excludeExternalFont(PT_MONO_13_FONT_ID);
   renderer.insertFont(IBM_PLEX_MONO_4_FONT_ID, ibmPlexMono4Family());
+  renderer.insertFont(IBM_PLEX_MONO_5_FONT_ID, ibmPlexMono5Family());
   renderer.insertFont(IBM_PLEX_MONO_10_FONT_ID, ibmPlexMono10Family());
   renderer.insertFont(IBM_PLEX_MONO_11_FONT_ID, ibmPlexMono11Family());
   renderer.insertFont(IBM_PLEX_MONO_12_FONT_ID, ibmPlexMono12Family());
   renderer.insertFont(IBM_PLEX_MONO_13_FONT_ID, ibmPlexMono13Family());
   renderer.excludeExternalFont(IBM_PLEX_MONO_4_FONT_ID);
+  renderer.excludeExternalFont(IBM_PLEX_MONO_5_FONT_ID);
   renderer.excludeExternalFont(IBM_PLEX_MONO_10_FONT_ID);
   renderer.excludeExternalFont(IBM_PLEX_MONO_11_FONT_ID);
   renderer.excludeExternalFont(IBM_PLEX_MONO_12_FONT_ID);
   renderer.excludeExternalFont(IBM_PLEX_MONO_13_FONT_ID);
   renderer.insertFont(LITERATA_4_FONT_ID, literata4Family());
+  renderer.insertFont(LITERATA_5_FONT_ID, literata5Family());
   renderer.insertFont(LITERATA_10_FONT_ID, literata10Family());
   renderer.insertFont(LITERATA_11_FONT_ID, literata11Family());
   renderer.insertFont(LITERATA_12_FONT_ID, literata12Family());
   renderer.insertFont(LITERATA_13_FONT_ID, literata13Family());
   renderer.excludeExternalFont(LITERATA_4_FONT_ID);
+  renderer.excludeExternalFont(LITERATA_5_FONT_ID);
   renderer.excludeExternalFont(LITERATA_10_FONT_ID);
   renderer.excludeExternalFont(LITERATA_11_FONT_ID);
   renderer.excludeExternalFont(LITERATA_12_FONT_ID);

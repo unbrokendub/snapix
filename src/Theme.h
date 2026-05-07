@@ -155,24 +155,19 @@ inline Theme getBuiltinDarkTheme() {
 inline Theme getBuiltinMonoTheme() {
   Theme theme = getBuiltinLightTheme();
   strncpy(theme.displayName, "JetBrains Mono", sizeof(theme.displayName));
-  theme.statusFontId = JETBRAINS_MONO_4_FONT_ID;
+  theme.statusFontId = JETBRAINS_MONO_5_FONT_ID;
   theme.readerFontIdXSmall = JETBRAINS_MONO_10_FONT_ID;
   theme.readerFontId = JETBRAINS_MONO_11_FONT_ID;
   theme.readerFontIdMedium = JETBRAINS_MONO_12_FONT_ID;
   theme.readerFontIdLarge = JETBRAINS_MONO_13_FONT_ID;
-  // Status bar text bottom anchored at screenH (touches bottom edge), with
-  // a tight reserved height so the reader gets ~12 extra pixels of content
-  // area — enough to cross the 25 px line-height threshold and fit one more
-  // line in compact spacing.  jetbrains_mono_4 height = 12; reserved = 11
-  // (12 − 1 = textHeight − 1); offset = 4 (small breathing room above text
-  // within the reserved area).  textY = 800 − 14 − 2 + 4 = 788, same as the
-  // previous offset=16/reserved=23 layout — visual position unchanged.
+  // jetbrains_mono_5 status font: ascender 11, descender -4 → text height 15.
+  // reserved = textHeight - 1 = 14; offset = 4 (small breathing above text).
+  // text bottom Y = 800 − (3+14) − 2 + 4 + 15 = 800 (touches screen edge).
   theme.statusBarOffsetY = 4;
-  theme.statusBarReservedHeight = 11;
-  // Portrait default top margin is 9 px (VIEWABLE_MARGIN_TOP).  Pull body
-  // text up by 4 px so the small mono ascenders sit closer to the top
-  // bezel — matches the visual density the user expects from a code font.
-  theme.readerMarginTopReduction = 4;
+  theme.statusBarReservedHeight = 14;
+  // Lift body text by 5 px (default top margin 9 → 5) so glyph ascenders
+  // sit closer to the top bezel.  Floor at 2 px is enforced in the viewport.
+  theme.readerMarginTopReduction = 5;
   return theme;
 }
 
@@ -183,15 +178,16 @@ inline Theme getBuiltinMonoTheme() {
 inline Theme getBuiltinPtMonoTheme() {
   Theme theme = getBuiltinLightTheme();
   strncpy(theme.displayName, "PT Mono", sizeof(theme.displayName));
-  theme.statusFontId = PT_MONO_4_FONT_ID;
+  theme.statusFontId = PT_MONO_5_FONT_ID;
   theme.readerFontIdXSmall = PT_MONO_10_FONT_ID;
   theme.readerFontId = PT_MONO_11_FONT_ID;
   theme.readerFontIdMedium = PT_MONO_12_FONT_ID;
   theme.readerFontIdLarge = PT_MONO_13_FONT_ID;
-  // pt_mono_4 height = 10; reserved = 9; offset = 4 → text bottom at 800.
+  // pt_mono_5 status font: ascender 10, descender -3 → text height 13.
+  // reserved = 12; offset = 4 → text bottom at screenH.
   theme.statusBarOffsetY = 4;
-  theme.statusBarReservedHeight = 9;
-  theme.readerMarginTopReduction = 4;
+  theme.statusBarReservedHeight = 12;
+  theme.readerMarginTopReduction = 5;
   return theme;
 }
 
@@ -202,15 +198,16 @@ inline Theme getBuiltinPtMonoTheme() {
 inline Theme getBuiltinIbmPlexMonoTheme() {
   Theme theme = getBuiltinLightTheme();
   strncpy(theme.displayName, "IBM Plex Mono", sizeof(theme.displayName));
-  theme.statusFontId = IBM_PLEX_MONO_4_FONT_ID;
+  theme.statusFontId = IBM_PLEX_MONO_5_FONT_ID;
   theme.readerFontIdXSmall = IBM_PLEX_MONO_10_FONT_ID;
   theme.readerFontId = IBM_PLEX_MONO_11_FONT_ID;
   theme.readerFontIdMedium = IBM_PLEX_MONO_12_FONT_ID;
   theme.readerFontIdLarge = IBM_PLEX_MONO_13_FONT_ID;
-  // ibm_plex_mono_4 height = 12 (same as jetbrains_mono_4); reserved = 11; offset = 4.
+  // ibm_plex_mono_5 status font: ascender 11, descender -3 → text height 14.
+  // reserved = 13; offset = 4 → text bottom at screenH.
   theme.statusBarOffsetY = 4;
-  theme.statusBarReservedHeight = 11;
-  theme.readerMarginTopReduction = 4;
+  theme.statusBarReservedHeight = 13;
+  theme.readerMarginTopReduction = 5;
   return theme;
 }
 
@@ -221,15 +218,16 @@ inline Theme getBuiltinIbmPlexMonoTheme() {
 inline Theme getBuiltinLiterataTheme() {
   Theme theme = getBuiltinLightTheme();
   strncpy(theme.displayName, "Literata", sizeof(theme.displayName));
-  theme.statusFontId = LITERATA_4_FONT_ID;
+  theme.statusFontId = LITERATA_5_FONT_ID;
   theme.readerFontIdXSmall = LITERATA_10_FONT_ID;
   theme.readerFontId = LITERATA_11_FONT_ID;
   theme.readerFontIdMedium = LITERATA_12_FONT_ID;
   theme.readerFontIdLarge = LITERATA_13_FONT_ID;
-  // literata_4 height = 13; reserved = 12; offset = 4.
+  // literata_5 status font: ascender 13, descender -4 → text height 17.
+  // reserved = 16; offset = 4 → text bottom at screenH.
   theme.statusBarOffsetY = 4;
-  theme.statusBarReservedHeight = 12;
-  theme.readerMarginTopReduction = 4;
+  theme.statusBarReservedHeight = 16;
+  theme.readerMarginTopReduction = 5;
   return theme;
 }
 
