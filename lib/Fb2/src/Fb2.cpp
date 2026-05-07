@@ -665,12 +665,24 @@ bool readBmpDimensions(const std::string& bmpPath, uint16_t& outW, uint16_t& out
 
 // Fully decode a pending JPEG / PNG file into the matching BMP.  Common path
 // shared between the synchronous fastMode=false and the BG worker.
+//
+// ATOMIC WRITE: decode into <bmpPath>.tmp, rename to <bmpPath> only after
+// the converter signals success.  Without this, an aborted / failed decode
+// leaves a partially-written file on disk that ImageBlock::render then
+// opens, fails to parse ("NotBMP (missing 'BM')"), and falls back to the
+// "[Image]" placeholder forever — even after a subsequent successful
+// decode would have replaced it, because cacheImage's "BMP already exists"
+// fast-path short-circuits before re-decoding.  Rename is atomic on FAT,
+// so the reader thread either sees a complete valid BMP or no file at all.
 bool decodeOnePending(const std::string& pendingPath, bool isPng, const std::string& bmpPath, int maxBoxWidth,
                       int maxBoxHeight, const std::function<bool()>& shouldAbort) {
   FsFile srcFile;
   if (!SdMan.openFileForRead("FB2", pendingPath, srcFile)) return false;
+  const std::string tmpBmpPath = bmpPath + ".tmp";
+  // Clean up any stale tmp from a previous aborted run.
+  if (SdMan.exists(tmpBmpPath.c_str())) SdMan.remove(tmpBmpPath.c_str());
   FsFile bmpFile;
-  if (!SdMan.openFileForWrite("FB2", bmpPath, bmpFile)) {
+  if (!SdMan.openFileForWrite("FB2", tmpBmpPath, bmpFile)) {
     srcFile.close();
     return false;
   }
@@ -679,7 +691,19 @@ bool decodeOnePending(const std::string& pendingPath, bool isPng, const std::str
             : JpegToBmpConverter::jpegFileToBmpStreamQuick(srcFile, bmpFile, maxBoxWidth, maxBoxHeight, shouldAbort);
   srcFile.close();
   bmpFile.close();
-  return ok;
+  if (!ok) {
+    SdMan.remove(tmpBmpPath.c_str());
+    return false;
+  }
+  // Promote: the rename is atomic — readers always see either no file or a
+  // fully-formed BMP, never a half-written one.
+  if (SdMan.exists(bmpPath.c_str())) SdMan.remove(bmpPath.c_str());
+  if (!SdMan.rename(tmpBmpPath.c_str(), bmpPath.c_str())) {
+    LOG_ERR(TAG, "decodeOnePending: failed to promote %s -> %s", tmpBmpPath.c_str(), bmpPath.c_str());
+    SdMan.remove(tmpBmpPath.c_str());
+    return false;
+  }
+  return true;
 }
 }  // namespace
 
@@ -711,7 +735,14 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
       outBmpPath = bmpPath;
       return true;
     }
-    // Header read failed / absurd dimensions — fall through and re-decode.
+    // Header read failed / absurd dimensions — the BMP is broken (likely
+    // from a session aborted mid-write before the v2.0.35 atomic-rename
+    // landed).  Delete it explicitly: leaving the corpse on disk would let
+    // ImageBlock::render keep falling back to the placeholder until the BG
+    // worker happens to overwrite it again, which can take many seconds
+    // because peek-only fastMode does not trigger a re-decode by itself.
+    LOG_INF(TAG, "cacheImage: removing corrupt %s (no 'BM' header / bad dims)", bmpPath.c_str());
+    SdMan.remove(bmpPath.c_str());
   }
 
   // Previous attempt failed sentinel — don't retry the same decode every
@@ -926,8 +957,14 @@ int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
         SdMan.remove(pendingPath.c_str());
         continue;
       }
+      // Atomic: write to .tmp, rename on success.  Same reasoning as
+      // decodeOnePending — a failed/aborted preview decode would otherwise
+      // leave a corrupt .preview.bmp that ImageBlock::render's fallback
+      // chain would then surface as a placeholder forever.
+      const std::string previewTmpPath = previewPath + ".tmp";
+      if (SdMan.exists(previewTmpPath.c_str())) SdMan.remove(previewTmpPath.c_str());
       FsFile previewFile;
-      if (!SdMan.openFileForWrite("FB2", previewPath, previewFile)) {
+      if (!SdMan.openFileForWrite("FB2", previewTmpPath, previewFile)) {
         srcFile.close();
         SdMan.remove(pendingPath.c_str());
         continue;
@@ -936,15 +973,20 @@ int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
       srcFile.close();
       previewFile.close();
       if (ok) {
-        LOG_INF(TAG, "decodePendingImages[preview]: %s -> %s", binaryId.c_str(), previewPath.c_str());
-        ++decoded;
-        // Yield: let the reader re-render with the preview before we eat the
-        // 5-6 s that the full decode costs.
-        break;
+        if (SdMan.exists(previewPath.c_str())) SdMan.remove(previewPath.c_str());
+        if (SdMan.rename(previewTmpPath.c_str(), previewPath.c_str())) {
+          LOG_INF(TAG, "decodePendingImages[preview]: %s -> %s", binaryId.c_str(), previewPath.c_str());
+          ++decoded;
+          // Yield: let the reader re-render with the preview before we eat
+          // the 5-6 s that the full decode costs.
+          break;
+        }
+        SdMan.remove(previewTmpPath.c_str());
+      } else {
+        SdMan.remove(previewTmpPath.c_str());
       }
-      // Preview failed — drop the empty file and fall through to phase 2 so
-      // we still get a full decode if possible.
-      SdMan.remove(previewPath.c_str());
+      // Preview failed / promote failed — fall through to phase 2 so we
+      // still get a full decode if possible.
     }
 
     // Phase 2: full decode via the standard quick path (Atkinson-thresholded
