@@ -307,11 +307,17 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       // --- SPI released: display driver can use the bus while we process XML ---
 
       if (shouldAbort_ && (++abortCheckCounter % 10 == 0) && shouldAbort_()) {
-        LOG_INF(TAG, "Aborted by external request");
-        releaseStreamingState();
-        currentTextBlock_.reset();
-        currentPage_.reset();
-        partWordBufferIndex_ = 0;
+        // Suspend gracefully instead of tearing down state: the abort fires
+        // BETWEEN XML_Parse() calls, so Expat is in a clean state and the
+        // file cursor matches lastParsedOffset_.  Keeping xmlParser_ + file_
+        // alive lets canResume() return true on the next parsePages() call,
+        // so the BG worker resumes hot-extend instead of cold-rebuilding the
+        // entire section from byte 0 each preempt.  PageCache periodically
+        // forces a cold reset when heap defragments below 15 KB largest free
+        // block (PageCache.cpp:933) — that keeps the long-running parser
+        // from permanently pinning fragmented memory.
+        LOG_INF(TAG, "Aborted by external request — parser suspended for resume");
+        suspended_ = true;
         hasMore_ = true;
         return false;
       }
