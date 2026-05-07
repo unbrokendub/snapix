@@ -9,51 +9,63 @@
 #include <SharedSpiLock.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 
 // ============================================================================
-// JPEGDEC-based JPEG → BMP converter for ESP32-C3 e-ink reader
+// JPEGDEC-based JPEG → 1-bit BMP converter for ESP32-C3 e-ink reader.
 //
-// Replaces the previous TJpgDec-based pipeline.  JPEGDEC (Larry Bank, Apache
-// 2.0) provides native 1/2-bpp Floyd-Steinberg dithered grayscale output via
-// `setPixelType()` + `decodeDither()`.  This eliminates the intermediate
-// 8-bit grayscale buffer and the separate dither pass that the TJpgDec
-// version maintained — JPEGDEC dithers in-place while it decodes, producing
-// packed pixels that already match our BMP output palette format.
+// Pipeline:
+//   1. JPEGDEC parses the SOF and reports source dimensions.
+//   2. We pick the largest hardware scale (1, 1/2, 1/4, 1/8) that leaves the
+//      decoded image still ≥ the requested target box.  This guarantees the
+//      software step only ever DOWNscales (never upscales) — "always
+//      interpolating downward".
+//   3. JPEGDEC decodes into EIGHT_BIT_GRAYSCALE pixels which we accumulate
+//      into a per-MCU-row gray band buffer.
+//   4. As source rows complete, we area-average them down into a single
+//      target-row of grayscale (vertical downscale) then area-average
+//      horizontally to the target width (so a 534×628 source emits a
+//      452×532 grayscale row).
+//   5. Floyd-Steinberg dithering across each target-width gray row produces
+//      a packed 1-bpp row that is written immediately to the output BMP.
 //
-// Key constraints honoured here:
+// Why 1-bit dithered output:
+//   * The e-paper renderer's BW path already collapses 2-bit values < 3 to
+//     "black" anyway, so the old 4-level palette wasted half its storage on
+//     levels that never reached the panel.
+//   * Saving the BMP at exact target dims means drawBitmap can stop scaling
+//     entirely — direct row-aligned bit copy with rotation only.
+//   * Per-image: 452×532 1-bpp ≈ 30 KB vs. 534×628 2-bpp ≈ 83 KB on disk,
+//     and the per-page render cost drops from 2-7 s to fractional.
 //
-//   * JPEGDEC's `JPEGIMAGE` struct is ~50 KB — far too large for the 16 KB
-//     BG worker stack.  We always allocate it on the heap via
-//     `std::unique_ptr<JPEGDEC>`.
+// Constraints honoured:
 //   * Every SD read/write goes through `SharedBusLock` so the e-ink display
 //     SPI bus is never starved by image decode.  We pump through a 4 KB
 //     user-space buffer (one SD block) so the lock is acquired ~once per
 //     FAT cluster instead of once per Huffman fetch.
-//   * Public 7-function API in `JpegToBmpConverter.h` is unchanged — every
-//     call site (FB2, ImageConverter) keeps working without edits.
-//   * Each public entry-point seeks the source FsFile to position 0 — callers
+//   * The JPEGDEC workspace (~50 KB) and our own scratch buffers are heap
+//     allocated — never on the BG worker stack.
+//   * Public 7-function API in `JpegToBmpConverter.h` is unchanged.
+//   * Each public entry point seeks the source FsFile to position 0 — callers
 //     may have peeked header bytes via `peekDimensions()` already.
 //   * The draw callback yields cooperatively (taskYIELD) every few MCU rows
 //     so the foreground display task isn't starved on a long decode.
+//   * `peekDimensions()` returns SOURCE JPEG dims (not post-downscale dims):
+//     `Fb2::cacheImage` does its own scaledFit() based on those.
 // ============================================================================
 
 namespace {
 
-// 2-bit-per-pixel BMP palette matches JPEGDEC's TWO_BIT_DITHERED packing
-// exactly: bits stored MSB-first in each byte, value 0 = black, 3 = white.
-// 1-bit-per-pixel BMP follows the same MSB-first convention with 0 = black,
-// 1 = white.
-
 // ---------------------------------------------------------------------------
-// 4 KB pump buffer.  Same pattern as the previous TJpgDec implementation.
-// JPEGDEC requests up to JPEG_FILE_BUF_SIZE = 2048 bytes per `pfnRead` call
-// during the SOF/Huffman parse, then smaller chunks (~256-512 bytes) during
-// the VLC stream.  Buffering these behind a single 4 KB read lets us hold
-// the SharedBusLock once per cluster rather than once per Huffman fetch.
-// On a typical 150 KB cover image that's ~37 SD reads instead of hundreds.
+// 4 KB SD pump buffer.  JPEGDEC requests up to JPEG_FILE_BUF_SIZE = 2048 bytes
+// per `pfnRead` call during the SOF/Huffman parse, then smaller chunks (~256-
+// 512 bytes) during the VLC stream.  Buffering these behind a single 4 KB
+// read lets us hold the SharedBusLock once per cluster rather than once per
+// Huffman fetch.  On a typical 150 KB cover image that's ~37 SD reads instead
+// of hundreds.
 // ---------------------------------------------------------------------------
 struct JpegPumpCtx {
   FsFile* file;
@@ -61,11 +73,8 @@ struct JpegPumpCtx {
   uint8_t* buffer;
   size_t bufferPos;
   size_t bufferFilled;
-
-  // Position the underlying file is logically at relative to the start.
-  // JPEGDEC's seek callback expects byte-positioned offsets from the head
-  // of the JPEG stream, but in our case the stream starts at offset 0 of
-  // the FsFile.  Tracking this lets seeks be smart about hitting bytes
+  // Position the underlying file is logically at relative to the start of
+  // the JPEG stream.  Tracking this lets seeks be smart about hitting bytes
   // already in the pump buffer.
   int32_t streamPos;
 };
@@ -79,7 +88,6 @@ int32_t jpegRead(JPEGFILE* pFile, uint8_t* pBuf, int32_t iLen) {
   int32_t copied = 0;
   while (copied < iLen) {
     if (ctx->bufferPos >= ctx->bufferFilled) {
-      // Refill the pump buffer.
       snapix::spi::SharedBusLock busLock;
       if (!busLock) break;
       const int readResult = ctx->file->read(ctx->buffer, JpegPumpCtx::kBufferSize);
@@ -103,33 +111,22 @@ int32_t jpegRead(JPEGFILE* pFile, uint8_t* pBuf, int32_t iLen) {
 
 // JPEGDEC seek callback: position the underlying file at byte `iPosition` from
 // the start of the JPEG stream.  Returns 1 on success, 0 on failure.
-//
-// JPEGDEC uses this between the parse-info phase (where it reads up to the
-// SOF marker) and the actual decode (where it may need to re-read header
-// bytes that were ahead of where its internal buffer ended), and also during
-// EXIF thumbnail extraction.  We re-target the FsFile and invalidate our
-// pump buffer so the next read picks up from the new position.
 int32_t jpegSeek(JPEGFILE* pFile, int32_t iPosition) {
   auto* ctx = static_cast<JpegPumpCtx*>(pFile->fHandle);
   if (!ctx || !ctx->file || !*ctx->file) return 0;
 
-  if (iPosition == ctx->streamPos) {
-    // No-op seek; pump buffer is still valid.
-    return 1;
-  }
+  if (iPosition == ctx->streamPos) return 1;  // No-op; pump buffer still valid.
 
   snapix::spi::SharedBusLock busLock;
   if (!busLock) return 0;
   if (!ctx->file->seek(static_cast<uint64_t>(iPosition))) return 0;
-  // Invalidate pump buffer so subsequent reads refill from the new offset.
   ctx->bufferPos = 0;
   ctx->bufferFilled = 0;
   ctx->streamPos = iPosition;
   return 1;
 }
 
-// JPEGDEC close callback — we own the FsFile lifetime in the caller, so
-// nothing to do here.  Required by the open() signature.
+// JPEGDEC close callback — we own the FsFile lifetime in the caller.
 void jpegClose(void* /*handle*/) {}
 
 inline void write16(Print& out, const uint16_t value) {
@@ -151,7 +148,7 @@ inline void write32Signed(Print& out, const int32_t value) {
   out.write((value >> 24) & 0xFF);
 }
 
-// BMP header for 1-bit (black & white) pixel data.
+// 1-bit BMP header (palette: 0=black, 1=white, MSB-first packing).
 void writeBmpHeader1bit(Print& bmpOut, const int width, const int height) {
   const int bytesPerRow = (width + 31) / 32 * 4;  // 1 bpp, 4-byte aligned
   const int imageSize = bytesPerRow * height;
@@ -175,7 +172,6 @@ void writeBmpHeader1bit(Print& bmpOut, const int width, const int height) {
   write32(bmpOut, 2);
   write32(bmpOut, 2);
 
-  // 2-color palette: 0 = black, 1 = white.
   uint8_t palette[8] = {
       0x00, 0x00, 0x00, 0x00,
       0xFF, 0xFF, 0xFF, 0x00,
@@ -183,258 +179,385 @@ void writeBmpHeader1bit(Print& bmpOut, const int width, const int height) {
   for (const uint8_t b : palette) bmpOut.write(b);
 }
 
-// BMP header for 2-bit (4-level grayscale) pixel data.
-void writeBmpHeader2bit(Print& bmpOut, const int width, const int height) {
-  const int bytesPerRow = (width * 2 + 31) / 32 * 4;  // 2 bpp, 4-byte aligned
-  const int imageSize = bytesPerRow * height;
-  const uint32_t fileSize = 70 + imageSize;
-
-  bmpOut.write('B');
-  bmpOut.write('M');
-  write32(bmpOut, fileSize);
-  write32(bmpOut, 0);
-  write32(bmpOut, 70);            // pixel data offset
-
-  write32(bmpOut, 40);
-  write32Signed(bmpOut, width);
-  write32Signed(bmpOut, -height);
-  write16(bmpOut, 1);
-  write16(bmpOut, 2);             // 2 bpp
-  write32(bmpOut, 0);
-  write32(bmpOut, imageSize);
-  write32(bmpOut, 2835);
-  write32(bmpOut, 2835);
-  write32(bmpOut, 4);
-  write32(bmpOut, 4);
-
-  // 4-color palette: 0 = black, 1 = dark gray, 2 = light gray, 3 = white.
-  // Same palette as the legacy TJpgDec converter so cached BMPs render
-  // identically across decoder swaps.
-  uint8_t palette[16] = {
-      0x00, 0x00, 0x00, 0x00,
-      0x55, 0x55, 0x55, 0x00,
-      0xAA, 0xAA, 0xAA, 0x00,
-      0xFF, 0xFF, 0xFF, 0x00,
-  };
-  for (const uint8_t b : palette) bmpOut.write(b);
-}
-
-// Output rectangle context — the JPEGDEC draw callback packs pixel chunks
-// directly into our BMP-format row buffer, then writes the row to bmpOut
-// once the chunk's vertical extent is exhausted.
-//
-// Coordinate system: JPEGDEC reports pixel x/y in OUTPUT space (post hardware
-// scale).  Each draw call covers `iWidthUsed` pixels horizontally and
-// `iHeight` pixels vertically, starting at (`x`, `y`).  Within a chunk the
-// pixels are packed bit-by-bit in raster order, MSB-first, exactly matching
-// BMP's bit ordering.
-struct DrawCtx {
-  Print* bmpOut;
-  uint8_t* rowBuffer;     // current BMP row being assembled
-  int outWidth;           // final image width (post hardware scale)
-  int outHeight;          // final image height
-  int bytesPerRow;        // bytes per packed BMP row
-  int bitsPerPixel;       // 1 or 2
-  int currentY;           // y of the row currently in rowBuffer (-1 = none yet)
-  bool oneBit;
-  bool writeError;
-
-  const std::function<bool()>* shouldAbort;
-  bool aborted;
-  int yieldCounter;
+// ---------------------------------------------------------------------------
+// Hardware-scale heuristic.  Picks the largest JPEGDEC scale (0=1, 1=1/2,
+// 2=1/4, 3=1/8) such that the decoded dims still cover `maxW × maxH`.  This
+// guarantees the software downscale step never has to upscale.
+// ---------------------------------------------------------------------------
+struct ScaleResult {
+  int option;     // JPEG_SCALE_* bit, or 0 for native
+  int decodedW;   // post-hardware-scale source width
+  int decodedH;   // post-hardware-scale source height
 };
 
-// Flush a single BMP row from rowBuffer to the output stream and zero it out.
-bool flushRow(DrawCtx& ctx) {
+ScaleResult chooseHardwareScale(int srcW, int srcH, int maxW, int maxH) {
+  ScaleResult result = {0, srcW, srcH};
+  if (maxW <= 0 || maxH <= 0) return result;
+
+  // scale=0 => 1/1, scale=1 => 1/2, scale=2 => 1/4, scale=3 => 1/8.
+  // We want the largest `scale` such that (srcW >> scale) >= maxW and
+  // (srcH >> scale) >= maxH.  Cap at 3.
+  int scale = 0;
+  while (scale < 3) {
+    const int nextW = srcW >> (scale + 1);
+    const int nextH = srcH >> (scale + 1);
+    if (nextW >= maxW && nextH >= maxH && nextW > 0 && nextH > 0) {
+      ++scale;
+    } else {
+      break;
+    }
+  }
+
+  static constexpr int kOptions[4] = {0, JPEG_SCALE_HALF, JPEG_SCALE_QUARTER, JPEG_SCALE_EIGHTH};
+  result.option = kOptions[scale];
+  result.decodedW = srcW >> scale;
+  result.decodedH = srcH >> scale;
+  if (result.decodedW <= 0) result.decodedW = 1;
+  if (result.decodedH <= 0) result.decodedH = 1;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Decode context: shared between the JPEGDEC draw callback and the per-band
+// downscale + dither pipeline.
+//
+// The draw callback's job is purely to copy 8-bit grayscale pixels into the
+// MCU-row band buffer at the right offset.  Once a full MCU band is in the
+// buffer (i.e. the next draw moves to a new chunkY), processBand() is called
+// to vertically area-average those rows down into target-rows of grayscale,
+// which are then horizontally area-averaged + Floyd-Steinberg dithered into
+// 1-bit packed BMP rows and written out.
+// ---------------------------------------------------------------------------
+struct DecodeCtx {
+  Print* bmpOut = nullptr;
+
+  int decodedW = 0;       // post-hardware-scale source width
+  int decodedH = 0;       // post-hardware-scale source height
+  int targetW = 0;        // final BMP width
+  int targetH = 0;        // final BMP height
+  int bytesPerRow = 0;    // packed 1-bpp row size
+
+  // 8-bit gray accumulator for one MCU band (decodedW × mcuCY_post bytes).
+  uint8_t* mcuBand = nullptr;
+  int mcuBandHeight = 0;  // number of valid source rows currently in mcuBand
+  int mcuBandY = -1;      // chunkY of the band currently being filled
+
+  // Per target-row vertical accumulator: sum of source-row gray values that
+  // map to the current target row, plus count.  When the target-row index
+  // advances, we finalize this row.
+  uint32_t* vertSum = nullptr;     // length decodedW
+  int vertSumCount = 0;
+  int currentTargetY = -1;         // target row currently being accumulated
+
+  // Per output-row scratch.
+  uint8_t* targetGrayRow = nullptr;  // length targetW (8-bit gray pre-dither)
+  uint8_t* outRow = nullptr;         // length bytesPerRow (1-bpp packed)
+
+  // Floyd-Steinberg error rows (extra slot on each end for ±1 spillover).
+  int16_t* errCur = nullptr;       // length targetW + 2 (index 1..targetW)
+  int16_t* errNext = nullptr;      // length targetW + 2
+
+  // Cached precomputed source-X start positions for horizontal area-average.
+  // srcXStart[outX] gives the inclusive lower bound; srcXStart[targetW] gives
+  // the exclusive upper bound for the last column.
+  int* srcXStart = nullptr;        // length targetW + 1
+
+  const std::function<bool()>* shouldAbort = nullptr;
+  bool aborted = false;
+  bool writeError = false;
+  int yieldCounter = 0;
+};
+
+// Vertical mapping: which output target-row does source-row `srcY` belong to.
+inline int sourceYToTargetY(int srcY, int decodedH, int targetH) {
+  // (srcY * targetH) / decodedH, rounded down.  Equivalent to a fixed-point
+  // 16.16 mapping clipped to [0, targetH-1].
+  if (decodedH <= 0) return 0;
+  int t = static_cast<int>((static_cast<int64_t>(srcY) * targetH) / decodedH);
+  if (t < 0) t = 0;
+  if (t > targetH - 1) t = targetH - 1;
+  return t;
+}
+
+// Horizontal area-average from a `decodedW` 8-bit gray row to a `targetW`
+// 8-bit gray row.  Uses ctx.srcXStart[] precomputed to avoid per-pixel
+// 64-bit math.  When the source spans are not byte-aligned we sum
+// rectangular areas of pixels.
+void areaAverageHoriz(const uint8_t* srcGray, int decodedW, uint8_t* dstGray, int targetW,
+                      const int* srcXStart) {
+  for (int outX = 0; outX < targetW; ++outX) {
+    int sx0 = srcXStart[outX];
+    int sx1 = srcXStart[outX + 1];
+    if (sx0 < 0) sx0 = 0;
+    if (sx1 > decodedW) sx1 = decodedW;
+    if (sx1 <= sx0) sx1 = sx0 + 1;
+    if (sx1 > decodedW) sx1 = decodedW;
+
+    uint32_t sum = 0;
+    int n = 0;
+    for (int x = sx0; x < sx1; ++x) {
+      sum += srcGray[x];
+      ++n;
+    }
+    const uint32_t avg = (n > 0) ? (sum / static_cast<uint32_t>(n)) : 0u;
+    dstGray[outX] = static_cast<uint8_t>(avg > 255 ? 255 : avg);
+  }
+}
+
+// Floyd-Steinberg dither one row of 8-bit gray (length targetW) into a 1-bpp
+// packed BMP row (length bytesPerRow).  Updates the error rows in place.
+void floydSteinbergRow(DecodeCtx& ctx) {
+  const int targetW = ctx.targetW;
+  uint8_t* outRow = ctx.outRow;
+  memset(outRow, 0, ctx.bytesPerRow);
+
+  // errCur / errNext are sized [targetW + 2].  Index 0 is unused (corresponds
+  // to outX=-1 spillover from the leftmost pixel) and index targetW+1 is the
+  // rightmost overflow slot.  We index errCur[outX+1] / errNext[outX+1] so
+  // that ±1 reaches without going negative.
+  int16_t* errCur = ctx.errCur;
+  int16_t* errNext = ctx.errNext;
+
+  for (int outX = 0; outX < targetW; ++outX) {
+    int g = static_cast<int>(ctx.targetGrayRow[outX]) + static_cast<int>(errCur[outX + 1]);
+    if (g < 0) g = 0;
+    if (g > 255) g = 255;
+    const int bit = (g >= 128) ? 1 : 0;
+    if (bit) {
+      // 1-bit BMP convention (matches writeBmpHeader1bit): 1 = white.
+      outRow[outX >> 3] |= static_cast<uint8_t>(0x80 >> (outX & 7));
+    }
+    const int err = g - (bit ? 255 : 0);
+    // 7/16 right, 3/16 down-left, 5/16 down, 1/16 down-right.
+    errCur[outX + 2] = static_cast<int16_t>(errCur[outX + 2] + (err * 7) / 16);
+    errNext[outX] = static_cast<int16_t>(errNext[outX] + (err * 3) / 16);
+    errNext[outX + 1] = static_cast<int16_t>(errNext[outX + 1] + (err * 5) / 16);
+    errNext[outX + 2] = static_cast<int16_t>(errNext[outX + 2] + (err * 1) / 16);
+  }
+
+  // Advance error rows: errNext becomes the new errCur; the old errCur is
+  // zeroed and reused as the next errNext.
+  std::swap(ctx.errCur, ctx.errNext);
+  memset(ctx.errNext, 0, sizeof(int16_t) * (ctx.targetW + 2));
+}
+
+// Flush the dithered output row to disk.
+bool writeOutputRow(DecodeCtx& ctx) {
   snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     LOG_ERR(TAG, "Shared SPI lock unavailable for BMP row write");
     ctx.writeError = true;
     return false;
   }
-  if (ctx.bmpOut->write(ctx.rowBuffer, ctx.bytesPerRow) != static_cast<size_t>(ctx.bytesPerRow)) {
+  if (ctx.bmpOut->write(ctx.outRow, ctx.bytesPerRow) != static_cast<size_t>(ctx.bytesPerRow)) {
     LOG_ERR(TAG, "Failed to write BMP row");
     ctx.writeError = true;
     return false;
   }
-  memset(ctx.rowBuffer, 0, ctx.bytesPerRow);
   return true;
 }
 
-// Copy a packed bit-stream chunk from src into dst at pixel offset `dstX`.
-// src is MSB-first within each byte and covers `count` pixels packed
-// contiguously.  bitsPerPixel is 1 or 2.
-//
-// Hot path: when both src and dst are byte-aligned at the chunk boundary
-// (i.e. dstX is a multiple of 8 for 1bpp or 4 for 2bpp), we can byte-copy
-// the bulk of the data and only handle ≤1 trailing partial byte per-pixel.
-// In dither mode JPEGDEC always issues one draw call per MCU row at
-// chunkX=0, so this fast path covers the common case for full-row output.
-void copyPackedBits(uint8_t* dst, int dstX, const uint8_t* src, int count, int bitsPerPixel) {
-  if (count <= 0) return;
-
-  const int pxPerByte = (bitsPerPixel == 1) ? 8 : 4;
-  if ((dstX % pxPerByte) == 0) {
-    // Byte-aligned: bulk-copy whole bytes, then one trailing partial byte.
-    const int wholeBytes = count / pxPerByte;
-    if (wholeBytes > 0) {
-      memcpy(dst + (dstX / pxPerByte), src, wholeBytes);
-    }
-    const int trailing = count - wholeBytes * pxPerByte;
-    if (trailing > 0) {
-      // Trailing bits live in the top of src[wholeBytes], with `trailing`
-      // valid pixels in the high bits of that byte.  Mask them in.
-      const uint8_t srcByte = src[wholeBytes];
-      const int trailingBits = trailing * bitsPerPixel;
-      const uint8_t mask = static_cast<uint8_t>(0xFF << (8 - trailingBits));
-      dst[dstX / pxPerByte + wholeBytes] |= (srcByte & mask);
-    }
-    return;
+// Finalize the currently-accumulated target row: divide vertSum by count to
+// get the post-vertical-downscale gray row, run horizontal area-average +
+// Floyd-Steinberg, write to disk.  Resets vertSum / vertSumCount for the next
+// target row.
+bool finalizeTargetRow(DecodeCtx& ctx) {
+  if (ctx.currentTargetY < 0 || ctx.vertSumCount <= 0) {
+    return true;  // nothing to do (very first call)
   }
 
-  // Misaligned: per-pixel pack-into-dst.
-  for (int i = 0; i < count; i++) {
-    uint8_t value;
-    if (bitsPerPixel == 1) {
-      const int srcByte = i >> 3;
-      const int srcBitOffset = 7 - (i & 7);
-      value = (src[srcByte] >> srcBitOffset) & 0x01;
-    } else {
-      const int srcByte = i >> 2;
-      const int srcBitOffset = 6 - ((i & 3) << 1);
-      value = (src[srcByte] >> srcBitOffset) & 0x03;
-    }
-    const int outX = dstX + i;
-    if (bitsPerPixel == 1) {
-      const int dstByte = outX >> 3;
-      const int dstBitOffset = 7 - (outX & 7);
-      dst[dstByte] |= (value << dstBitOffset);
-    } else {
-      const int dstByte = outX >> 2;
-      const int dstBitOffset = 6 - ((outX & 3) << 1);
-      dst[dstByte] |= (value << dstBitOffset);
-    }
+  // Stage a `decodedW`-wide gray row from the vertical accumulator.  We
+  // reuse mcuBand's first row as scratch — at this point the MCU band that
+  // generated this target row is no longer needed (its rows are all folded
+  // into vertSum already).
+  uint8_t* gray = ctx.mcuBand;
+  const uint32_t cnt = static_cast<uint32_t>(ctx.vertSumCount);
+  for (int x = 0; x < ctx.decodedW; ++x) {
+    const uint32_t avg = ctx.vertSum[x] / cnt;
+    gray[x] = static_cast<uint8_t>(avg > 255 ? 255 : avg);
   }
+
+  // Horizontal downscale into 8-bit gray at target width.
+  areaAverageHoriz(gray, ctx.decodedW, ctx.targetGrayRow, ctx.targetW, ctx.srcXStart);
+
+  // Floyd-Steinberg into 1-bpp output row.
+  floydSteinbergRow(ctx);
+
+  if (!writeOutputRow(ctx)) return false;
+
+  // Reset accumulator for the next target row.
+  memset(ctx.vertSum, 0, sizeof(uint32_t) * ctx.decodedW);
+  ctx.vertSumCount = 0;
+  return true;
 }
 
-// JPEGDEC draw callback.  Called once per MCU row in dither mode (since
-// JPEGDEC sets `iMCUCount = cx` for any *_DITHERED pixel type — see
-// jpeg.inl).  pPixels points to the packed dither buffer at the start of
-// the chunk; one packed pixel per pDraw->iWidth slot, but ONLY iWidthUsed
-// pixels are valid (the rest is right-edge padding from MCU rounding).
+// Process every source row currently in mcuBand[0..mcuBandHeight-1], where
+// row 0 corresponds to source-Y `mcuBandY`.  For each source row, determine
+// its target-Y; if that differs from currentTargetY, finalize the previous
+// target row first and advance.  Then accumulate the source row's pixels into
+// vertSum.
+bool processBand(DecodeCtx& ctx) {
+  for (int row = 0; row < ctx.mcuBandHeight; ++row) {
+    const int srcY = ctx.mcuBandY + row;
+    if (srcY < 0 || srcY >= ctx.decodedH) continue;
+    const int targetY = sourceYToTargetY(srcY, ctx.decodedH, ctx.targetH);
+    if (targetY != ctx.currentTargetY) {
+      if (!finalizeTargetRow(ctx)) return false;
+      ctx.currentTargetY = targetY;
+    }
+    const uint8_t* srcRow = ctx.mcuBand + row * ctx.decodedW;
+    for (int x = 0; x < ctx.decodedW; ++x) {
+      ctx.vertSum[x] += srcRow[x];
+    }
+    ++ctx.vertSumCount;
+  }
+  return true;
+}
+
+// JPEGDEC draw callback — copy the 8-bit grayscale chunk into mcuBand at
+// (chunkX, row-in-band).  Triggers band processing whenever a new chunkY
+// arrives.  Note: in EIGHT_BIT_GRAYSCALE mode the draw callback may fire
+// multiple times per MCU row (once per buffer-full of MCUs) when the image
+// width exceeds JPEGDEC's internal MAX_BUFFERED_PIXELS / mcuCX threshold.
 int jpegDraw(JPEGDRAW* pDraw) {
-  auto* ctx = static_cast<DrawCtx*>(pDraw->pUser);
+  auto* ctx = static_cast<DecodeCtx*>(pDraw->pUser);
   if (!ctx) return 1;
 
   if (ctx->shouldAbort && (*ctx->shouldAbort)()) {
     ctx->aborted = true;
-    return 0;  // signal JPEGDEC to abort
+    return 0;
   }
   if (ctx->writeError) return 0;
 
   const int chunkX = pDraw->x;
   const int chunkY = pDraw->y;
   const int chunkH = pDraw->iHeight;
-  // iWidthUsed is the actual count of valid pixels (clipped at right edge);
-  // anything beyond that is padding that doesn't belong in the output.
-  const int chunkW = pDraw->iWidthUsed;
-  // pDraw->iWidth is the chunk's packing pitch — every row in pPixels starts
-  // every (iWidth + 3)/4 bytes for 2bpp, or (iWidth + 7)/8 bytes for 1bpp.
-  const int packPitchPx = pDraw->iWidth;
-  const int srcPitchBytes = (ctx->bitsPerPixel == 1) ? ((packPitchPx + 7) >> 3)
-                                                      : ((packPitchPx + 3) >> 2);
+  const int chunkW = pDraw->iWidthUsed;     // valid pixels (right-edge clip)
+  const int packPitchPx = pDraw->iWidth;     // pack pitch (bytes-per-row in src)
 
   const auto* srcBytes = reinterpret_cast<const uint8_t*>(pDraw->pPixels);
 
-  for (int row = 0; row < chunkH; row++) {
+  // If chunkY has advanced past the current band, process the previous band
+  // before overwriting it.
+  if (ctx->mcuBandY >= 0 && chunkY != ctx->mcuBandY) {
+    if (!processBand(*ctx)) return 0;
+    ctx->mcuBandHeight = 0;
+  }
+  if (ctx->mcuBandY < 0 || chunkY != ctx->mcuBandY) {
+    ctx->mcuBandY = chunkY;
+    ctx->mcuBandHeight = 0;
+  }
+
+  // The number of valid rows in this band is the max of (current chunkH,
+  // existing mcuBandHeight); they should match across draws of the same band.
+  if (chunkH > ctx->mcuBandHeight) ctx->mcuBandHeight = chunkH;
+
+  // Copy each source row of the chunk into mcuBand at the right column offset.
+  for (int row = 0; row < chunkH; ++row) {
     const int outY = chunkY + row;
-    if (outY < 0 || outY >= ctx->outHeight) continue;
+    if (outY < 0 || outY >= ctx->decodedH) continue;
 
-    // If this row differs from the row currently buffered, flush the
-    // previous row first.  JPEGDEC iterates rows in raster order, so any
-    // change in outY means the previous row is complete.
-    if (ctx->currentY != outY) {
-      if (ctx->currentY >= 0) {
-        if (!flushRow(*ctx)) return 0;
-      }
-      ctx->currentY = outY;
-    }
+    const uint8_t* srcRow = srcBytes + row * packPitchPx;
 
-    const uint8_t* srcRow = srcBytes + row * srcPitchBytes;
-
-    // Clip the chunk's right edge against the output width.
+    // Clip the chunk's right edge against the decoded width.
     int copyW = chunkW;
-    if (chunkX + copyW > ctx->outWidth) copyW = ctx->outWidth - chunkX;
+    if (chunkX + copyW > ctx->decodedW) copyW = ctx->decodedW - chunkX;
     if (copyW <= 0) continue;
-    if (chunkX < 0) {
-      // Not expected for this converter (no x offset), but handle defensively.
-      continue;
-    }
+    if (chunkX < 0) continue;  // not expected
 
-    copyPackedBits(ctx->rowBuffer, chunkX, srcRow, copyW, ctx->bitsPerPixel);
+    uint8_t* dstRow = ctx->mcuBand + row * ctx->decodedW + chunkX;
+    memcpy(dstRow, srcRow, static_cast<size_t>(copyW));
   }
 
   ctx->yieldCounter++;
   if ((ctx->yieldCounter & 0x7) == 0) taskYIELD();
 
-  return 1;  // continue decoding
+  return 1;
 }
 
-// Choose the largest hardware scale factor (1, 1/2, 1/4, 1/8) such that the
-// resulting decoded dimensions still meet or exceed the target box.  Returns
-// the JPEGDEC scale option bit (0 = no scale) and the resulting decoded W/H.
-struct ScaleResult {
-  int option;     // 0 / JPEG_SCALE_HALF / JPEG_SCALE_QUARTER / JPEG_SCALE_EIGHTH
-  int outWidth;
-  int outHeight;
-};
+// Allocate all decode-context scratch buffers.  Returns true on success.  On
+// failure, frees whatever was allocated.
+bool allocateContext(DecodeCtx& ctx, int decodedW, int decodedH, int targetW, int targetH,
+                     int mcuBandRows) {
+  ctx.decodedW = decodedW;
+  ctx.decodedH = decodedH;
+  ctx.targetW = targetW;
+  ctx.targetH = targetH;
+  ctx.bytesPerRow = (targetW + 31) / 32 * 4;
 
-ScaleResult chooseHardwareScale(int srcW, int srcH, int targetMaxW, int targetMaxH) {
-  ScaleResult result = {0, srcW, srcH};
-  if (targetMaxW <= 0 || targetMaxH <= 0) return result;
-  if (srcW <= targetMaxW && srcH <= targetMaxH) return result;
+  // MCU band: decodedW × mcuBandRows bytes.  Worst case ~534 × 16 = 8.5 KB.
+  const size_t mcuBandSize = static_cast<size_t>(decodedW) * static_cast<size_t>(mcuBandRows);
+  ctx.mcuBand = new (std::nothrow) uint8_t[mcuBandSize];
+  if (!ctx.mcuBand) return false;
+  memset(ctx.mcuBand, 0, mcuBandSize);
 
-  // Pick the most aggressive hardware scale where post-scale dimensions still
-  // meet or exceed the target on BOTH axes.  This avoids dropping below the
-  // requested resolution (the renderer would have to stretch — ugly) while
-  // still saving memory and decode time when the source is much larger than
-  // the target.  "src ≥ 2× target on both axes" = HALF; "src ≥ 4×" = QUARTER;
-  // "src ≥ 8×" = EIGHTH.  Ratios checked against the more constraining axis
-  // so we never undershoot.
-  struct Step {
-    int option;
-    int shift;
-  };
-  // Order from coarsest to finest.  The first one whose post-scale output
-  // is still >= target on both axes wins (since coarser scales produce less
-  // data).
-  const Step steps[] = {{JPEG_SCALE_EIGHTH, 3}, {JPEG_SCALE_QUARTER, 2}, {JPEG_SCALE_HALF, 1}};
-  for (const Step& s : steps) {
-    const int dw = srcW >> s.shift;
-    const int dh = srcH >> s.shift;
-    if (dw >= targetMaxW && dh >= targetMaxH && dw > 0 && dh > 0) {
-      result.option = s.option;
-      result.outWidth = dw;
-      result.outHeight = dh;
-      return result;
-    }
+  ctx.vertSum = new (std::nothrow) uint32_t[decodedW];
+  if (!ctx.vertSum) return false;
+  memset(ctx.vertSum, 0, sizeof(uint32_t) * decodedW);
+  ctx.vertSumCount = 0;
+  ctx.currentTargetY = -1;
+  ctx.mcuBandY = -1;
+  ctx.mcuBandHeight = 0;
+
+  ctx.targetGrayRow = new (std::nothrow) uint8_t[targetW];
+  if (!ctx.targetGrayRow) return false;
+
+  ctx.outRow = new (std::nothrow) uint8_t[ctx.bytesPerRow];
+  if (!ctx.outRow) return false;
+  memset(ctx.outRow, 0, ctx.bytesPerRow);
+
+  // Floyd-Steinberg error rows.  Pad ±1 on each side so the spill-over math
+  // stays in-bounds at the edges.
+  ctx.errCur = new (std::nothrow) int16_t[targetW + 2];
+  if (!ctx.errCur) return false;
+  memset(ctx.errCur, 0, sizeof(int16_t) * (targetW + 2));
+
+  ctx.errNext = new (std::nothrow) int16_t[targetW + 2];
+  if (!ctx.errNext) return false;
+  memset(ctx.errNext, 0, sizeof(int16_t) * (targetW + 2));
+
+  // Precompute horizontal source-X column boundaries.
+  ctx.srcXStart = new (std::nothrow) int[targetW + 1];
+  if (!ctx.srcXStart) return false;
+  for (int outX = 0; outX <= targetW; ++outX) {
+    // 16.16 fixed-point: srcX = outX * decodedW * 65536 / targetW; floor by >>16.
+    const int64_t v = (static_cast<int64_t>(outX) * static_cast<int64_t>(decodedW) * 65536LL) /
+                      static_cast<int64_t>(targetW);
+    ctx.srcXStart[outX] = static_cast<int>(v >> 16);
   }
-  // Source is between 1× and 2× target — no hardware scale applies.  We
-  // could software-downscale but the JPEGDEC pipeline keeps things simple
-  // by leaving final fitting to the renderer (BMP renderer can clip at the
-  // top-down DIB level).  This matches what TJpgDec did in fallback.
-  return result;
+  // Clamp boundaries.
+  ctx.srcXStart[0] = 0;
+  ctx.srcXStart[targetW] = decodedW;
+
+  return true;
 }
 
-// Common implementation for jpegFileToBmpStream*, jpegFileTo1BitBmpStream*,
-// jpegFileToBmpStreamQuick.  All flavours share the open / scale / decode /
-// flush pipeline; they only differ in target dimensions and bit depth.
-bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int targetMaxW, int targetMaxH, bool oneBit,
+void freeContext(DecodeCtx& ctx) {
+  delete[] ctx.mcuBand;
+  delete[] ctx.vertSum;
+  delete[] ctx.targetGrayRow;
+  delete[] ctx.outRow;
+  delete[] ctx.errCur;
+  delete[] ctx.errNext;
+  delete[] ctx.srcXStart;
+  ctx.mcuBand = nullptr;
+  ctx.vertSum = nullptr;
+  ctx.targetGrayRow = nullptr;
+  ctx.outRow = nullptr;
+  ctx.errCur = nullptr;
+  ctx.errNext = nullptr;
+  ctx.srcXStart = nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Common implementation for every public entry point.  All flavours share the
+// open / scale / decode / dither pipeline; they only differ in target box
+// dimensions.
+// ---------------------------------------------------------------------------
+bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int maxW, int maxH,
                 const std::function<bool()>& shouldAbort) {
   if (!jpegFile) return false;
 
-  // Reset to start so callers that peeked the SOF (e.g. for fast-mode layout)
-  // don't break the parser.
   {
     snapix::spi::SharedBusLock lk;
     if (!lk || !jpegFile.seek(0)) return false;
@@ -443,7 +566,6 @@ bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int targetMaxW, int targetMaxH,
   const int32_t fileSize = static_cast<int32_t>(jpegFile.size());
   if (fileSize <= 0) return false;
 
-  // Heap-allocate the pump buffer (4 KB — bigger than the BG worker stack).
   std::unique_ptr<uint8_t[]> pumpBuf(new (std::nothrow) uint8_t[JpegPumpCtx::kBufferSize]);
   if (!pumpBuf) {
     LOG_ERR(TAG, "JPEG OOM allocating %u-byte pump buffer",
@@ -457,24 +579,17 @@ bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int targetMaxW, int targetMaxH,
                       .bufferFilled = 0,
                       .streamPos = 0};
 
-  // Heap-allocate the JPEGIMAGE workspace — `JPEGIMAGE` is ~50 KB, far
-  // bigger than the 16 KB BG worker stack would tolerate.
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
   if (!jpeg) {
     LOG_ERR(TAG, "JPEG OOM allocating JPEGDEC workspace");
     return false;
   }
 
-  // open() reads through the SOF marker and populates width/height/etc.
-  // Returns 1 on success, 0 on failure (via getLastError()).
   if (jpeg->open(&pump, fileSize, jpegClose, jpegRead, jpegSeek, jpegDraw) == 0) {
     LOG_ERR(TAG, "JPEGDEC open failed: err=%d", jpeg->getLastError());
     return false;
   }
 
-  // Reject progressive / arithmetic-coded JPEGs explicitly.  open() will
-  // succeed but the decode would yield garbage or fail mid-stream — better
-  // to bail now and return a clean failure.
   if (jpeg->getJPEGType() == JPEG_MODE_PROGRESSIVE) {
     LOG_ERR(TAG, "JPEG progressive mode unsupported");
     jpeg->close();
@@ -489,7 +604,7 @@ bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int targetMaxW, int targetMaxH,
     return false;
   }
 
-  // Safety limits to prevent memory issues on ESP32-C3.
+  // Safety limits to prevent memory blowups on ESP32-C3.
   constexpr int MAX_IMAGE_WIDTH = 2048;
   constexpr int MAX_IMAGE_HEIGHT = 3072;
   if (srcW > MAX_IMAGE_WIDTH || srcH > MAX_IMAGE_HEIGHT) {
@@ -499,103 +614,133 @@ bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int targetMaxW, int targetMaxH,
     return false;
   }
 
-  const ScaleResult scale = chooseHardwareScale(srcW, srcH, targetMaxW, targetMaxH);
-  const int outWidth = scale.outWidth;
-  const int outHeight = scale.outHeight;
-  if (outWidth <= 0 || outHeight <= 0) {
-    LOG_ERR(TAG, "JPEG decoded dimensions degenerate %dx%d", outWidth, outHeight);
+  // Pick the largest hardware scale that still leaves us ≥ the target box.
+  // If the source already fits in the box, scale=0 (no hardware scale).
+  int effMaxW = maxW > 0 ? maxW : srcW;
+  int effMaxH = maxH > 0 ? maxH : srcH;
+  const ScaleResult scale = chooseHardwareScale(srcW, srcH, effMaxW, effMaxH);
+  const int decodedW = scale.decodedW;
+  const int decodedH = scale.decodedH;
+  if (decodedW <= 0 || decodedH <= 0) {
+    LOG_ERR(TAG, "JPEG decoded dimensions degenerate %dx%d", decodedW, decodedH);
     jpeg->close();
     return false;
   }
 
-  LOG_INF(TAG, "JPEG %dx%d -> %dx%d (scale=%d, %s)", srcW, srcH, outWidth, outHeight, scale.option,
-          oneBit ? "1-bit" : "2-bit");
+  // Compute target dims: aspect-preserving, capped at maxW/maxH.  We mirror
+  // FB2::scaledFit() to the byte (using src dims, not decoded dims) so the
+  // BMP comes out at exactly the dimensions ImageBlock placed in its layout
+  // — drawBitmap then renders 1:1 with no scaling.  Truncation matches
+  // scaledFit's `(int)(srcW * scale)` cast.
+  int targetW;
+  int targetH;
+  if (srcW <= effMaxW && srcH <= effMaxH) {
+    targetW = srcW;
+    targetH = srcH;
+  } else {
+    const double sx = static_cast<double>(effMaxW) / static_cast<double>(srcW);
+    const double sy = static_cast<double>(effMaxH) / static_cast<double>(srcH);
+    const double scaleD = sx < sy ? sx : sy;
+    targetW = static_cast<int>(srcW * scaleD);
+    targetH = static_cast<int>(srcH * scaleD);
+  }
+  if (targetW < 1) targetW = 1;
+  if (targetH < 1) targetH = 1;
+  // We only ever software-downscale: clamp target to the hardware-scaled
+  // decoded dimensions so the area-average step never has to upscale.  In
+  // practice this only fires when (decodedW < effMaxW), which means the
+  // source already fit through hardware scaling alone.
+  if (targetW > decodedW) targetW = decodedW;
+  if (targetH > decodedH) targetH = decodedH;
 
-  // Configure JPEGDEC for native dithered output.
-  jpeg->setPixelType(oneBit ? ONE_BIT_DITHERED : TWO_BIT_DITHERED);
+  LOG_INF(TAG, "JPEG %dx%d -> decoded %dx%d -> target %dx%d (hwscale=%d)", srcW, srcH, decodedW,
+          decodedH, targetW, targetH, scale.option);
 
-  // Allocate the dither buffer.  JPEGDEC uses this both as the 8-bit
-  // grayscale staging area before dithering AND as the destination of the
-  // packed N-bit pixels.  The grayscale form needs `cx_post * mcuCX_post *
-  // mcuCY_post` bytes.  Worst case is scale=0, mcuCX=mcuCY=16 (4:2:0
-  // subsampling), where the row width post-rounding can exceed iWidth by
-  // up to 16 pixels.  Allocate (outWidth + 32) * 16 + 16 bytes — generous
-  // and 16-byte aligned to satisfy any internal SIMD assumptions.
-  const size_t ditherBufSize = static_cast<size_t>((outWidth + 32) * 16 + 16);
-  std::unique_ptr<uint8_t[]> ditherBuf(new (std::nothrow) uint8_t[ditherBufSize]);
-  if (!ditherBuf) {
-    LOG_ERR(TAG, "JPEG OOM allocating %u-byte dither buffer",
-            static_cast<unsigned>(ditherBufSize));
+  // Configure JPEGDEC for grayscale output.  Note: decode() rather than
+  // decodeDither() — we run our own Floyd-Steinberg straight to 1-bit
+  // because the BW e-paper pipeline already collapses 2-bit dithered values
+  // to {black, white} anyway.
+  jpeg->setPixelType(EIGHT_BIT_GRAYSCALE);
+
+  // MCU height after hardware scale.  Subsample 0x22 (4:2:0) yields 16, all
+  // others 8; halve again per scale shift.  We allocate for the worst case
+  // (16) so a single buffer covers any subsample.
+  const int mcuBandRows = 16;
+
+  DecodeCtx ctx;
+  ctx.bmpOut = &bmpOut;
+  ctx.shouldAbort = (shouldAbort ? &shouldAbort : nullptr);
+  if (!allocateContext(ctx, decodedW, decodedH, targetW, targetH, mcuBandRows)) {
+    LOG_ERR(TAG, "JPEG OOM allocating decode scratch (decW=%d, tgtW=%d)", decodedW, targetW);
+    freeContext(ctx);
     jpeg->close();
     return false;
   }
 
-  // Allocate the packed BMP row buffer.
-  const int bytesPerRow = oneBit ? ((outWidth + 31) / 32 * 4) : ((outWidth * 2 + 31) / 32 * 4);
-  std::unique_ptr<uint8_t[]> rowBuf(new (std::nothrow) uint8_t[bytesPerRow]);
-  if (!rowBuf) {
-    LOG_ERR(TAG, "JPEG OOM allocating %d-byte BMP row buffer", bytesPerRow);
-    jpeg->close();
-    return false;
-  }
-  memset(rowBuf.get(), 0, bytesPerRow);
-
-  // Write BMP header.
+  // Write BMP header (under SharedBusLock so it doesn't interleave with
+  // display SPI traffic).
   {
     snapix::spi::SharedBusLock lk;
     if (!lk) {
       LOG_ERR(TAG, "Shared SPI lock unavailable for BMP header write");
+      freeContext(ctx);
       jpeg->close();
       return false;
     }
-    if (oneBit) {
-      writeBmpHeader1bit(bmpOut, outWidth, outHeight);
-    } else {
-      writeBmpHeader2bit(bmpOut, outWidth, outHeight);
+    writeBmpHeader1bit(bmpOut, targetW, targetH);
+  }
+
+  jpeg->setUserPointer(&ctx);
+
+  // Decode.  With EIGHT_BIT_GRAYSCALE we get raw 8-bit Y values per pixel.
+  const int decodeOptions = scale.option | JPEG_LUMA_ONLY;
+  const int decodeOk = jpeg->decode(0, 0, decodeOptions);
+
+  // Process the final MCU band that was buffered when decode() returned.
+  if (!ctx.aborted && !ctx.writeError && ctx.mcuBandY >= 0 && ctx.mcuBandHeight > 0) {
+    if (!processBand(ctx)) {
+      // band processing flagged writeError; fall through to cleanup
     }
   }
 
-  // Build draw context.
-  DrawCtx drawCtx;
-  drawCtx.bmpOut = &bmpOut;
-  drawCtx.rowBuffer = rowBuf.get();
-  drawCtx.outWidth = outWidth;
-  drawCtx.outHeight = outHeight;
-  drawCtx.bytesPerRow = bytesPerRow;
-  drawCtx.bitsPerPixel = oneBit ? 1 : 2;
-  drawCtx.currentY = -1;
-  drawCtx.oneBit = oneBit;
-  drawCtx.writeError = false;
-  drawCtx.shouldAbort = (shouldAbort ? &shouldAbort : nullptr);
-  drawCtx.aborted = false;
-  drawCtx.yieldCounter = 0;
-  jpeg->setUserPointer(&drawCtx);
-
-  // Decode.  decodeDither(buf, opts) runs the in-decoder Floyd-Steinberg
-  // pipeline; JPEG_LUMA_ONLY skips chroma decode (we only want gray).
-  const int decodeOptions = scale.option | JPEG_LUMA_ONLY;
-  const int decodeOk = jpeg->decodeDither(ditherBuf.get(), decodeOptions);
-
-  // Flush the final row (if not already flushed).
-  if (!drawCtx.aborted && !drawCtx.writeError && drawCtx.currentY >= 0) {
-    flushRow(drawCtx);
+  // Finalize the very last target row (its source rows have been folded into
+  // vertSum but the row has not been written yet).
+  if (!ctx.aborted && !ctx.writeError && ctx.currentTargetY >= 0) {
+    finalizeTargetRow(ctx);
   }
+
+  // Pad: if the target-row write count came up short (e.g. very last source
+  // rows mapped to a target-Y that already finalized), emit zero-filled rows.
+  // This is a safety-net for fractional-pixel rounding mismatches; the
+  // computed targetH is the canonical row count in the BMP header.
+  // (In practice with the rounding above we land exactly on targetH.)
+  // We don't track total rows-written explicitly; the only way they'd come up
+  // short is if the JPEGDEC decode bailed mid-image, in which case decodeOk
+  // will be 0 and we report failure below.
 
   jpeg->close();
 
-  if (drawCtx.aborted) {
+  const bool writeError = ctx.writeError;
+  const bool aborted = ctx.aborted;
+  freeContext(ctx);
+
+  if (aborted) {
     LOG_INF(TAG, "JPEG decode aborted by caller");
     return false;
   }
-  if (drawCtx.writeError) return false;
+  if (writeError) return false;
   if (decodeOk == 0) {
-    LOG_ERR(TAG, "JPEG decodeDither failed: err=%d", jpeg->getLastError());
+    LOG_ERR(TAG, "JPEG decode failed: err=%d", jpeg->getLastError());
     return false;
   }
   return true;
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Public API.
+// ---------------------------------------------------------------------------
 
 // Stub kept solely so the static declaration in JpegToBmpConverter.h still
 // resolves at link time.  This signature dates back to the picojpeg era and
@@ -610,53 +755,51 @@ unsigned char JpegToBmpConverter::jpegReadCallback(unsigned char* /*pBuf*/,
 }
 
 bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bmpOut, int targetWidth,
-                                                     int targetHeight, bool oneBit, bool /*quickMode*/,
+                                                     int targetHeight, bool /*oneBit*/, bool /*quickMode*/,
                                                      const std::function<bool()>& shouldAbort) {
-  // quickMode previously toggled "no dithering" — JPEGDEC always dithers
-  // (Floyd-Steinberg) in-decoder, so the parameter is silently ignored.  The
-  // ~1.5–3× speedup of JPEGDEC over TJpgDec already covers the perf budget
-  // the old "quick" code was buying.
-  return decodeImpl(jpegFile, bmpOut, targetWidth, targetHeight, oneBit, shouldAbort);
+  // The "oneBit" / "quickMode" flags are silently ignored — every output is
+  // now 1-bit Floyd-Steinberg-dithered to match the BW e-paper pipeline.
+  return decodeImpl(jpegFile, bmpOut, targetWidth, targetHeight, shouldAbort);
 }
 
-// Default cover image target: same constants as the legacy converter so cache
-// invalidation on upgrade is the only behavioural break point.
+// Default cover image target.  Same constants as the legacy converter so
+// cache-invalidation on upgrade is the only behavioural break point.
 namespace {
 constexpr int kDefaultTargetW = 450;
 constexpr int kDefaultTargetH = 750;
-}
+constexpr int kPreviewTargetSize = 64;
+}  // namespace
 
 bool JpegToBmpConverter::jpegFileToBmpStream(FsFile& jpegFile, Print& bmpOut) {
-  return decodeImpl(jpegFile, bmpOut, kDefaultTargetW, kDefaultTargetH, /*oneBit=*/false, nullptr);
+  return decodeImpl(jpegFile, bmpOut, kDefaultTargetW, kDefaultTargetH, nullptr);
 }
 
 bool JpegToBmpConverter::jpegFileToBmpStreamWithSize(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
                                                      int targetMaxHeight,
                                                      const std::function<bool()>& shouldAbort) {
-  return decodeImpl(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, /*oneBit=*/false, shouldAbort);
+  return decodeImpl(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, shouldAbort);
 }
 
 bool JpegToBmpConverter::jpegFileTo1BitBmpStream(FsFile& jpegFile, Print& bmpOut) {
-  return decodeImpl(jpegFile, bmpOut, kDefaultTargetW, kDefaultTargetH, /*oneBit=*/true, nullptr);
+  return decodeImpl(jpegFile, bmpOut, kDefaultTargetW, kDefaultTargetH, nullptr);
 }
 
 bool JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(FsFile& jpegFile, Print& bmpOut,
                                                          int targetMaxWidth, int targetMaxHeight) {
-  return decodeImpl(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, /*oneBit=*/true, nullptr);
+  return decodeImpl(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, nullptr);
 }
 
 bool JpegToBmpConverter::jpegFileToBmpStreamQuick(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
                                                   int targetMaxHeight,
                                                   const std::function<bool()>& shouldAbort) {
-  // No separate "quick" pipeline under JPEGDEC — Floyd-Steinberg dithering is
-  // baked into the decode loop and effectively free.  Same code path as
-  // jpegFileToBmpStreamWithSize.
-  return decodeImpl(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, /*oneBit=*/false, shouldAbort);
+  return decodeImpl(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, shouldAbort);
 }
 
-// Header-only peek: enough work to extract image dimensions.  JPEGDEC's
-// open() reads through the SOF marker and populates width/height — same
-// ~10× speedup over a full decode that the TJpgDec version provided.
+// ---------------------------------------------------------------------------
+// peekDimensions: returns SOURCE JPEG dims (not post-downscale dims).  The
+// FB2 image-cache logic in `Fb2::cacheImage` calls scaledFit() on top of
+// these to compute its own target box.
+// ---------------------------------------------------------------------------
 bool JpegToBmpConverter::peekDimensions(FsFile& jpegFile, int& outWidth, int& outHeight) {
   outWidth = 0;
   outHeight = 0;
@@ -682,7 +825,6 @@ bool JpegToBmpConverter::peekDimensions(FsFile& jpegFile, int& outWidth, int& ou
   std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
   if (!jpeg) return false;
 
-  // No draw callback is needed — peek only triggers SOF parsing.
   if (jpeg->open(&pump, fileSize, jpegClose, jpegRead, jpegSeek, jpegDraw) == 0) {
     LOG_DBG(TAG, "peekDimensions: open failed err=%d", jpeg->getLastError());
     return false;
@@ -698,118 +840,11 @@ bool JpegToBmpConverter::peekDimensions(FsFile& jpegFile, int& outWidth, int& ou
   return outWidth > 0 && outHeight > 0;
 }
 
-// Tiny preview decode.  Uses JPEGDEC's hardware 1/8 scale with native
-// 2-bit Floyd-Steinberg dithering — equivalent to the old TJpgDec-with-Bayer
-// preview but faster and cleaner since dithering happens inside JPEGDEC's
-// decode loop.  Output dimensions are 1/8 of the source on each axis; the
-// renderer upscales when drawing.
+// ---------------------------------------------------------------------------
+// Tiny preview decode: 64×N 1-bit dithered.  Same downscale-and-dither
+// pipeline as the full decode but with a tiny target box.  Output is ~64 ×
+// proportional × 1bpp ≈ 0.5 KB and takes <1 s.
+// ---------------------------------------------------------------------------
 bool JpegToBmpConverter::jpegFileToBmpStreamPreview(FsFile& jpegFile, Print& bmpOut) {
-  // Same as a regular 2-bit decode but request 1/8 hardware scale up front.
-  // We do it via the same helper with a tiny target so chooseHardwareScale
-  // automatically picks JPEG_SCALE_EIGHTH when the source is large enough.
-  // For tiny source images chooseHardwareScale returns scale=0, which is
-  // also fine for previews.
-
-  if (!jpegFile) return false;
-  {
-    snapix::spi::SharedBusLock lk;
-    if (!lk || !jpegFile.seek(0)) return false;
-  }
-
-  const int32_t fileSize = static_cast<int32_t>(jpegFile.size());
-  if (fileSize <= 0) return false;
-
-  std::unique_ptr<uint8_t[]> pumpBuf(new (std::nothrow) uint8_t[JpegPumpCtx::kBufferSize]);
-  if (!pumpBuf) return false;
-  JpegPumpCtx pump = {.file = &jpegFile,
-                      .buffer = pumpBuf.get(),
-                      .bufferPos = 0,
-                      .bufferFilled = 0,
-                      .streamPos = 0};
-
-  std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
-  if (!jpeg) {
-    LOG_ERR(TAG, "preview: OOM allocating JPEGDEC workspace");
-    return false;
-  }
-
-  if (jpeg->open(&pump, fileSize, jpegClose, jpegRead, jpegSeek, jpegDraw) == 0) {
-    LOG_DBG(TAG, "preview: open failed err=%d", jpeg->getLastError());
-    return false;
-  }
-  if (jpeg->getJPEGType() == JPEG_MODE_PROGRESSIVE) {
-    jpeg->close();
-    return false;
-  }
-
-  const int srcW = jpeg->getWidth();
-  const int srcH = jpeg->getHeight();
-  if (srcW <= 0 || srcH <= 0) {
-    jpeg->close();
-    return false;
-  }
-  const int outW = srcW >> 3;
-  const int outH = srcH >> 3;
-  if (outW <= 0 || outH <= 0 || outW > 4096 || outH > 4096) {
-    jpeg->close();
-    return false;
-  }
-
-  jpeg->setPixelType(TWO_BIT_DITHERED);
-
-  const size_t ditherBufSize = static_cast<size_t>((outW + 32) * 16 + 16);
-  std::unique_ptr<uint8_t[]> ditherBuf(new (std::nothrow) uint8_t[ditherBufSize]);
-  if (!ditherBuf) {
-    LOG_ERR(TAG, "preview: OOM allocating dither buffer");
-    jpeg->close();
-    return false;
-  }
-
-  const int bytesPerRow = (outW * 2 + 31) / 32 * 4;
-  std::unique_ptr<uint8_t[]> rowBuf(new (std::nothrow) uint8_t[bytesPerRow]);
-  if (!rowBuf) {
-    LOG_ERR(TAG, "preview: OOM allocating row buffer");
-    jpeg->close();
-    return false;
-  }
-  memset(rowBuf.get(), 0, bytesPerRow);
-
-  {
-    snapix::spi::SharedBusLock lk;
-    if (!lk) {
-      jpeg->close();
-      return false;
-    }
-    writeBmpHeader2bit(bmpOut, outW, outH);
-  }
-
-  DrawCtx drawCtx;
-  drawCtx.bmpOut = &bmpOut;
-  drawCtx.rowBuffer = rowBuf.get();
-  drawCtx.outWidth = outW;
-  drawCtx.outHeight = outH;
-  drawCtx.bytesPerRow = bytesPerRow;
-  drawCtx.bitsPerPixel = 2;
-  drawCtx.currentY = -1;
-  drawCtx.oneBit = false;
-  drawCtx.writeError = false;
-  drawCtx.shouldAbort = nullptr;
-  drawCtx.aborted = false;
-  drawCtx.yieldCounter = 0;
-  jpeg->setUserPointer(&drawCtx);
-
-  const int decodeOk = jpeg->decodeDither(ditherBuf.get(), JPEG_SCALE_EIGHTH | JPEG_LUMA_ONLY);
-
-  if (!drawCtx.writeError && drawCtx.currentY >= 0) {
-    flushRow(drawCtx);
-  }
-
-  jpeg->close();
-
-  if (drawCtx.writeError || decodeOk == 0) {
-    LOG_DBG(TAG, "preview: decode err=%d writeErr=%d", decodeOk, drawCtx.writeError ? 1 : 0);
-    return false;
-  }
-  LOG_INF(TAG, "preview: %dx%d decoded", outW, outH);
-  return true;
+  return decodeImpl(jpegFile, bmpOut, kPreviewTargetSize, kPreviewTargetSize, nullptr);
 }
