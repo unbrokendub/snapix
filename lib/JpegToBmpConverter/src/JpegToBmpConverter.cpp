@@ -306,6 +306,16 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
             MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
     return false;
   }
+  // Defensive: a malformed JPEG can still report 0×0 / 0-dimension MCUs after
+  // a "successful" pjpeg_decode_init.  Reject before any divide-by-zero or
+  // zero-byte allocation downstream.
+  if (imageInfo.m_width == 0 || imageInfo.m_height == 0 || imageInfo.m_MCUWidth == 0 ||
+      imageInfo.m_MCUHeight == 0 || imageInfo.m_MCUSPerRow == 0 || imageInfo.m_MCUSPerCol == 0) {
+    LOG_ERR(TAG, "Malformed JPEG: zero dimension(s) %dx%d MCU=%dx%d MCUs=%dx%d", imageInfo.m_width,
+            imageInfo.m_height, imageInfo.m_MCUWidth, imageInfo.m_MCUHeight, imageInfo.m_MCUSPerRow,
+            imageInfo.m_MCUSPerCol);
+    return false;
+  }
 
   // Calculate output dimensions (pre-scale to fit display exactly)
   int outWidth = imageInfo.m_width;
@@ -431,8 +441,27 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
   uint32_t nextOutY_srcStart = 0;  // Source Y where next output row starts (16.16 fixed point)
 
   if (needsScaling) {
-    rowAccum = new uint32_t[outWidth]();
-    rowCount = new uint16_t[outWidth]();
+    rowAccum = new (std::nothrow) uint32_t[outWidth]();
+    if (!rowAccum) {
+      LOG_ERR(TAG, "Failed to allocate rowAccum (%d entries)", outWidth);
+      if (atkinsonDitherer) delete atkinsonDitherer;
+      if (fsDitherer) delete fsDitherer;
+      if (atkinson1BitDitherer) delete atkinson1BitDitherer;
+      free(mcuRowBuffer);
+      free(rowBuffer);
+      return false;
+    }
+    rowCount = new (std::nothrow) uint16_t[outWidth]();
+    if (!rowCount) {
+      LOG_ERR(TAG, "Failed to allocate rowCount (%d entries)", outWidth);
+      delete[] rowAccum;
+      if (atkinsonDitherer) delete atkinsonDitherer;
+      if (fsDitherer) delete fsDitherer;
+      if (atkinson1BitDitherer) delete atkinson1BitDitherer;
+      free(mcuRowBuffer);
+      free(rowBuffer);
+      return false;
+    }
     nextOutY_srcStart = scaleY_fp;  // First boundary is at scaleY_fp (source Y for outY=1)
   }
 

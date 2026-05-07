@@ -10,6 +10,7 @@
 #include <FsHelpers.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
+#include <PngToBmpConverter.h>
 
 #define TAG "FB2"
 #include <SDCardManager.h>
@@ -621,20 +622,17 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
     return false;
   }
   const BinaryEntry& entry = it->second;
+  // mimeType: 0 = JPEG, 1 = PNG, 2+ = unsupported.  Anything else is rejected.
   if (entry.byteLength == 0 || entry.mimeType >= 2) {
-    return false;  // Empty or unsupported MIME (we only handle JPEG / PNG; PNG decode TBD).
-  }
-  if (entry.mimeType != 0) {
-    // Only JPEG decode is wired up today.  PNG support is a future addition.
-    LOG_DBG(TAG, "cacheImage: skipping non-JPEG binary id=%s mime=%u", binaryId.c_str(),
-            static_cast<unsigned>(entry.mimeType));
     return false;
   }
+  const bool isPng = (entry.mimeType == 1);
 
   const std::string imagesDir = cachePath + "/images";
   const std::string bmpPath = imagesDir + "/" + binaryId + ".bmp";
   const std::string failPath = imagesDir + "/" + binaryId + ".failed";
-  const std::string tmpJpgPath = imagesDir + "/" + binaryId + ".tmp.jpg";
+  // Single tmp filename — base64-decoded payload, format inferred from mimeType.
+  const std::string tmpSrcPath = imagesDir + "/" + binaryId + (isPng ? ".tmp.png" : ".tmp.jpg");
 
   // Already cached (idempotent path).
   if (SdMan.exists(bmpPath.c_str())) {
@@ -685,41 +683,45 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
     }
   }
 
-  // Step 1: stream-decode base64 chunk from the FB2 source into a temp JPEG.
-  if (!streamDecodeBase64ToJpegFile(filepath, entry.fileOffset, entry.byteLength, tmpJpgPath)) {
+  // Step 1: stream-decode base64 chunk from the FB2 source into a temp file.
+  // The base64 decoder is format-agnostic — JPEG / PNG difference only matters
+  // at the BMP-conversion step.
+  if (!streamDecodeBase64ToJpegFile(filepath, entry.fileOffset, entry.byteLength, tmpSrcPath)) {
     LOG_ERR(TAG, "cacheImage: base64 decode failed for id=%s", binaryId.c_str());
-    SdMan.remove(tmpJpgPath.c_str());
+    SdMan.remove(tmpSrcPath.c_str());
     FsFile m;
     if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
     return false;
   }
 
-  // Step 2: JPEG → BMP via the existing converter.  Quick mode trades dither
-  // quality for speed / RAM — acceptable on e-ink given the user's
+  // Step 2: JPEG / PNG → BMP via the matching converter.  Quick mode trades
+  // dither quality for speed / RAM — acceptable on e-ink given the user's
   // explicit "можно пожертвовать качеством картинок" tradeoff.
-  FsFile jpgFile;
-  if (!SdMan.openFileForRead("FB2", tmpJpgPath, jpgFile)) {
-    SdMan.remove(tmpJpgPath.c_str());
+  FsFile srcFile;
+  if (!SdMan.openFileForRead("FB2", tmpSrcPath, srcFile)) {
+    SdMan.remove(tmpSrcPath.c_str());
     FsFile m;
     if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
     return false;
   }
   FsFile bmpFile;
   if (!SdMan.openFileForWrite("FB2", bmpPath, bmpFile)) {
-    jpgFile.close();
-    SdMan.remove(tmpJpgPath.c_str());
+    srcFile.close();
+    SdMan.remove(tmpSrcPath.c_str());
     FsFile m;
     if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
     return false;
   }
 
-  const bool ok = JpegToBmpConverter::jpegFileToBmpStreamQuick(jpgFile, bmpFile, maxBoxWidth, maxBoxHeight, nullptr);
-  jpgFile.close();
+  const bool ok = isPng ? PngToBmpConverter::pngFileToBmpStreamQuick(srcFile, bmpFile, maxBoxWidth, maxBoxHeight, nullptr)
+                        : JpegToBmpConverter::jpegFileToBmpStreamQuick(srcFile, bmpFile, maxBoxWidth, maxBoxHeight,
+                                                                       nullptr);
+  srcFile.close();
   bmpFile.close();
-  SdMan.remove(tmpJpgPath.c_str());
+  SdMan.remove(tmpSrcPath.c_str());
 
   if (!ok) {
-    LOG_ERR(TAG, "cacheImage: JPEG decode failed for id=%s", binaryId.c_str());
+    LOG_ERR(TAG, "cacheImage: %s decode failed for id=%s", isPng ? "PNG" : "JPEG", binaryId.c_str());
     SdMan.remove(bmpPath.c_str());
     FsFile m;
     if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();

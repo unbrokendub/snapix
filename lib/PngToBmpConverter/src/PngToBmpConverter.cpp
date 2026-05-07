@@ -4,6 +4,7 @@
 
 #define TAG "PNG"
 #include <SdFat.h>
+#include <SharedSpiLock.h>
 #include <pngle.h>
 
 #include <cstring>
@@ -313,15 +314,35 @@ bool pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOut, int targetMaxWid
   pngle_set_init_callback(pngle, pngInitCallback);
   pngle_set_draw_callback(pngle, pngDrawCallback);
 
-  // Read and feed PNG data
+  // Read and feed PNG data.  Each refill of `buffer` takes the SPI bus lock
+  // briefly so an e-ink redraw on the same bus can interleave between reads.
+  // Holding it across pngle_feed() (pure CPU work) would needlessly block
+  // the display thread.
   uint8_t buffer[1024];
   int bytesRead;
   bool success = true;
 
-  while ((bytesRead = pngFile.read(buffer, sizeof(buffer))) > 0) {
+  while (true) {
     if (ctx.aborted) {
       LOG_INF(TAG, "Abort requested during PNG conversion");
       success = false;
+      break;
+    }
+    {
+      snapix::spi::SharedBusLock busLock;
+      if (!busLock) {
+        LOG_ERR(TAG, "Shared SPI lock unavailable during PNG read");
+        success = false;
+        break;
+      }
+      bytesRead = pngFile.read(buffer, sizeof(buffer));
+    }
+    if (bytesRead <= 0) {
+      // 0 = EOF (success), <0 = SD read error
+      if (bytesRead < 0) {
+        LOG_ERR(TAG, "PNG file read error");
+        success = false;
+      }
       break;
     }
     int fed = pngle_feed(pngle, buffer, bytesRead);
