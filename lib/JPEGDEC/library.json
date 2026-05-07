@@ -1,0 +1,9 @@
+{
+  "name": "JPEGDEC",
+  "version": "1.7.0",
+  "description": "Larry Bank's JPEGDEC — fast embedded JPEG decoder with native 1/2/4-bpp dithered grayscale output",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}
