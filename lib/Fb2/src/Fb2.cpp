@@ -648,13 +648,27 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
       }
       bf.close();
       if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
-        outWidth = static_cast<uint16_t>(hdr[18] | (hdr[19] << 8));
-        outHeight = static_cast<uint16_t>(hdr[22] | (hdr[23] << 8));
-        outBmpPath = bmpPath;
-        return outWidth > 0 && outHeight > 0;
+        // BMP DIB header stores width/height as signed int32_t at offsets
+        // 18 / 22.  JpegToBmpConverter writes a NEGATIVE height to flag
+        // a top-down row order — read all 4 bytes and take the absolute
+        // value before clamping into uint16_t.  Reading just the low 2
+        // bytes used to interpret -699 (0xFFFFFD45) as 0xFD45 = 64837 px,
+        // which then cascaded into a giant ImageBlock and an abort().
+        const int32_t w32 = static_cast<int32_t>(hdr[18]) | (static_cast<int32_t>(hdr[19]) << 8) |
+                            (static_cast<int32_t>(hdr[20]) << 16) | (static_cast<int32_t>(hdr[21]) << 24);
+        const int32_t h32 = static_cast<int32_t>(hdr[22]) | (static_cast<int32_t>(hdr[23]) << 8) |
+                            (static_cast<int32_t>(hdr[24]) << 16) | (static_cast<int32_t>(hdr[25]) << 24);
+        const int32_t aw = w32 < 0 ? -w32 : w32;
+        const int32_t ah = h32 < 0 ? -h32 : h32;
+        if (aw > 0 && aw <= 0xFFFF && ah > 0 && ah <= 0xFFFF) {
+          outWidth = static_cast<uint16_t>(aw);
+          outHeight = static_cast<uint16_t>(ah);
+          outBmpPath = bmpPath;
+          return true;
+        }
       }
     }
-    // Header read failed — fall through and re-decode.
+    // Header read failed or absurd dimensions — fall through and re-decode.
   }
 
   // Previous attempt failed sentinel — don't retry the same JPEG decode every
@@ -713,6 +727,7 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
   }
 
   // Step 3: read back BMP dimensions for the caller (ImageBlock needs w/h).
+  // Same signed int32_t + abs read as the cache-hit path above.
   FsFile bf;
   if (SdMan.openFileForRead("FB2", bmpPath, bf)) {
     uint8_t hdr[26];
@@ -723,14 +738,22 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
     }
     bf.close();
     if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
-      outWidth = static_cast<uint16_t>(hdr[18] | (hdr[19] << 8));
-      outHeight = static_cast<uint16_t>(hdr[22] | (hdr[23] << 8));
-      if (outWidth > 0 && outHeight > 0) {
+      const int32_t w32 = static_cast<int32_t>(hdr[18]) | (static_cast<int32_t>(hdr[19]) << 8) |
+                          (static_cast<int32_t>(hdr[20]) << 16) | (static_cast<int32_t>(hdr[21]) << 24);
+      const int32_t h32 = static_cast<int32_t>(hdr[22]) | (static_cast<int32_t>(hdr[23]) << 8) |
+                          (static_cast<int32_t>(hdr[24]) << 16) | (static_cast<int32_t>(hdr[25]) << 24);
+      const int32_t aw = w32 < 0 ? -w32 : w32;
+      const int32_t ah = h32 < 0 ? -h32 : h32;
+      if (aw > 0 && aw <= 0xFFFF && ah > 0 && ah <= 0xFFFF) {
+        outWidth = static_cast<uint16_t>(aw);
+        outHeight = static_cast<uint16_t>(ah);
         outBmpPath = bmpPath;
         LOG_INF(TAG, "cacheImage: decoded %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
                 static_cast<unsigned>(outWidth), static_cast<unsigned>(outHeight));
         return true;
       }
+      LOG_ERR(TAG, "cacheImage: BMP %s has absurd dimensions w=%ld h=%ld", bmpPath.c_str(),
+              static_cast<long>(w32), static_cast<long>(h32));
     }
   }
 
