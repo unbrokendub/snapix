@@ -1,7 +1,10 @@
 #include "Bitmap.h"
 
+#include <SharedSpiLock.h>
+
 #include <cstdlib>
 #include <cstring>
+#include <new>
 
 // ============================================================================
 // IMAGE PROCESSING OPTIONS - Toggle these to test different configurations
@@ -14,6 +17,40 @@ constexpr bool USE_ATKINSON = true;  // Use Atkinson dithering instead of Floyd-
 Bitmap::~Bitmap() {
   delete atkinsonDitherer;
   delete fsDitherer;
+  delete[] preloadedRows_;
+}
+
+bool Bitmap::preloadAllRows() {
+  if (preloadedRows_) return true;  // already done
+  if (rowBytes <= 0 || height <= 0) return false;
+  // Heap allocation up front: 50 KB-ish for a 500×400 2-bit BMP.  std::nothrow
+  // because the BG cache worker can fragment the heap below this threshold,
+  // and falling back to row-by-row file.read is correct just slower.
+  const size_t total = static_cast<size_t>(rowBytes) * static_cast<size_t>(height);
+  preloadedRows_ = new (std::nothrow) uint8_t[total];
+  if (!preloadedRows_) return false;
+  // Single SharedBusLock-protected slurp: all pixel data in one go.
+  // After a JPEG decode the SD card is in a slow recovery state where each
+  // small file.read pays a 10-50 ms latency penalty — that's how we got
+  // 5+ second drawBitmap renders for a 50 KB image (~366 small reads × 16 ms).
+  // One big read pays the same penalty *once* instead of per row.
+  snapix::spi::SharedBusLock lk;
+  if (!lk || !file.seek(bfOffBits)) {
+    delete[] preloadedRows_;
+    preloadedRows_ = nullptr;
+    return false;
+  }
+  if (file.read(preloadedRows_, total) != static_cast<int>(total)) {
+    delete[] preloadedRows_;
+    preloadedRows_ = nullptr;
+    return false;
+  }
+  return true;
+}
+
+const uint8_t* Bitmap::preloadedRow(int rowIndex) const {
+  if (!preloadedRows_ || rowIndex < 0 || rowIndex >= height) return nullptr;
+  return preloadedRows_ + static_cast<size_t>(rowIndex) * static_cast<size_t>(rowBytes);
 }
 
 uint16_t Bitmap::readLE16(FsFile& f) {

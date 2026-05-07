@@ -532,47 +532,79 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
   // This avoids gaps/overlaps that forward mapping causes when downscaling.
   const int destWidth = isScaled ? static_cast<int>(bitmap.getWidth() * scale) : bitmap.getWidth();
   const int destHeight = isScaled ? static_cast<int>(bitmap.getHeight() * scale) : bitmap.getHeight();
-  const float invScale = isScaled ? (1.0f / scale) : 1.0f;
+
+  // 16.16 fixed-point inverse scale.  ESP32-C3 has no FPU, so software-emulated
+  // float multiplications were running ~600 ns each; replacing them with a
+  // single integer mul + shift drops the per-pixel `bmpX = destX * invScale`
+  // computation from ~600 ns to ~20 ns.  Over ~165 k inner-loop iterations
+  // that's ~95 ms saved.  Same trick for srcY in the outer loop, but tiny.
+  const uint32_t invScale_fp =
+      isScaled ? static_cast<uint32_t>((1.0f / scale) * 65536.0f + 0.5f) : 65536U;
+
+  // Hoist out the per-iteration accessor calls — the compiler can't always
+  // prove these member reads are loop-invariant when accessed through a
+  // const reference.
+  const int srcWidth = bitmap.getWidth();
+  const int srcHeight = bitmap.getHeight();
+  const int screenWidth = getScreenWidth();
+  const int screenHeight = getScreenHeight();
+  const bool topDown = bitmap.isTopDown();
+  const bool fastBitmapBpp = (bitmap.getBpp() == 2);  // controls preloaded fast path
+  const RenderMode rmode = renderMode;
+
+  // Try to slurp the entire pixel data off SD into RAM with a single
+  // SharedBusLock-protected read.  After the BG worker finishes a JPEG
+  // decode, the SD card sits in a slow recovery mode where each individual
+  // file.read() pays a 10-50 ms latency — so 366 row-reads per render =
+  // 5+ s of pure bus wait.  One big read pays that penalty once.  Falls
+  // back to the streaming readRow() path if the heap can't accommodate
+  // (typical 50 KB BMP needs ~50 KB contiguous; if the largest free block
+  // is below that we just take the slower path).
+  const bool preloaded = const_cast<Bitmap&>(bitmap).preloadAllRows();
 
   int lastSrcY = -1;
   for (int destY = 0; destY < destHeight; destY++) {
-    // For bottom-up BMPs, flip screen placement since readRow reads sequentially from file
-    const int screenY = bitmap.isTopDown() ? (y + destY) : (y + destHeight - 1 - destY);
+    const int screenY = topDown ? (y + destY) : (y + destHeight - 1 - destY);
     if (screenY < 0) continue;
-    if (screenY >= getScreenHeight()) continue;
+    if (screenY >= screenHeight) continue;
 
-    int srcY = isScaled ? static_cast<int>(destY * invScale) : destY;
-    if (srcY >= bitmap.getHeight()) srcY = bitmap.getHeight() - 1;
+    int srcY = isScaled ? static_cast<int>((static_cast<uint32_t>(destY) * invScale_fp) >> 16) : destY;
+    if (srcY >= srcHeight) srcY = srcHeight - 1;
 
-    if (srcY != lastSrcY) {
+    // Prepare the source row in bitmapOutputRow_ (the unpacked-then-repacked
+    // 2-bit destination buffer that the inner loop indexes).  In the
+    // identity-palette 2-bit fast path Bitmap::readRow degenerates to a
+    // memcpy, but we can short-circuit it entirely here when the bitmap is
+    // preloaded AND happens to be a 2-bit BMP — just point at the preloaded
+    // row directly and skip the readRow call.
+    const uint8_t* srcRow = nullptr;
+    if (preloaded && fastBitmapBpp) {
+      srcRow = bitmap.preloadedRow(srcY);
+    } else if (srcY != lastSrcY) {
       if (bitmap.readRow(bitmapOutputRow_, bitmapRowBytes_, srcY) != BmpReaderError::Ok) {
         LOG_ERR(TAG, "Failed to read row %d from bitmap", srcY);
         return;
       }
       lastSrcY = srcY;
     }
+    const uint8_t* row = srcRow ? srcRow : bitmapOutputRow_;
 
     for (int destX = 0; destX < destWidth; destX++) {
       const int screenX = x + destX;
       if (screenX < 0) continue;
-      if (screenX >= getScreenWidth()) break;
+      if (screenX >= screenWidth) break;
 
-      int bmpX = isScaled ? static_cast<int>(destX * invScale) : destX;
-      if (bmpX >= bitmap.getWidth()) bmpX = bitmap.getWidth() - 1;
+      int bmpX = isScaled ? static_cast<int>((static_cast<uint32_t>(destX) * invScale_fp) >> 16) : destX;
+      if (bmpX >= srcWidth) bmpX = srcWidth - 1;
 
-      // /4 → >>2; (bmpX * 2) % 8 → (bmpX & 3) << 1.  This loop runs ~452 ×
-      // destHeight per image — making the bit math explicit eliminates any
-      // chance of the compiler keeping a real divide instruction here on
-      // ESP32-C3 (no FPU; integer divide is microcoded and slower than
-      // shifts).
-      const uint8_t val = bitmapOutputRow_[bmpX >> 2] >> (6 - ((bmpX & 3) << 1)) & 0x3;
+      const uint8_t val = (row[bmpX >> 2] >> (6 - ((bmpX & 3) << 1))) & 0x3;
 
-      if (renderMode == BW && val < 3) {
-        plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, true, this);
-      } else if (renderMode == GRAYSCALE_MSB && (val == 1 || val == 2)) {
-        plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, false, this);
-      } else if (renderMode == GRAYSCALE_LSB && val == 1) {
-        plotPixelOptimized(frameBuffer, orientation, renderMode, screenX, screenY, false, this);
+      if (rmode == BW && val < 3) {
+        plotPixelOptimized(frameBuffer, orientation, rmode, screenX, screenY, true, this);
+      } else if (rmode == GRAYSCALE_MSB && (val == 1 || val == 2)) {
+        plotPixelOptimized(frameBuffer, orientation, rmode, screenX, screenY, false, this);
+      } else if (rmode == GRAYSCALE_LSB && val == 1) {
+        plotPixelOptimized(frameBuffer, orientation, rmode, screenX, screenY, false, this);
       }
     }
   }
