@@ -12,4 +12,7 @@ class PngToBmpConverter {
   // Quick preview mode: simple threshold instead of dithering (faster but lower quality)
   static bool pngFileToBmpStreamQuick(FsFile& pngFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight,
                                       const std::function<bool()>& shouldAbort = nullptr);
+  // Header-only peek: parses the IHDR chunk for width / height without
+  // decompressing pixel data — used by FB2 fast-mode image registration.
+  static bool peekDimensions(FsFile& pngFile, int& outWidth, int& outHeight);
 };

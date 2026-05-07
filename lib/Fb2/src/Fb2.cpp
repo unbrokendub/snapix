@@ -613,8 +613,78 @@ bool Fb2::generateCoverBmp(bool use1BitDithering) const {
   return success;
 }
 
+namespace {
+// Compute the scaled-fit output dimensions that a real decode would produce —
+// has to mirror what JpegToBmpConverter / PngToBmpConverter do internally so
+// the placeholder layout matches the eventual rendered image.
+void scaledFit(int srcW, int srcH, int maxW, int maxH, int& outW, int& outH) {
+  if (srcW <= 0 || srcH <= 0) {
+    outW = 0;
+    outH = 0;
+    return;
+  }
+  if (maxW <= 0 || maxH <= 0 || (srcW <= maxW && srcH <= maxH)) {
+    outW = srcW;
+    outH = srcH;
+    return;
+  }
+  const double sx = static_cast<double>(maxW) / srcW;
+  const double sy = static_cast<double>(maxH) / srcH;
+  const double scale = sx < sy ? sx : sy;
+  outW = static_cast<int>(srcW * scale);
+  outH = static_cast<int>(srcH * scale);
+  if (outW < 1) outW = 1;
+  if (outH < 1) outH = 1;
+}
+
+// Read BMP header at offsets 18/22 with absolute-value handling for the
+// negative-height (top-down DIB) flag JpegToBmpConverter / PngToBmpConverter
+// emit.  Returns true and fills outW/outH on success.
+bool readBmpDimensions(const std::string& bmpPath, uint16_t& outW, uint16_t& outH) {
+  FsFile bf;
+  if (!SdMan.openFileForRead("FB2", bmpPath, bf)) return false;
+  uint8_t hdr[26];
+  int got = 0;
+  {
+    snapix::spi::SharedBusLock lk;
+    got = bf.read(hdr, sizeof(hdr));
+  }
+  bf.close();
+  if (got != static_cast<int>(sizeof(hdr)) || hdr[0] != 'B' || hdr[1] != 'M') return false;
+  const int32_t w32 = static_cast<int32_t>(hdr[18]) | (static_cast<int32_t>(hdr[19]) << 8) |
+                      (static_cast<int32_t>(hdr[20]) << 16) | (static_cast<int32_t>(hdr[21]) << 24);
+  const int32_t h32 = static_cast<int32_t>(hdr[22]) | (static_cast<int32_t>(hdr[23]) << 8) |
+                      (static_cast<int32_t>(hdr[24]) << 16) | (static_cast<int32_t>(hdr[25]) << 24);
+  const int32_t aw = w32 < 0 ? -w32 : w32;
+  const int32_t ah = h32 < 0 ? -h32 : h32;
+  if (aw <= 0 || aw > 0xFFFF || ah <= 0 || ah > 0xFFFF) return false;
+  outW = static_cast<uint16_t>(aw);
+  outH = static_cast<uint16_t>(ah);
+  return true;
+}
+
+// Fully decode a pending JPEG / PNG file into the matching BMP.  Common path
+// shared between the synchronous fastMode=false and the BG worker.
+bool decodeOnePending(const std::string& pendingPath, bool isPng, const std::string& bmpPath, int maxBoxWidth,
+                      int maxBoxHeight, const std::function<bool()>& shouldAbort) {
+  FsFile srcFile;
+  if (!SdMan.openFileForRead("FB2", pendingPath, srcFile)) return false;
+  FsFile bmpFile;
+  if (!SdMan.openFileForWrite("FB2", bmpPath, bmpFile)) {
+    srcFile.close();
+    return false;
+  }
+  const bool ok =
+      isPng ? PngToBmpConverter::pngFileToBmpStreamQuick(srcFile, bmpFile, maxBoxWidth, maxBoxHeight, shouldAbort)
+            : JpegToBmpConverter::jpegFileToBmpStreamQuick(srcFile, bmpFile, maxBoxWidth, maxBoxHeight, shouldAbort);
+  srcFile.close();
+  bmpFile.close();
+  return ok;
+}
+}  // namespace
+
 bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint16_t& outWidth, uint16_t& outHeight,
-                     int maxBoxWidth, int maxBoxHeight) const {
+                     int maxBoxWidth, int maxBoxHeight, bool fastMode) const {
   if (binaryId.empty()) return false;
   auto it = binaryIndex_.find(binaryId);
   if (it == binaryIndex_.end()) {
@@ -627,143 +697,241 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
     return false;
   }
   const bool isPng = (entry.mimeType == 1);
+  const char* extDot = isPng ? ".png" : ".jpg";
 
   const std::string imagesDir = cachePath + "/images";
+  const std::string pendingDir = imagesDir + "/pending";
   const std::string bmpPath = imagesDir + "/" + binaryId + ".bmp";
   const std::string failPath = imagesDir + "/" + binaryId + ".failed";
-  // Single tmp filename — base64-decoded payload, format inferred from mimeType.
-  const std::string tmpSrcPath = imagesDir + "/" + binaryId + (isPng ? ".tmp.png" : ".tmp.jpg");
+  const std::string pendingPath = pendingDir + "/" + binaryId + extDot;
 
-  // Already cached (idempotent path).
+  // Already fully decoded (idempotent) — fast path for both modes.
   if (SdMan.exists(bmpPath.c_str())) {
-    FsFile bf;
-    if (SdMan.openFileForRead("FB2", bmpPath, bf)) {
-      uint8_t hdr[26];
-      int got = 0;
-      {
-        snapix::spi::SharedBusLock lk;
-        got = bf.read(hdr, sizeof(hdr));
-      }
-      bf.close();
-      if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
-        // BMP DIB header stores width/height as signed int32_t at offsets
-        // 18 / 22.  JpegToBmpConverter writes a NEGATIVE height to flag
-        // a top-down row order — read all 4 bytes and take the absolute
-        // value before clamping into uint16_t.  Reading just the low 2
-        // bytes used to interpret -699 (0xFFFFFD45) as 0xFD45 = 64837 px,
-        // which then cascaded into a giant ImageBlock and an abort().
-        const int32_t w32 = static_cast<int32_t>(hdr[18]) | (static_cast<int32_t>(hdr[19]) << 8) |
-                            (static_cast<int32_t>(hdr[20]) << 16) | (static_cast<int32_t>(hdr[21]) << 24);
-        const int32_t h32 = static_cast<int32_t>(hdr[22]) | (static_cast<int32_t>(hdr[23]) << 8) |
-                            (static_cast<int32_t>(hdr[24]) << 16) | (static_cast<int32_t>(hdr[25]) << 24);
-        const int32_t aw = w32 < 0 ? -w32 : w32;
-        const int32_t ah = h32 < 0 ? -h32 : h32;
-        if (aw > 0 && aw <= 0xFFFF && ah > 0 && ah <= 0xFFFF) {
-          outWidth = static_cast<uint16_t>(aw);
-          outHeight = static_cast<uint16_t>(ah);
-          outBmpPath = bmpPath;
-          return true;
-        }
-      }
+    if (readBmpDimensions(bmpPath, outWidth, outHeight)) {
+      outBmpPath = bmpPath;
+      return true;
     }
-    // Header read failed or absurd dimensions — fall through and re-decode.
+    // Header read failed / absurd dimensions — fall through and re-decode.
   }
 
-  // Previous attempt failed sentinel — don't retry the same JPEG decode every
-  // page render in case it's malformed / OOM-bait.
+  // Previous attempt failed sentinel — don't retry the same decode every
+  // page render in case the source is malformed / OOM-bait.
   if (SdMan.exists(failPath.c_str())) {
     return false;
   }
 
-  // Ensure target directory exists.
+  // Ensure target directories exist (cheap if they already do).
   if (!SdMan.exists(imagesDir.c_str())) {
     if (!SdMan.mkdir(imagesDir.c_str())) {
       LOG_ERR(TAG, "cacheImage: failed to create images dir: %s", imagesDir.c_str());
       return false;
     }
   }
-
-  // Step 1: stream-decode base64 chunk from the FB2 source into a temp file.
-  // The base64 decoder is format-agnostic — JPEG / PNG difference only matters
-  // at the BMP-conversion step.
-  if (!streamDecodeBase64ToJpegFile(filepath, entry.fileOffset, entry.byteLength, tmpSrcPath)) {
-    LOG_ERR(TAG, "cacheImage: base64 decode failed for id=%s", binaryId.c_str());
-    SdMan.remove(tmpSrcPath.c_str());
-    FsFile m;
-    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
-    return false;
+  if (!SdMan.exists(pendingDir.c_str())) {
+    if (!SdMan.mkdir(pendingDir.c_str())) {
+      LOG_ERR(TAG, "cacheImage: failed to create pending dir: %s", pendingDir.c_str());
+      return false;
+    }
   }
 
-  // Step 2: JPEG / PNG → BMP via the matching converter.  Quick mode trades
-  // dither quality for speed / RAM — acceptable on e-ink given the user's
-  // explicit "можно пожертвовать качеством картинок" tradeoff.
-  FsFile srcFile;
-  if (!SdMan.openFileForRead("FB2", tmpSrcPath, srcFile)) {
-    SdMan.remove(tmpSrcPath.c_str());
-    FsFile m;
-    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
-    return false;
+  // Step 1: stream-decode base64 to the pending file (idempotent — if the
+  // pending file already exists from a prior fast-mode call, reuse it).
+  if (!SdMan.exists(pendingPath.c_str())) {
+    if (!streamDecodeBase64ToJpegFile(filepath, entry.fileOffset, entry.byteLength, pendingPath)) {
+      LOG_ERR(TAG, "cacheImage: base64 decode failed for id=%s", binaryId.c_str());
+      SdMan.remove(pendingPath.c_str());
+      FsFile m;
+      if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+      return false;
+    }
   }
-  FsFile bmpFile;
-  if (!SdMan.openFileForWrite("FB2", bmpPath, bmpFile)) {
+
+  if (fastMode) {
+    // Step 2a (fast): peek dimensions from the source header without doing
+    // pixel decode — the BG worker will pick up the pending file later via
+    // decodePendingImages().  ImageBlock::render gracefully shows a "[Image]"
+    // placeholder while the BMP is missing.
+    FsFile srcFile;
+    if (!SdMan.openFileForRead("FB2", pendingPath, srcFile)) {
+      LOG_ERR(TAG, "cacheImage: failed to reopen pending %s", pendingPath.c_str());
+      return false;
+    }
+    int srcW = 0, srcH = 0;
+    const bool peekOk = isPng ? PngToBmpConverter::peekDimensions(srcFile, srcW, srcH)
+                              : JpegToBmpConverter::peekDimensions(srcFile, srcW, srcH);
     srcFile.close();
-    SdMan.remove(tmpSrcPath.c_str());
-    FsFile m;
-    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
-    return false;
+    if (!peekOk) {
+      LOG_ERR(TAG, "cacheImage: %s header peek failed for id=%s", isPng ? "PNG" : "JPEG", binaryId.c_str());
+      SdMan.remove(pendingPath.c_str());
+      FsFile m;
+      if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+      return false;
+    }
+    int outW = 0, outH = 0;
+    scaledFit(srcW, srcH, maxBoxWidth, maxBoxHeight, outW, outH);
+    if (outW <= 0 || outH <= 0 || outW > 0xFFFF || outH > 0xFFFF) {
+      SdMan.remove(pendingPath.c_str());
+      return false;
+    }
+    outWidth = static_cast<uint16_t>(outW);
+    outHeight = static_cast<uint16_t>(outH);
+    outBmpPath = bmpPath;  // Will exist later, after decodePendingImages() runs.
+    LOG_INF(TAG, "cacheImage[fast]: registered %s src=%dx%d -> %dx%d (BMP pending)", binaryId.c_str(), srcW, srcH, outW,
+            outH);
+    return true;
   }
 
-  const bool ok = isPng ? PngToBmpConverter::pngFileToBmpStreamQuick(srcFile, bmpFile, maxBoxWidth, maxBoxHeight, nullptr)
-                        : JpegToBmpConverter::jpegFileToBmpStreamQuick(srcFile, bmpFile, maxBoxWidth, maxBoxHeight,
-                                                                       nullptr);
-  srcFile.close();
-  bmpFile.close();
-  SdMan.remove(tmpSrcPath.c_str());
-
-  if (!ok) {
+  // Step 2b (sync): full pixel decode.
+  if (!decodeOnePending(pendingPath, isPng, bmpPath, maxBoxWidth, maxBoxHeight, nullptr)) {
     LOG_ERR(TAG, "cacheImage: %s decode failed for id=%s", isPng ? "PNG" : "JPEG", binaryId.c_str());
     SdMan.remove(bmpPath.c_str());
+    SdMan.remove(pendingPath.c_str());
     FsFile m;
     if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
     return false;
   }
+  SdMan.remove(pendingPath.c_str());
 
   // Step 3: read back BMP dimensions for the caller (ImageBlock needs w/h).
-  // Same signed int32_t + abs read as the cache-hit path above.
-  FsFile bf;
-  if (SdMan.openFileForRead("FB2", bmpPath, bf)) {
-    uint8_t hdr[26];
-    int got = 0;
-    {
-      snapix::spi::SharedBusLock lk;
-      got = bf.read(hdr, sizeof(hdr));
-    }
-    bf.close();
-    if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
-      const int32_t w32 = static_cast<int32_t>(hdr[18]) | (static_cast<int32_t>(hdr[19]) << 8) |
-                          (static_cast<int32_t>(hdr[20]) << 16) | (static_cast<int32_t>(hdr[21]) << 24);
-      const int32_t h32 = static_cast<int32_t>(hdr[22]) | (static_cast<int32_t>(hdr[23]) << 8) |
-                          (static_cast<int32_t>(hdr[24]) << 16) | (static_cast<int32_t>(hdr[25]) << 24);
-      const int32_t aw = w32 < 0 ? -w32 : w32;
-      const int32_t ah = h32 < 0 ? -h32 : h32;
-      if (aw > 0 && aw <= 0xFFFF && ah > 0 && ah <= 0xFFFF) {
-        outWidth = static_cast<uint16_t>(aw);
-        outHeight = static_cast<uint16_t>(ah);
-        outBmpPath = bmpPath;
-        LOG_INF(TAG, "cacheImage: decoded %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
-                static_cast<unsigned>(outWidth), static_cast<unsigned>(outHeight));
-        return true;
-      }
-      LOG_ERR(TAG, "cacheImage: BMP %s has absurd dimensions w=%ld h=%ld", bmpPath.c_str(),
-              static_cast<long>(w32), static_cast<long>(h32));
-    }
+  if (readBmpDimensions(bmpPath, outWidth, outHeight)) {
+    outBmpPath = bmpPath;
+    LOG_INF(TAG, "cacheImage: decoded %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
+            static_cast<unsigned>(outWidth), static_cast<unsigned>(outHeight));
+    return true;
   }
 
   // BMP exists but unreadable header — give up and mark failed.
+  LOG_ERR(TAG, "cacheImage: BMP %s has unreadable / absurd dimensions", bmpPath.c_str());
   SdMan.remove(bmpPath.c_str());
   FsFile m;
   if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
   return false;
+}
+
+bool Fb2::hasPendingImages() const {
+  const std::string pendingDir = cachePath + "/images/pending";
+  if (!SdMan.exists(pendingDir.c_str())) return false;
+  // Open the directory and check for any entry — directories with no entries
+  // are treated as "no pending decodes".
+  FsFile dir;
+  if (!SdMan.openFileForRead("FB2", pendingDir, dir)) return false;
+  if (!dir.isDirectory()) {
+    dir.close();
+    return false;
+  }
+  FsFile entry;
+  bool found = false;
+  {
+    snapix::spi::SharedBusLock lk;
+    while (entry.openNext(&dir, O_RDONLY)) {
+      char nameBuf[64];
+      const size_t n = entry.getName(nameBuf, sizeof(nameBuf));
+      entry.close();
+      if (n == 0) continue;
+      // Skip "." and ".." entries (some FAT layers expose them).
+      if (nameBuf[0] == '.' && (nameBuf[1] == '\0' || (nameBuf[1] == '.' && nameBuf[2] == '\0'))) continue;
+      // Match either ".jpg" or ".png" suffix.
+      const size_t len = strnlen(nameBuf, sizeof(nameBuf));
+      if (len < 4) continue;
+      const char* ext = nameBuf + len - 4;
+      if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".png") == 0) {
+        found = true;
+        break;
+      }
+    }
+  }
+  dir.close();
+  return found;
+}
+
+int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
+  const std::string imagesDir = cachePath + "/images";
+  const std::string pendingDir = imagesDir + "/pending";
+  if (!SdMan.exists(pendingDir.c_str())) return 0;
+
+  // Mirrors the maxBox used during fast-mode registration.  Reader-side viewport
+  // is always 452×699 in current themes; using the same constraint here ensures
+  // the eventual BMP matches the placeholder dimensions stored on the page.
+  // (If the viewport ever becomes user-configurable, this should pick the value
+  // up from the same source as Fb2Parser; for now they're both hard-wired.)
+  constexpr int kMaxBoxWidth = 452;
+  constexpr int kMaxBoxHeight = 699;
+
+  // Snapshot the directory listing first so we don't hold the dir handle open
+  // across a multi-second BMP decode (which would block any sibling SD ops).
+  std::vector<std::string> pendingFiles;
+  pendingFiles.reserve(8);
+  {
+    FsFile dir;
+    if (!SdMan.openFileForRead("FB2", pendingDir, dir)) return 0;
+    if (!dir.isDirectory()) {
+      dir.close();
+      return 0;
+    }
+    FsFile entry;
+    snapix::spi::SharedBusLock lk;
+    while (entry.openNext(&dir, O_RDONLY)) {
+      char nameBuf[96];
+      const size_t n = entry.getName(nameBuf, sizeof(nameBuf));
+      entry.close();
+      if (n == 0) continue;
+      if (nameBuf[0] == '.' && (nameBuf[1] == '\0' || (nameBuf[1] == '.' && nameBuf[2] == '\0'))) continue;
+      const size_t len = strnlen(nameBuf, sizeof(nameBuf));
+      if (len < 4) continue;
+      const char* ext = nameBuf + len - 4;
+      if (strcmp(ext, ".jpg") != 0 && strcmp(ext, ".png") != 0) continue;
+      pendingFiles.emplace_back(nameBuf);
+    }
+    dir.close();
+  }
+
+  int decoded = 0;
+  for (const auto& name : pendingFiles) {
+    if (shouldAbort && shouldAbort()) {
+      LOG_INF(TAG, "decodePendingImages: aborted after %d image(s)", decoded);
+      break;
+    }
+
+    const size_t len = name.size();
+    const bool isPng = (len >= 4 && name.compare(len - 4, 4, ".png") == 0);
+    const std::string binaryId = name.substr(0, len - 4);
+    const std::string pendingPath = pendingDir + "/" + name;
+    const std::string bmpPath = imagesDir + "/" + binaryId + ".bmp";
+    const std::string failPath = imagesDir + "/" + binaryId + ".failed";
+
+    // Skip if BMP somehow already exists (idempotent).
+    if (SdMan.exists(bmpPath.c_str())) {
+      SdMan.remove(pendingPath.c_str());
+      continue;
+    }
+
+    if (decodeOnePending(pendingPath, isPng, bmpPath, kMaxBoxWidth, kMaxBoxHeight, shouldAbort)) {
+      SdMan.remove(pendingPath.c_str());
+      ++decoded;
+      uint16_t w = 0, h = 0;
+      if (readBmpDimensions(bmpPath, w, h)) {
+        LOG_INF(TAG, "decodePendingImages: %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
+                static_cast<unsigned>(w), static_cast<unsigned>(h));
+      } else {
+        LOG_INF(TAG, "decodePendingImages: %s -> %s (dim read failed)", binaryId.c_str(), bmpPath.c_str());
+      }
+    } else if (shouldAbort && shouldAbort()) {
+      // Decoder bailed because the worker is being preempted (e.g. user pressed
+      // a button).  Keep the pending file so we resume on the next BG sweep —
+      // do NOT write a .failed marker, that would permanently skip this image.
+      LOG_INF(TAG, "decodePendingImages: aborted during %s (id=%s) — pending kept", isPng ? "PNG" : "JPEG",
+              binaryId.c_str());
+      SdMan.remove(bmpPath.c_str());  // partial / truncated BMP, throw away
+      break;
+    } else {
+      LOG_ERR(TAG, "decodePendingImages: %s decode failed (id=%s)", isPng ? "PNG" : "JPEG", binaryId.c_str());
+      SdMan.remove(bmpPath.c_str());
+      SdMan.remove(pendingPath.c_str());
+      FsFile m;
+      if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+    }
+  }
+  return decoded;
 }
 
 std::string Fb2::getThumbBmpPath() const { return cachePath + "/thumb.bmp"; }

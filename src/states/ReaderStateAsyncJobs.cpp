@@ -223,6 +223,31 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
       }
     }
 
+    // FB2 inline-image decode pass.  Fb2Parser registers <image>s in fast mode
+    // (header peek only) so the page-turn doesn't stall behind a 3-8 s JPEG
+    // decode.  We pick up the resulting pending/<id>.{jpg,png} files here and
+    // materialise them into BMPs.  Each decoded image triggers a one-shot
+    // repaint so the placeholder is replaced once the BMP exists.
+    if (type == ContentType::Fb2 && !(shouldAbort && shouldAbort())) {
+      auto* fb2Provider = coreRef.content.asFb2();
+      if (fb2Provider && fb2Provider->getFb2() && fb2Provider->getFb2()->hasPendingImages()) {
+        const int decoded = fb2Provider->getFb2()->decodePendingImages(shouldAbort);
+        if (decoded > 0) {
+          didBackgroundWork = true;
+          // Force a current-page repaint so newly decoded images replace the
+          // placeholder on the visible page (if any).  Reuses the same
+          // pending-refresh slot as the EPUB cache rewrite path.
+          pendingBackgroundEpubRefresh_ = true;
+          pendingBackgroundEpubRefreshSpine_ = request.position.currentSpineIndex;
+          pendingBackgroundEpubRefreshPage_ = request.position.currentSectionPage < 0
+                                                  ? 0
+                                                  : request.position.currentSectionPage;
+          LOG_INF(TAG, "[CACHE] decoded %d pending FB2 image(s) — scheduled repaint spine=%d page=%d", decoded,
+                  request.position.currentSpineIndex, request.position.currentSectionPage);
+        }
+      }
+    }
+
     workerDidBackgroundWork = didBackgroundWork;
   });
 

@@ -381,3 +381,37 @@ bool PngToBmpConverter::pngFileToBmpStreamQuick(FsFile& pngFile, Print& bmpOut, 
                                                 int targetMaxHeight, const std::function<bool()>& shouldAbort) {
   return pngFileToBmpStreamInternal(pngFile, bmpOut, targetMaxWidth, targetMaxHeight, true, shouldAbort);
 }
+
+// PNG header is fixed-format: 8-byte signature, then IHDR chunk at offset 8
+// with width / height as big-endian uint32 at file offsets 16 and 20.
+// We bypass pngle entirely — no decompression, no callbacks, ~20 bytes read.
+bool PngToBmpConverter::peekDimensions(FsFile& pngFile, int& outWidth, int& outHeight) {
+  outWidth = 0;
+  outHeight = 0;
+  if (!pngFile) return false;
+
+  uint8_t hdr[24];
+  int got = 0;
+  {
+    snapix::spi::SharedBusLock lk;
+    if (!pngFile.seek(0)) return false;
+    got = pngFile.read(hdr, sizeof(hdr));
+  }
+  if (got != static_cast<int>(sizeof(hdr))) return false;
+
+  // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+  static const uint8_t kPngSig[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+  for (int i = 0; i < 8; ++i) {
+    if (hdr[i] != kPngSig[i]) return false;
+  }
+  // IHDR chunk type at hdr[12..15] should be "IHDR"
+  if (hdr[12] != 'I' || hdr[13] != 'H' || hdr[14] != 'D' || hdr[15] != 'R') return false;
+  const uint32_t w = (static_cast<uint32_t>(hdr[16]) << 24) | (static_cast<uint32_t>(hdr[17]) << 16) |
+                     (static_cast<uint32_t>(hdr[18]) << 8) | static_cast<uint32_t>(hdr[19]);
+  const uint32_t h = (static_cast<uint32_t>(hdr[20]) << 24) | (static_cast<uint32_t>(hdr[21]) << 16) |
+                     (static_cast<uint32_t>(hdr[22]) << 8) | static_cast<uint32_t>(hdr[23]);
+  if (w == 0 || h == 0 || w > 0x7FFF || h > 0x7FFF) return false;
+  outWidth = static_cast<int>(w);
+  outHeight = static_cast<int>(h);
+  return true;
+}

@@ -517,7 +517,14 @@ void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const
 
     std::string bmpPath;
     uint16_t w = 0, h = 0;
-    if (!self->fb2_->cacheImage(binaryId, bmpPath, w, h, maxW, maxH) || w == 0 || h == 0) {
+    // Fast mode: registers the binary, peeks header for dims, but defers the
+    // (slow) JPEG / PNG → BMP pixel decode to a BG worker.  Pagination needs
+    // accurate dims here, so we still pay the header-peek cost; decoded BMP
+    // appears later via Fb2::decodePendingImages() and ImageBlock::render
+    // shows a placeholder ("[Image]") until then.  The trade-off keeps the
+    // page-turn under the user's perceptual threshold instead of stalling
+    // for 3-8 s per image.
+    if (!self->fb2_->cacheImage(binaryId, bmpPath, w, h, maxW, maxH, /*fastMode*/ true) || w == 0 || h == 0) {
       LOG_DBG(TAG, "image <%s>: cache miss, falling back to skip", binaryId.c_str());
       return;
     }

@@ -779,3 +779,40 @@ bool JpegToBmpConverter::jpegFileToBmpStreamQuick(FsFile& jpegFile, Print& bmpOu
                                                   int targetMaxHeight, const std::function<bool()>& shouldAbort) {
   return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, false, true, shouldAbort);
 }
+
+// Header-only peek: just enough work to extract image dimensions.  picojpeg's
+// pjpeg_decode_init reads up to the SOF marker and returns image_info — it
+// does NOT decode any pixels, so this is an order of magnitude cheaper than
+// jpegFileToBmpStream*.
+bool JpegToBmpConverter::peekDimensions(FsFile& jpegFile, int& outWidth, int& outHeight) {
+  outWidth = 0;
+  outHeight = 0;
+
+  if (!jpegFile) return false;
+
+  // Reset to start of file so peek is idempotent (callers may have read header bytes).
+  {
+    snapix::spi::SharedBusLock lk;
+    if (!jpegFile.seek(0)) return false;
+  }
+
+  // Reject progressive / arithmetic-coded JPEGs early — picojpeg can't handle them.
+  if (isUnsupportedJpeg(jpegFile)) {
+    LOG_DBG(TAG, "peekDimensions: unsupported JPEG (progressive / arithmetic)");
+    return false;
+  }
+
+  JpegReadContext context = {.file = jpegFile, .bufferPos = 0, .bufferFilled = 0};
+  pjpeg_image_info_t imageInfo;
+  const unsigned char status = pjpeg_decode_init(&imageInfo, jpegReadCallback, &context, 0);
+  if (status != 0) {
+    LOG_DBG(TAG, "peekDimensions: decode_init failed status=%d", status);
+    return false;
+  }
+  if (imageInfo.m_width == 0 || imageInfo.m_height == 0) {
+    return false;
+  }
+  outWidth = imageInfo.m_width;
+  outHeight = imageInfo.m_height;
+  return true;
+}

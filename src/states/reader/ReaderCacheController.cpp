@@ -764,6 +764,18 @@ BackgroundCachePlan ReaderCacheController::planBackgroundCacheWork(Core& core) {
   }
 
   if (type != ContentType::Epub) {
+    // FB2 with deferred image decode: pending JPEGs / PNGs left over from a
+    // prior cache pass need a worker wake-up even when the page cache itself
+    // is complete.  Without this, decodePendingImages() would never run for
+    // a FB2 book whose cache finished before its images.
+    if (type == ContentType::Fb2) {
+      const Fb2Provider* fb2Provider = core.content.asFb2();
+      if (fb2Provider && fb2Provider->getFb2() && fb2Provider->getFb2()->hasPendingImages()) {
+        plan.shouldStart = true;
+        plan.reason = BackgroundCacheWakeReason::CurrentCachePartial;
+        plan.candidateSpine = activeSpine;
+      }
+    }
     return plan;
   }
 

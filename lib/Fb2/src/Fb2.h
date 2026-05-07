@@ -11,6 +11,7 @@
 
 #include <climits>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -173,12 +174,34 @@ class Fb2 {
    *
    * @param binaryId       The <binary id> referenced by an <image l:href="#id"/>
    * @param outBmpPath     On success: filesystem path to the cached BMP
-   * @param outWidth       On success: BMP width in pixels
-   * @param outHeight      On success: BMP height in pixels
+   * @param outWidth       On success: BMP width (or scaled-fit width in fast mode)
+   * @param outHeight      On success: BMP height (or scaled-fit height in fast mode)
    * @param maxBoxWidth    Output BMP scaled to fit at most this many pixels wide
    * @param maxBoxHeight   ...and at most this many pixels tall
+   * @param fastMode       If true: stream base64 to a `pending/<id>.<ext>` file
+   *                       and peek the JPEG / PNG header for dimensions, but
+   *                       skip the (slow) pixel decode.  outBmpPath points at
+   *                       the *expected* BMP location — the file does not yet
+   *                       exist; ImageBlock::render shows a placeholder until
+   *                       decodePendingImages() materialises it.  Default
+   *                       false preserves the historical synchronous behavior
+   *                       (used by cover / thumbnail paths).
    * @return true on success, false if the binary is missing / cannot be decoded
    */
   bool cacheImage(const std::string& binaryId, std::string& outBmpPath, uint16_t& outWidth, uint16_t& outHeight,
-                  int maxBoxWidth, int maxBoxHeight) const;
+                  int maxBoxWidth, int maxBoxHeight, bool fastMode = false) const;
+
+  /**
+   * BG worker entry point: scan the `<cachePath>/images/pending/` directory and
+   * decode each pending JPEG / PNG into the matching `<id>.bmp` next to it.
+   * Idempotent and abort-able — call repeatedly from a low-priority task.
+   *
+   * @param shouldAbort  Polled between images; returning true stops the worker.
+   * @return number of images decoded during this invocation.
+   */
+  int decodePendingImages(const std::function<bool()>& shouldAbort = nullptr) const;
+
+  // Predicate: are there pending decodes left on disk?  Cheap directory check
+  // — call from the reader's idle loop to decide whether to spawn a BG worker.
+  bool hasPendingImages() const;
 };
