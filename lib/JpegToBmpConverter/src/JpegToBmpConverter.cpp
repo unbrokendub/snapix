@@ -888,7 +888,21 @@ bool JpegToBmpConverter::jpegFileToBmpStreamPreview(FsFile& jpegFile, Print& bmp
       } else {
         gray = rgbToGray(imageInfo.m_pMCUBufR[0], imageInfo.m_pMCUBufG[0], imageInfo.m_pMCUBufB[0]);
       }
-      const uint8_t twoBit = quantizeSimple(adjustPixel(gray));
+      // Bayer 4x4 ordered dither.  picojpeg reduce=1 returns DC coefficients
+      // (the average colour of each 8x8 source block) — for typical book
+      // illustrations on light paper that biases hard toward bright values,
+      // and any flat-threshold quantisation would render almost everything
+      // as val=3 (pure white).  The renderer's BW mode skips val==3 pixels
+      // entirely, so we'd end up drawing nothing.  Bayer mixes 0/3 pairs
+      // proportionally to brightness so midtones stipple visibly when
+      // upscaled ~8× by drawBitmap.  No adjustPixel here — preview should
+      // reflect raw image content, not the brightness-boosted full path.
+      static const uint8_t kBayer4[4][4] = {{16,  144, 48,  176},
+                                            {208, 80,  240, 112},
+                                            {64,  192, 32,  160},
+                                            {255, 128, 224, 96}};
+      const uint8_t threshold = kBayer4[mcuY & 3][mcuX & 3];
+      const uint8_t twoBit = (gray < threshold) ? 0 : 3;
       const int byteIdx = mcuX >> 2;
       const int bitOff = 6 - ((mcuX & 3) << 1);
       outRow[byteIdx] |= (twoBit << bitOff);
