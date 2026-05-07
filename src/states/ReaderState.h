@@ -146,10 +146,14 @@ class ReaderState : public State {
   struct SectionPageMetric {
     uint16_t pages = 0;
     bool exact = false;
+    uint32_t byteSize = 0;  // raw section size in source bytes — kept so the
+                            // bytes-per-page calibration can be re-derived as
+                            // more sections become exact during a session
   };
   void invalidateGlobalPageMetrics();
   void initializeGlobalPageMetrics(Core& core, int currentSectionTotalPages, bool currentSectionIsPartial);
   void updateGlobalPageMetrics(Core& core, int currentSectionTotalPages, bool currentSectionIsPartial);
+  void recalibrateGlobalPageEstimates();
   void recomputeGlobalPageMetricTotal();
   GlobalPageMetrics resolveGlobalPageMetrics(Core& core, int currentSectionTotalPages, bool currentSectionIsPartial);
 

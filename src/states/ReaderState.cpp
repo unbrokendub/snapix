@@ -247,11 +247,14 @@ void ReaderState::initializeGlobalPageMetrics(Core& core, const int currentSecti
     }
 
     const size_t itemSize = itemSizes[static_cast<size_t>(spineIndex)];
+    auto& metric = globalSectionPageMetrics_[static_cast<size_t>(spineIndex)];
+    metric.byteSize = static_cast<uint32_t>(itemSize);
     if (pages > 0) {
-      auto& metric = globalSectionPageMetrics_[static_cast<size_t>(spineIndex)];
       metric.pages = pages;
       metric.exact = exact;
-      if (itemSize > 0) {
+      if (itemSize > 0 && exact) {
+        // Calibrate from EXACT sections only — partial caches are still
+        // growing and would skew bytes-per-page upward.
         calibrationBytes += itemSize;
         calibrationPages += pages;
       }
@@ -293,11 +296,13 @@ void ReaderState::updateGlobalPageMetrics(Core& core, const int currentSectionTo
 
   auto& metric = globalSectionPageMetrics_[static_cast<size_t>(currentSpineIndex_)];
   const auto currentPages = static_cast<uint16_t>(std::max(1, currentSectionTotalPages));
+  bool becameExact = false;
   bool changed = false;
 
   if (!currentSectionIsPartial) {
     if (!metric.exact || metric.pages != currentPages) {
       metric.pages = currentPages;
+      if (!metric.exact) becameExact = true;
       metric.exact = true;
       changed = true;
     }
@@ -306,9 +311,48 @@ void ReaderState::updateGlobalPageMetrics(Core& core, const int currentSectionTo
     changed = true;
   }
 
-  if (changed) {
+  if (becameExact) {
+    // A new section just finished — its (byteSize, pages) pair tightens the
+    // bytes-per-page calibration.  Re-estimate the still-partial sections so
+    // the global total reflects the improved sample size and recompute total.
+    recalibrateGlobalPageEstimates();
+  } else if (changed) {
     recomputeGlobalPageMetricTotal();
   }
+}
+
+void ReaderState::recalibrateGlobalPageEstimates() {
+  if (!globalSectionPageMetricsInitialized_) return;
+
+  size_t calibBytes = 0;
+  uint32_t calibPages = 0;
+  for (const auto& m : globalSectionPageMetrics_) {
+    if (m.exact && m.byteSize > 0 && m.pages > 0) {
+      calibBytes += m.byteSize;
+      calibPages += m.pages;
+    }
+  }
+  if (calibPages == 0) {
+    // No exact sections yet — leave existing estimates, just recompute total.
+    recomputeGlobalPageMetricTotal();
+    return;
+  }
+
+  const size_t bytesPerPage = std::max<size_t>(256, calibBytes / calibPages);
+
+  // Re-estimate non-exact sections using the freshly calibrated ratio.  This
+  // is what fixes "approximate total never converges to reality" — every time
+  // a section becomes exact, the remaining estimates rebase on the latest
+  // bytes-per-page from the user's actual font / spacing settings.
+  for (auto& m : globalSectionPageMetrics_) {
+    if (m.exact || m.byteSize == 0) continue;
+    const uint16_t newEstimate = estimatePagesForBytes(m.byteSize, bytesPerPage);
+    if (newEstimate != m.pages && newEstimate > 0) {
+      m.pages = newEstimate;
+    }
+  }
+
+  recomputeGlobalPageMetricTotal();
 }
 
 ReaderState::GlobalPageMetrics ReaderState::resolveGlobalPageMetrics(Core& core, const int currentSectionTotalPages,
