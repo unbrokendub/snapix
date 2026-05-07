@@ -850,75 +850,92 @@ bool JpegToBmpConverter::jpegFileToBmpStreamPreview(FsFile& jpegFile, Print& bmp
     return false;
   }
   if (imageInfo.m_width == 0 || imageInfo.m_height == 0 || imageInfo.m_MCUSPerRow == 0 ||
-      imageInfo.m_MCUSPerCol == 0) {
+      imageInfo.m_MCUSPerCol == 0 || imageInfo.m_MCUWidth == 0 || imageInfo.m_MCUHeight == 0) {
     return false;
   }
 
-  // Output dims = MCUs per row / col (one output pixel per MCU).
-  const int outW = imageInfo.m_MCUSPerRow;
-  const int outH = imageInfo.m_MCUSPerCol;
+  // For typical YH2V2 JPEGs the MCU is 16×16 = 4 Y blocks, and reduce mode
+  // writes one valid pixel per block at byte offsets 0, 64, 128, 192 of the
+  // R/G/B MCU buffers (see picojpeg.c:1847).  Extracting all of them gives
+  // 2× linear resolution vs sampling only [0] — turns a 31×26 ant farm into
+  // a 62×52 preview that's actually recognisable.  YH2V1 / YH1V2 / YH1V1 /
+  // GRAYSCALE work the same way with 1 or 2 blocks per axis.
+  const int blocksPerMCUx = imageInfo.m_MCUWidth >> 3;   // 1 or 2
+  const int blocksPerMCUy = imageInfo.m_MCUHeight >> 3;  // 1 or 2
+  const int outW = imageInfo.m_MCUSPerRow * blocksPerMCUx;
+  const int outH = imageInfo.m_MCUSPerCol * blocksPerMCUy;
+  if (outW <= 0 || outH <= 0 || outW > 4096 || outH > 4096) {
+    return false;
+  }
   const int bytesPerRow = ((outW * 2 + 31) / 32) * 4;
 
-  uint8_t* outRow = static_cast<uint8_t*>(malloc(bytesPerRow));
-  if (!outRow) {
-    LOG_ERR(TAG, "preview: malloc(%d) failed", bytesPerRow);
+  // We need the full preview row buffer alive across all MCUs in a row so
+  // their multiple block contributions can be packed before flushing.
+  // bytesPerRow × blocksPerMCUy buffers because YH*V2 MCUs span 2 output
+  // rows and we don't want to decode each MCU twice.
+  const int rowsPerMcuBand = blocksPerMCUy;
+  uint8_t* outRows = static_cast<uint8_t*>(malloc(static_cast<size_t>(bytesPerRow) * rowsPerMcuBand));
+  if (!outRows) {
+    LOG_ERR(TAG, "preview: malloc(%d) failed", bytesPerRow * rowsPerMcuBand);
     return false;
   }
 
   writeBmpHeader2bit(bmpOut, outW, outH);
 
+  // Standard 4×4 Bayer ordered-dither matrix scaled to 0..255.  Picks a
+  // different threshold per output pixel so DC values that cluster near
+  // bright still produce visible black stipples instead of vanishing.
+  static const uint8_t kBayer4[4][4] = {{16,  144, 48,  176},
+                                        {208, 80,  240, 112},
+                                        {64,  192, 32,  160},
+                                        {255, 128, 224, 96}};
+
   bool ok = true;
-  for (int mcuY = 0; mcuY < outH && ok; mcuY++) {
-    memset(outRow, 0, bytesPerRow);
-    for (int mcuX = 0; mcuX < outW; mcuX++) {
+  for (int mcuY = 0; mcuY < imageInfo.m_MCUSPerCol && ok; mcuY++) {
+    memset(outRows, 0, static_cast<size_t>(bytesPerRow) * rowsPerMcuBand);
+    bool earlyEnd = false;
+    for (int mcuX = 0; mcuX < imageInfo.m_MCUSPerRow; mcuX++) {
       const unsigned char status = pjpeg_decode_mcu();
       if (status != 0) {
         if (status == PJPG_NO_MORE_BLOCKS) {
-          // End of bitstream — pad remaining cells with white and bail out
-          // of both loops cleanly.
+          earlyEnd = true;
           break;
         }
         LOG_ERR(TAG, "preview: decode_mcu err=%d at mcu=%d,%d", status, mcuX, mcuY);
         ok = false;
         break;
       }
-      uint8_t gray;
-      if (imageInfo.m_comps == 1) {
-        gray = imageInfo.m_pMCUBufR[0];
-      } else {
-        gray = rgbToGray(imageInfo.m_pMCUBufR[0], imageInfo.m_pMCUBufG[0], imageInfo.m_pMCUBufB[0]);
+      // Emit blocksPerMCUx × blocksPerMCUy pixels for this MCU.
+      for (int by = 0; by < blocksPerMCUy; by++) {
+        for (int bx = 0; bx < blocksPerMCUx; bx++) {
+          const int blockOffset = by * 128 + bx * 64;
+          uint8_t gray;
+          if (imageInfo.m_comps == 1) {
+            gray = imageInfo.m_pMCUBufR[blockOffset];
+          } else {
+            gray = rgbToGray(imageInfo.m_pMCUBufR[blockOffset], imageInfo.m_pMCUBufG[blockOffset],
+                             imageInfo.m_pMCUBufB[blockOffset]);
+          }
+          const int outX = mcuX * blocksPerMCUx + bx;
+          const uint8_t threshold = kBayer4[(mcuY * blocksPerMCUy + by) & 3][outX & 3];
+          const uint8_t twoBit = (gray < threshold) ? 0 : 3;
+          uint8_t* dst = outRows + by * bytesPerRow;
+          dst[outX >> 2] |= (twoBit << (6 - ((outX & 3) << 1)));
+        }
       }
-      // Bayer 4x4 ordered dither.  picojpeg reduce=1 returns DC coefficients
-      // (the average colour of each 8x8 source block) — for typical book
-      // illustrations on light paper that biases hard toward bright values,
-      // and any flat-threshold quantisation would render almost everything
-      // as val=3 (pure white).  The renderer's BW mode skips val==3 pixels
-      // entirely, so we'd end up drawing nothing.  Bayer mixes 0/3 pairs
-      // proportionally to brightness so midtones stipple visibly when
-      // upscaled ~8× by drawBitmap.  No adjustPixel here — preview should
-      // reflect raw image content, not the brightness-boosted full path.
-      static const uint8_t kBayer4[4][4] = {{16,  144, 48,  176},
-                                            {208, 80,  240, 112},
-                                            {64,  192, 32,  160},
-                                            {255, 128, 224, 96}};
-      const uint8_t threshold = kBayer4[mcuY & 3][mcuX & 3];
-      const uint8_t twoBit = (gray < threshold) ? 0 : 3;
-      const int byteIdx = mcuX >> 2;
-      const int bitOff = 6 - ((mcuX & 3) << 1);
-      outRow[byteIdx] |= (twoBit << bitOff);
     }
     {
       snapix::spi::SharedBusLock lk;
-      if (!lk || bmpOut.write(outRow, bytesPerRow) != static_cast<size_t>(bytesPerRow)) {
+      if (!lk || bmpOut.write(outRows, static_cast<size_t>(bytesPerRow) * rowsPerMcuBand) !=
+                     static_cast<size_t>(bytesPerRow) * rowsPerMcuBand) {
         ok = false;
       }
     }
-    // Yield between MCU rows so a concurrent display refresh doesn't starve
-    // — preview is on the user's perceived-latency path.
+    if (earlyEnd) break;
     if ((mcuY & 0x7) == 0) taskYIELD();
   }
 
-  free(outRow);
+  free(outRows);
   if (ok) {
     LOG_INF(TAG, "preview: %dx%d decoded", outW, outH);
   }
