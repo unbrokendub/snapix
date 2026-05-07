@@ -549,7 +549,11 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
   const int screenWidth = getScreenWidth();
   const int screenHeight = getScreenHeight();
   const bool topDown = bitmap.isTopDown();
-  const bool fastBitmapBpp = (bitmap.getBpp() == 2);  // controls preloaded fast path
+  const int srcBpp = bitmap.getBpp();
+  // Fast path covers 1-bit (post-v2.0.38 default) and 2-bit (legacy + EPUB
+  // covers).  Both unpack from the preloaded row directly without going
+  // through Bitmap::readRow's palette + dither pipeline.
+  const bool fastBitmapBpp = (srcBpp == 1 || srcBpp == 2);
   const RenderMode rmode = renderMode;
 
   // Try to slurp the entire pixel data off SD into RAM with a single
@@ -557,10 +561,23 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
   // decode, the SD card sits in a slow recovery mode where each individual
   // file.read() pays a 10-50 ms latency — so 366 row-reads per render =
   // 5+ s of pure bus wait.  One big read pays that penalty once.  Falls
-  // back to the streaming readRow() path if the heap can't accommodate
-  // (typical 50 KB BMP needs ~50 KB contiguous; if the largest free block
-  // is below that we just take the slower path).
+  // back to the streaming readRow() path if the heap can't accommodate.
+  // After v2.0.38's 1-bit-at-target-dims redesign, BMP files are typically
+  // ~30 KB, easy fit on a fragmented heap.
   const bool preloaded = const_cast<Bitmap&>(bitmap).preloadAllRows();
+
+  // CRITICAL: preloadAllRows() advances the file cursor past the pixel
+  // data, so if we *don't* take the preloaded fast path we have to seek
+  // back to the start of the pixel block before readRow() can stream
+  // anything off SD.  Without this rewind, the very first readRow call
+  // would return ShortReadRow because file.read sees EOF — exactly the
+  // "Failed to read row 0 from bitmap" symptom user hit on a 1-bit
+  // preloaded BMP that fell through to the streaming path because
+  // fastBitmapBpp was hardcoded to bpp==2 only.
+  const bool useStreamingPath = !(preloaded && fastBitmapBpp);
+  if (useStreamingPath && preloaded) {
+    bitmap.rewindToData();
+  }
 
   int lastSrcY = -1;
   for (int destY = 0; destY < destHeight; destY++) {
@@ -571,12 +588,8 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
     int srcY = isScaled ? static_cast<int>((static_cast<uint32_t>(destY) * invScale_fp) >> 16) : destY;
     if (srcY >= srcHeight) srcY = srcHeight - 1;
 
-    // Prepare the source row in bitmapOutputRow_ (the unpacked-then-repacked
-    // 2-bit destination buffer that the inner loop indexes).  In the
-    // identity-palette 2-bit fast path Bitmap::readRow degenerates to a
-    // memcpy, but we can short-circuit it entirely here when the bitmap is
-    // preloaded AND happens to be a 2-bit BMP — just point at the preloaded
-    // row directly and skip the readRow call.
+    // Source row pointer — either the preloaded buffer (fast path) or the
+    // streaming row buffer that Bitmap::readRow fills from SD.
     const uint8_t* srcRow = nullptr;
     if (preloaded && fastBitmapBpp) {
       srcRow = bitmap.preloadedRow(srcY);
@@ -597,7 +610,17 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       int bmpX = isScaled ? static_cast<int>((static_cast<uint32_t>(destX) * invScale_fp) >> 16) : destX;
       if (bmpX >= srcWidth) bmpX = srcWidth - 1;
 
-      const uint8_t val = (row[bmpX >> 2] >> (6 - ((bmpX & 3) << 1))) & 0x3;
+      // Decode source pixel based on bpp.  v2.0.38 stores 1-bit BMPs
+      // (1 = white, 0 = black per writeBmpHeader1bit's palette); legacy
+      // 2-bit BMPs pack 4 pixels per byte, MSB-first.  Either way we
+      // collapse to a 0..3 "val" the rest of the loop already
+      // understands.
+      uint8_t val;
+      if (srcBpp == 1) {
+        val = (row[bmpX >> 3] & (0x80 >> (bmpX & 7))) ? 3 : 0;
+      } else {
+        val = (row[bmpX >> 2] >> (6 - ((bmpX & 3) << 1))) & 0x3;
+      }
 
       if (rmode == BW && val < 3) {
         plotPixelOptimized(frameBuffer, orientation, rmode, screenX, screenY, true, this);
