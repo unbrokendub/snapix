@@ -73,9 +73,13 @@ std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile& file) {
     return nullptr;
   }
 
-  // Sanity check: prevent unreasonable dimensions from corrupted data
-  if (w > 2000 || h > 2000) {
-    LOG_ERR(TAG, "Deserialization failed: dimensions %ux%u exceed maximum", w, h);
+  // Sanity check: prevent unreasonable dimensions from corrupted data.
+  // Pre-v2.0.20 caches stored 65460 (= -76 cast to uint16_t) for top-down BMPs;
+  // the bumped CACHE_FILE_VERSION should already invalidate them, but guard
+  // here too in case any slip through during a partial upgrade.
+  if (w > ImageBlock::kMaxDim || h > ImageBlock::kMaxDim) {
+    LOG_ERR(TAG, "Deserialization failed: dimensions %ux%u exceed maximum (%u)", w, h,
+            static_cast<unsigned>(ImageBlock::kMaxDim));
     return nullptr;
   }
 

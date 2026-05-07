@@ -18,11 +18,19 @@ class ImageBlock final : public Block {
   std::string resolvedPath;
 
  public:
+  // Defensive clamp: dimensions ≤ kMaxDim.  A pre-v2.0.20 bug read top-down BMP
+  // height as int16_t (only the low 2 bytes), so a -76 pixel height was stored
+  // as 65460.  Clamping at construction guarantees the same defective value
+  // can't propagate through serialize → load → render after a partial cache
+  // upgrade.  deserialize() additionally rejects pages whose stored dims
+  // exceed this bound (see ImageBlock.cpp).
+  static constexpr uint16_t kMaxDim = 2000;
+
   explicit ImageBlock(std::string path, const uint16_t w, const uint16_t h, std::string nodeId = {},
                       std::string src = {}, std::string resolved = {})
       : cachedBmpPath(std::move(path)),
-        width(w),
-        height(h),
+        width(w > kMaxDim ? 0 : w),
+        height(h > kMaxDim ? 0 : h),
         sourceNodeId(std::move(nodeId)),
         sourcePath(std::move(src)),
         resolvedPath(std::move(resolved)) {}

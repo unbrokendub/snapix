@@ -18,7 +18,7 @@
 #include "ContentParser.h"
 
 namespace {
-constexpr uint8_t CACHE_FILE_VERSION = 23;  // v23: invalidate overlapping FB2 section caches
+constexpr uint8_t CACHE_FILE_VERSION = 24;  // v24: invalidate caches with corrupted ImageBlock dims (top-down BMP signed→unsigned bug from <=v2.0.19)
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 #ifndef SNAPIX_PERF_LOG

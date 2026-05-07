@@ -826,9 +826,22 @@ void Fb2Parser::addImageToPage(std::shared_ptr<ImageBlock> image) {
     startNewPage();
   }
 
-  // If the image won't fit in the remaining space on the current page,
-  // complete the current page first.  This avoids clipping at the bottom.
-  if (currentPageNextY_ + imageHeight > config_.viewportHeight) {
+  // Keep image and its caption ("Рис. N") together on the same page.  FB2
+  // typically follows <image/> with a captioning <p>caption</p>; without
+  // reserving one extra line below the image, the caption flows to the next
+  // page when the image lands at the bottom — visually orphaned.  Reserving
+  // ~2 lines means we occasionally push a tall image to the next page even
+  // when no caption follows (~1 wasted line) — acceptable trade for the much
+  // more jarring caption/image split.  The trailing breathing-room line is
+  // already added below after layout, so reserve the caption *line height*
+  // here as the lookahead.
+  const int captionLine = std::max(8, static_cast<int>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression));
+  const int reserveBelow = captionLine;  // 1 line for "Рис. N", caption line itself + breathing line is added after place.
+
+  // If the image won't fit in the remaining space on the current page (with
+  // caption reserve), complete the current page first.  This avoids both
+  // image clipping AND orphaned captions.
+  if (currentPageNextY_ + imageHeight + reserveBelow > config_.viewportHeight) {
     if (currentPage_ && !currentPage_->elements.empty()) {
       onPageComplete_(std::move(currentPage_));
       pagesCreated_++;
