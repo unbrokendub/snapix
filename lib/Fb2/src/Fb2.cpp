@@ -887,6 +887,15 @@ int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
 
   int decoded = 0;
   for (const auto& name : pendingFiles) {
+    // Abort BETWEEN images, not inside the converter.  picojpeg / pngle
+    // can't resume — every preempted decode restarts from MCU 0 / IDAT byte 0
+    // on the next sweep, so pressing buttons every 1-3 s while a 600x900-ish
+    // image needs ~6 s to decode means the image NEVER finishes.  Once we've
+    // committed to decoding an image, we let it run to completion; the
+    // ReaderState page-turn path already defers user input until the worker
+    // returns, which means the user's perceived lag is bounded by a single
+    // image's decode time (~6-10 s) instead of the BG sweep dragging on
+    // forever in pending purgatory.
     if (shouldAbort && shouldAbort()) {
       LOG_INF(TAG, "decodePendingImages: aborted after %d image(s)", decoded);
       break;
@@ -905,7 +914,10 @@ int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
       continue;
     }
 
-    if (decodeOnePending(pendingPath, isPng, bmpPath, kMaxBoxWidth, kMaxBoxHeight, shouldAbort)) {
+    // Pass nullptr — the converter will run to completion.  We only check
+    // shouldAbort at the top of the for-loop, so the user's input lag is
+    // capped at one image's decode time, not the whole pending queue.
+    if (decodeOnePending(pendingPath, isPng, bmpPath, kMaxBoxWidth, kMaxBoxHeight, nullptr)) {
       SdMan.remove(pendingPath.c_str());
       ++decoded;
       uint16_t w = 0, h = 0;
@@ -915,21 +927,19 @@ int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
       } else {
         LOG_INF(TAG, "decodePendingImages: %s -> %s (dim read failed)", binaryId.c_str(), bmpPath.c_str());
       }
-    } else if (shouldAbort && shouldAbort()) {
-      // Decoder bailed because the worker is being preempted (e.g. user pressed
-      // a button).  Keep the pending file so we resume on the next BG sweep —
-      // do NOT write a .failed marker, that would permanently skip this image.
-      LOG_INF(TAG, "decodePendingImages: aborted during %s (id=%s) — pending kept", isPng ? "PNG" : "JPEG",
-              binaryId.c_str());
-      SdMan.remove(bmpPath.c_str());  // partial / truncated BMP, throw away
+      // Hard cap: at most one image per BG sweep.  Combined with the
+      // pendingBackgroundEpubRefresh_ repaint the BG worker schedules after
+      // didWork=true, the next post-render trigger will fire another sweep
+      // for the next pending image.  Caps user-perceived input lag at
+      // roughly one image's decode time (~3-10 s on ESP32-C3) instead of
+      // the full pending queue.
       break;
-    } else {
-      LOG_ERR(TAG, "decodePendingImages: %s decode failed (id=%s)", isPng ? "PNG" : "JPEG", binaryId.c_str());
-      SdMan.remove(bmpPath.c_str());
-      SdMan.remove(pendingPath.c_str());
-      FsFile m;
-      if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
     }
+    LOG_ERR(TAG, "decodePendingImages: %s decode failed (id=%s)", isPng ? "PNG" : "JPEG", binaryId.c_str());
+    SdMan.remove(bmpPath.c_str());
+    SdMan.remove(pendingPath.c_str());
+    FsFile m;
+    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
   }
   return decoded;
 }
