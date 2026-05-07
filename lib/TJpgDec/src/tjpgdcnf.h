@@ -3,11 +3,18 @@
 /*----------------------------------------------*/
 /* Snapix-tuned config for ESP32-C3 RV32IMC.     */
 
-#define JD_SZBUF        4096
-/* Stream input buffer size.  Sized to one SDFat block so each refill
- * acquires SharedBusLock once and pulls a full FAT cluster — same
- * reasoning as the picojpeg buffer bump (cuts ~8× lock acquires on a
- * typical 150 KB JPEG).  Costs 4 KB heap per active decode. */
+#define JD_SZBUF        512
+/* Stream input buffer size.  TJpgDec uses this internally to stage bytes
+ * for the Huffman decoder; it lives inside the workspace pool, so growing
+ * it eats pool budget directly (TJPGD_WORKSPACE_SIZE = 3500 + LUT + buf,
+ * so JD_SZBUF=4096 needs a 13 KB pool, not 9644 — caused JDR_MEM1 in
+ * production for some complex JPEG Huffman tables).
+ *
+ * The SD-side buffering that v2.0.30 added for SharedBusLock contention
+ * is now done in our own tjpgInputCb's 4 KB pump buffer (heap, separate
+ * from the TJpgDec pool), so TJpgDec's internal inbuf can stay at the
+ * default 512 — every refill is just a memcpy from our pump buffer, no
+ * SD access. */
 
 #define JD_FORMAT       2
 /* Output pixel format.
