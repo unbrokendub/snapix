@@ -18,7 +18,7 @@
 #include "ContentParser.h"
 
 namespace {
-constexpr uint8_t CACHE_FILE_VERSION = 24;  // v24: invalidate caches with corrupted ImageBlock dims (top-down BMP signed→unsigned bug from <=v2.0.19)
+constexpr uint8_t CACHE_FILE_VERSION = 25;  // v25: invalidate v2.0.31-built caches whose JPEG header peeks failed (JDR_MEM1) and silently dropped the ImageBlocks — no placeholder, no image, just text where a figure or table-as-JPEG should be
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 #ifndef SNAPIX_PERF_LOG
