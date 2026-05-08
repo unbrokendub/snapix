@@ -96,11 +96,19 @@ jobs:
 
             ⚡ Super-fast fork of Papyrix firmware for Xteink X4 e-paper reader.
 
-            ### How to flash
+            > [!IMPORTANT]
+            > **v2.0.60+ — cache moved to internal flash, OTA-style SD update removed.**
+            > The OTA partition was dropped to expand LittleFS for the book cache
+            > (3.4 MB → 9.6 MB; page-load 12-19 ms → 5-10 ms, no more SD/display
+            > SPI bus contention).  All flashing now requires USB.  See the
+            > [migration notice](https://github.com/unbrokendub/snapix#%EF%B8%8F-cache-moved-to-internal-flash-v2060)
+            > for details on heap, flash endurance, and the new storage split
+            > (user data on SD, book cache on internal flash).
 
-            **Option A — First-time install (recommended for fresh device)**
+            ### How to flash (USB only since v2.0.60)
 
-            Use `snapix-*-full.bin` — a merged binary containing bootloader, partition table, and firmware.
+            Use `snapix-*-full.bin` — a merged binary containing bootloader, partition
+            table, and firmware.  Works for both fresh devices and upgrades.
 
             Using esptool (Python):
             ```bash
@@ -118,17 +126,16 @@ jobs:
             esptool.py --chip esp32c3 erase_flash
             ```
 
-            **Option B — OTA update (already running Snapix)**
-
-            Copy `snapix-*-firmware.bin` to the `/update/` folder on your SD card as `firmware.bin`.
-            The device will flash on the next boot.
+            **Upgrading from pre-v2.0.60?**  First boot of v2.0.60+ forces a
+            `LittleFS.format()` because the partition table changed.  Books,
+            progress, and bookmarks on the SD card stay intact.
 
             ### Individual artifacts
 
-            - `snapix-*-full.bin` — flashable merged image (bootloader + partitions + firmware)
-            - `snapix-*-firmware.bin` — app only, for OTA or overwriting `app0`
-            - `snapix-*-bootloader.bin` — 2nd-stage bootloader (offset `0x0`)
-            - `snapix-*-partitions.bin` — partition table (offset `0x8000`)
+            - `snapix-*-full.bin` — **flashable merged image** (bootloader + partitions + firmware), what you want for a normal install
+            - `snapix-*-firmware.bin` — app only, for advanced users who want to write just the `factory` partition at offset `0x10000`
+            - `snapix-*-bootloader.bin` — 2nd-stage bootloader (offset `0x0`), only needed for piecewise flashes
+            - `snapix-*-partitions.bin` — partition table (offset `0x8000`), only needed for piecewise flashes
             - `snapix-*-OFL-JetBrainsMono.txt` — SIL OFL 1.1 for JetBrains Mono NL (do not strip)
             - `snapix-*-OFL-PTMono.txt` — SIL OFL 1.1 for PT Mono
             - `snapix-*-OFL-IBMPlexMono.txt` — SIL OFL 1.1 for IBM Plex Mono
