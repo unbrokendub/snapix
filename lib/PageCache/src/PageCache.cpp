@@ -4,10 +4,9 @@
 
 #define TAG "CACHE"
 
+#include <LittleFS.h>
 #include <Page.h>
-#include <SDCardManager.h>
 #include <Serialization.h>
-#include <SharedSpiLock.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 
@@ -18,7 +17,7 @@
 #include "ContentParser.h"
 
 namespace {
-constexpr uint8_t CACHE_FILE_VERSION = 25;  // v25: invalidate v2.0.31-built caches whose JPEG header peeks failed (JDR_MEM1) and silently dropped the ImageBlocks — no placeholder, no image, just text where a figure or table-as-JPEG should be
+constexpr uint8_t CACHE_FILE_VERSION = 29;  // v29: v2.0.60 page cache moved from SD to LittleFS.  Cache file paths now resolve under /cache/<book_hash>/sections/ on internal flash; ImageBlock cachedBmpPath, RenderConfig serialization layout, and PageElement serialize/deserialize signatures are all unchanged on disk — but the storage backend is different.  Bumping invalidates v28 caches so any old SD-side files (now reachable via LittleFS at the new prefix) get rejected and rebuilt.
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 #ifndef SNAPIX_PERF_LOG
@@ -91,53 +90,52 @@ bool validateCacheIndexBounds(const char* cachePath, const size_t fileSize, cons
   return true;
 }
 
+// v2.0.60: recursive LittleFS::mkdir.  Arduino LittleFS::mkdir is non-
+// recursive — it fails if a parent doesn't exist.  Same helper as in
+// Fb2.cpp; kept inline here so PageCache stays self-contained.
+bool ensureCacheDir(const std::string& path) {
+  if (path.empty() || path == "/") return true;
+  if (LittleFS.exists(path.c_str())) return true;
+  size_t lastSlash = path.find_last_of('/');
+  if (lastSlash != std::string::npos && lastSlash > 0) {
+    if (!ensureCacheDir(path.substr(0, lastSlash))) return false;
+  }
+  return LittleFS.mkdir(path.c_str());
+}
+
 bool evictCacheFile(const std::string& cachePath, const char* reason) {
-  if (!SdMan.exists(cachePath.c_str())) {
+  if (!LittleFS.exists(cachePath.c_str())) {
     return true;
   }
 
-  for (int attempt = 0; attempt < 3; ++attempt) {
-    if (attempt > 0) delay(25);
-    if (!SdMan.exists(cachePath.c_str())) {
-      return true;
-    }
-    if (SdMan.remove(cachePath.c_str())) {
-      LOG_INF(TAG, "Removed stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());
-      return true;
-    }
+  if (LittleFS.remove(cachePath.c_str())) {
+    LOG_INF(TAG, "Removed stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());
+    return true;
   }
 
+  // LittleFS doesn't have SD's directory-cache flakiness, but if remove
+  // genuinely failed (e.g. fs full / path locked), try renaming aside as
+  // a last resort so the bad file doesn't keep getting re-loaded.
   const std::string quarantinePath = cachePath + ".stale";
-  if (SdMan.exists(quarantinePath.c_str())) {
-    SdMan.remove(quarantinePath.c_str());
+  if (LittleFS.exists(quarantinePath.c_str())) {
+    LittleFS.remove(quarantinePath.c_str());
   }
-
-  for (int attempt = 0; attempt < 3; ++attempt) {
-    if (attempt > 0) delay(25);
-    if (!SdMan.exists(cachePath.c_str())) {
-      return true;
-    }
-    if (SdMan.rename(cachePath.c_str(), quarantinePath.c_str())) {
-      LOG_INF(TAG, "Quarantined stale cache file reason=%s path=%s quarantine=%s", reason ? reason : "unknown",
-              cachePath.c_str(), quarantinePath.c_str());
-      return true;
-    }
+  if (LittleFS.rename(cachePath.c_str(), quarantinePath.c_str())) {
+    LOG_INF(TAG, "Quarantined stale cache file reason=%s path=%s quarantine=%s", reason ? reason : "unknown",
+            cachePath.c_str(), quarantinePath.c_str());
+    return true;
   }
 
   LOG_ERR(TAG, "Failed to evict stale cache file reason=%s path=%s", reason ? reason : "unknown", cachePath.c_str());
   return false;
 }
-// Close an FsFile under SharedBusLock.  SdFat close() flushes the write
-// buffer, updates the FAT, and writes the directory entry — all SPI
-// transactions that must not overlap with e-ink display SPI traffic.
-void closeFileProtected(FsFile& f) {
+
+// v2.0.60: simplified close.  LittleFS lives on a separate SPI flash bus
+// from SD/display, so SharedBusLock is no longer needed; flush() is the
+// Arduino-File equivalent of SdFat's sync().
+void closeFile(File& f) {
   if (f) {
-    snapix::spi::SharedBusLock lk;
-    // Explicit sync before close to ensure directory metadata is flushed to SD.
-    // SdFat's close() calls sync() internally, but under memory pressure the
-    // single-sector cache can lose directory entries between sync and close,
-    // causing "file vanished" on the next access.
-    f.sync();
+    f.flush();
     f.close();
   }
 }
@@ -147,34 +145,16 @@ PageCache::PageCache(std::string cachePath) : cachePath_(std::move(cachePath)) {
 
 bool PageCache::ensureReadHandle() {
   if (readFile_) return true;
-  {
-    snapix::spi::SharedBusLock lk;
-    if (SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
-      readFileSize_ = readFile_.size();
-      return true;
-    }
-  }
-  // First open failed. SdFat's single-sector directory cache can return stale
-  // "not found" results immediately after another thread created a file.
-  // Only retry if pageCount_ > 0 (we previously loaded this cache, so the file
-  // *should* exist). For cold-load misses (e.g. TOC jump to a new spine), the
-  // file genuinely doesn't exist and retrying just wastes 40ms.
-  if (pageCount_ == 0) return false;
-  for (int attempt = 1; attempt < 3; attempt++) {
-    delay(10);
-    LOG_DBG(TAG, "Retry ensureReadHandle attempt %d for %s", attempt + 1, cachePath_.c_str());
-    snapix::spi::SharedBusLock lk;
-    if (SdMan.openFileForRead("CACHE", cachePath_, readFile_)) {
-      readFileSize_ = readFile_.size();
-      return true;
-    }
+  readFile_ = LittleFS.open(cachePath_.c_str(), "r");
+  if (readFile_) {
+    readFileSize_ = readFile_.size();
+    return true;
   }
   return false;
 }
 
 void PageCache::closeReadHandle() {
   if (readFile_) {
-    snapix::spi::SharedBusLock lk;
     readFile_.close();
   }
   readFileSize_ = 0;
@@ -247,7 +227,6 @@ void PageCache::trimResidentPages(uint16_t centerPage, uint8_t keepBehind, uint8
 }
 
 bool PageCache::writeHeader(bool isPartial) {
-  snapix::spi::SharedBusLock lk;
   file_.seek(0);
   serialization::writePod(file_, CACHE_FILE_VERSION);
   serialization::writePod(file_, config_.fontId);
@@ -268,7 +247,6 @@ bool PageCache::writeHeader(bool isPartial) {
 }
 
 bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
-  snapix::spi::SharedBusLock lk;
   const uint32_t lutOffset = file_.position();
 
   for (const uint32_t pos : lut) {
@@ -295,7 +273,6 @@ bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
 }
 
 bool PageCache::loadLut(std::vector<uint32_t>& lut) {
-  snapix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -342,7 +319,6 @@ bool PageCache::loadLut(std::vector<uint32_t>& lut) {
 }
 
 bool PageCache::loadRaw() {
-  snapix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -384,15 +360,14 @@ bool PageCache::loadRaw() {
 
 PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const RenderConfig& config, bool cleanupInvalid) {
   ProbeResult result;
-  snapix::spi::SharedBusLock lk;
-  if (!SdMan.exists(cachePath.c_str())) {
+  if (!LittleFS.exists(cachePath.c_str())) {
     return result;
   }
 
   result.exists = true;
 
-  FsFile readFile;
-  if (!SdMan.openFileForRead("CACHE", cachePath, readFile)) {
+  File readFile = LittleFS.open(cachePath.c_str(), "r");
+  if (!readFile) {
     return result;
   }
 
@@ -400,7 +375,7 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
   if (fileSize < HEADER_SIZE) {
     readFile.close();
     if (cleanupInvalid) {
-      SdMan.remove(cachePath.c_str());
+      LittleFS.remove(cachePath.c_str());
     }
     return result;
   }
@@ -410,7 +385,7 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
   if (version != CACHE_FILE_VERSION) {
     readFile.close();
     if (cleanupInvalid) {
-      SdMan.remove(cachePath.c_str());
+      LittleFS.remove(cachePath.c_str());
     }
     return result;
   }
@@ -430,7 +405,7 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
   if (config != fileConfig) {
     readFile.close();
     if (cleanupInvalid) {
-      SdMan.remove(cachePath.c_str());
+      LittleFS.remove(cachePath.c_str());
     }
     return result;
   }
@@ -446,7 +421,7 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
 
   if (!validateCacheIndexBounds(cachePath.c_str(), fileSize, result.pageCount, lutOffset)) {
     if (cleanupInvalid) {
-      SdMan.remove(cachePath.c_str());
+      LittleFS.remove(cachePath.c_str());
     }
     result.partial = false;
     result.pageCount = 0;
@@ -458,7 +433,6 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
 }
 
 bool PageCache::load(const RenderConfig& config) {
-  snapix::spi::SharedBusLock lk;
   if (!ensureReadHandle()) {
     return false;
   }
@@ -547,58 +521,37 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
 
     // Append new pages AFTER old LUT (crash-safe: old LUT remains valid until header update)
     closeReadHandle();
-    {
-      snapix::spi::SharedBusLock lk;
-      if (!file_.open(cachePath_.c_str(), O_RDWR)) {
-        LOG_ERR(TAG, "Failed to open cache file for append");
-        return false;
-      }
-      file_.seekEnd();  // Append after old LUT
+    file_ = LittleFS.open(cachePath_.c_str(), "r+");
+    if (!file_) {
+      LOG_ERR(TAG, "Failed to open cache file for append");
+      return false;
     }
+    file_.seek(file_.size());  // Append after old LUT
   } else {
     // Fresh create
     closeReadHandle();
-    closeFileProtected(file_);
+    closeFile(file_);
 
-    // Ensure full directory hierarchy exists — setupCacheDir() may have failed
-    // silently, or SdFat's directory cache may have lost entries under memory
-    // pressure, causing both parent and grandparent dirs to appear missing.
+    // Ensure full directory hierarchy exists.  LittleFS.mkdir is non-recursive,
+    // so walk up the path creating each ancestor.  Much simpler than the SD
+    // hierarchy dance — LittleFS doesn't have SdFat's directory-cache flakiness.
     {
       const auto slash = cachePath_.rfind('/');
       if (slash != std::string::npos) {
         const std::string parentDir = cachePath_.substr(0, slash);
-        if (!SdMan.exists(parentDir.c_str())) {
-          LOG_INF(TAG, "Recreating cache dir hierarchy: %s", parentDir.c_str());
-          // Walk up and ensure each ancestor exists, then create downward.
-          // SdMan.mkdir with pFlag=true should handle this, but SdFat can fail
-          // when its internal state is corrupted.  Explicit per-level creation
-          // is more reliable on FAT32 under memory pressure.
-          const auto slash2 = parentDir.rfind('/');
-          if (slash2 != std::string::npos) {
-            const std::string grandparent = parentDir.substr(0, slash2);
-            if (!SdMan.exists(grandparent.c_str())) {
-              const auto slash3 = grandparent.rfind('/');
-              if (slash3 != std::string::npos) {
-                const std::string root = grandparent.substr(0, slash3);
-                if (!SdMan.exists(root.c_str())) {
-                  SdMan.mkdir(root.c_str());
-                }
-              }
-              SdMan.mkdir(grandparent.c_str());
-            }
-          }
-          if (!SdMan.mkdir(parentDir.c_str())) {
-            LOG_ERR(TAG, "Failed to create parent dir: %s", parentDir.c_str());
-          }
+        if (!ensureCacheDir(parentDir)) {
+          LOG_ERR(TAG, "Failed to create parent dir: %s", parentDir.c_str());
         }
       }
     }
 
-    if (!SdMan.openFileForWrite("CACHE", cachePath_, file_)) {
-      if (SdMan.exists(cachePath_.c_str())) {
+    file_ = LittleFS.open(cachePath_.c_str(), "w");
+    if (!file_) {
+      if (LittleFS.exists(cachePath_.c_str())) {
         LOG_ERR(TAG, "Retrying cache create after removing stale file: %s", cachePath_.c_str());
         evictCacheFile(cachePath_, "fresh-create-open-failed");
-        if (!SdMan.openFileForWrite("CACHE", cachePath_, file_)) {
+        file_ = LittleFS.open(cachePath_.c_str(), "w");
+        if (!file_) {
           LOG_ERR(TAG, "Failed to open cache file for writing");
           return false;
         }
@@ -621,12 +574,12 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
 
   // Check for abort before starting expensive parsing
   if (shouldAbort && shouldAbort()) {
-    closeFileProtected(file_);
+    closeFile(file_);
     // Fresh create writes a placeholder header before parsing starts. If we abort
     // here and keep that file, later probes see a zero-page cache and spin on
     // "Rejecting empty/incomplete cache file" for the same section.
     if (!isExtendPass) {
-      SdMan.remove(cachePath_.c_str());
+      LittleFS.remove(cachePath_.c_str());
     }
     LOG_INF(TAG, "Aborted before parsing");
     return false;
@@ -649,8 +602,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
             return;
           }
 
-          // Serialize new page — lock SPI bus for position read + write
-          snapix::spi::SharedBusLock lk;
+          // Serialize new page
           const uint32_t position = file_.position();
           if (!page->serialize(file_)) {
             LOG_ERR(TAG, "Failed to serialize page %d", pageCount_);
@@ -683,7 +635,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
   const bool madeForwardProgress = pageCount_ > initialPageCount;
 
   if (!success && pageCount_ == 0) {
-    closeFileProtected(file_);
+    closeFile(file_);
     // Remove file to prevent corrupt/incomplete cache
     evictCacheFile(cachePath_, "create-empty-failure");
     LOG_ERR(TAG, "[CACHE] create failed/aborted path=%s pages=%u success=%u aborted=%u", cachePath_.c_str(),
@@ -693,7 +645,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
 
   if (aborted || !success) {
     if (!madeForwardProgress) {
-      closeFileProtected(file_);
+      closeFile(file_);
 
       // During extend/rebuild passes the old header/LUT still points at the last
       // known-good cache contents. Keep that file instead of deleting the whole
@@ -721,7 +673,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     // reader can keep using the progress made so far instead of throwing it away.
     isPartial_ = true;
     if (!writeLut(lut)) {
-      closeFileProtected(file_);
+      closeFile(file_);
       // writeLut failed BEFORE updating the on-disk header — the file (if kept)
       // still references the previous LUT and pre-extend page count.  Roll the
       // in-memory state back to match what's actually on disk; otherwise
@@ -741,11 +693,8 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
       return false;
     }
 
-    {
-      snapix::spi::SharedBusLock lk;
-      file_.sync();
-    }
-    closeFileProtected(file_);
+    file_.flush();
+    closeFile(file_);
     LOG_INF(TAG, "[CACHE] create partial path=%s pages=%u success=%u aborted=%u", cachePath_.c_str(),
             static_cast<unsigned>(pageCount_), static_cast<unsigned>(success), static_cast<unsigned>(aborted));
     perfLog("cache-create", startMs, "(pages=%u partial=%u)", pageCount_, static_cast<unsigned>(isPartial_));
@@ -754,7 +703,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
 
   isPartial_ = parser.hasMoreContent();
   if (!madeForwardProgress && isPartial_) {
-    closeFileProtected(file_);
+    closeFile(file_);
     if (isExtendPass && initialPageCount > 0) {
       pageCount_ = initialPageCount;
       pageLut_ = lut;
@@ -771,16 +720,13 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
   }
 
   if (!writeLut(lut)) {
-    closeFileProtected(file_);
+    closeFile(file_);
     evictCacheFile(cachePath_, "create-write-lut-failed");
     return false;
   }
 
-  {
-    snapix::spi::SharedBusLock lk;
-    file_.sync();
-  }
-  closeFileProtected(file_);
+  file_.flush();
+  closeFile(file_);
   LOG_INF(TAG, "[CACHE] create done path=%s pages=%u partial=%u", cachePath_.c_str(),
           static_cast<unsigned>(pageCount_), static_cast<unsigned>(isPartial_));
   perfLog("cache-create", startMs, "(pages=%u partial=%u)", pageCount_, static_cast<unsigned>(isPartial_));
@@ -814,27 +760,18 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     if (!loadLut(lut)) return false;
 
     closeReadHandle();
-    bool opened = false;
-    for (int attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) delay(50);
-      snapix::spi::SharedBusLock lk;
-      if (file_.open(cachePath_.c_str(), O_RDWR)) {
-        file_.seekEnd();
-        opened = true;
-        break;
-      }
-    }
-    if (!opened) {
+    file_ = LittleFS.open(cachePath_.c_str(), "r+");
+    if (!file_) {
       LOG_ERR(TAG, "Failed to open cache file for hot extend");
       return false;
     }
+    file_.seek(file_.size());
 
     const uint16_t pagesBefore = pageCount_;
     bool parseOk = false;
     try {
       parseOk = parser.parsePages(
           [this, &lut](std::unique_ptr<Page> page) {
-            snapix::spi::SharedBusLock lk;
             const uint32_t position = file_.position();
             if (!page->serialize(file_)) return;
             lut.push_back(position);
@@ -850,26 +787,23 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
       // invalidate the parser so the next attempt uses cold extend.
       isPartial_ = true;
       parser.reset();
-      // Save whatever progress was made.  If writeLut() fails (e.g. a zero
-      // position in the LUT signals file corruption), the on-disk header still
-      // points to the old LUT but pageCount_ in memory reflects new appended
-      // pages.  Roll back in-memory state to match what's actually on disk —
-      // otherwise the next loadPage(N) reads pageLut_[N] out-of-bounds.
+      // Save whatever progress was made.  If writeLut() fails, roll back
+      // in-memory state to match what's actually on disk — otherwise
+      // the next loadPage(N) reads pageLut_[N] out-of-bounds.
       if (pageCount_ > pagesBefore) {
         if (!writeLut(lut)) {
           LOG_ERR(TAG, "writeLut failed in OOM recovery — rolling back in-memory state");
           pageCount_ = pagesBefore;
-          // pageLut_ stays at its pre-extend snapshot via existing loadLut() path.
-          closeFileProtected(file_);
+          closeFile(file_);
           return false;
         }
       }
-      closeFileProtected(file_);
+      closeFile(file_);
       return pageCount_ > pagesBefore;
     }
 
     if (!parseOk && pageCount_ == pagesBefore) {
-      closeFileProtected(file_);
+      closeFile(file_);
       LOG_ERR(TAG, "[CACHE] hot extend failed path=%s pagesBefore=%u", cachePath_.c_str(),
               static_cast<unsigned>(pagesBefore));
       return false;
@@ -880,21 +814,18 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     if (pageCount_ == pagesBefore) {
       if (!isPartial_) {
         if (!writeLut(lut)) {
-          closeFileProtected(file_);
-          SdMan.remove(cachePath_.c_str());
+          closeFile(file_);
+          LittleFS.remove(cachePath_.c_str());
           return false;
         }
-        {
-          snapix::spi::SharedBusLock lk;
-          file_.sync();
-        }
-        closeFileProtected(file_);
+        file_.flush();
+        closeFile(file_);
         LOG_INF(TAG, "[CACHE] hot extend reached end without new pages path=%s pages=%u", cachePath_.c_str(),
                 static_cast<unsigned>(pageCount_));
         return true;
       }
 
-      closeFileProtected(file_);
+      closeFile(file_);
       parser.reset();
       LOG_INF(TAG, "[CACHE] hot extend stalled without page growth path=%s pages=%u", cachePath_.c_str(),
               static_cast<unsigned>(pageCount_));
@@ -902,22 +833,13 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     }
 
     if (!writeLut(lut)) {
-      closeFileProtected(file_);
-      SdMan.remove(cachePath_.c_str());
+      closeFile(file_);
+      LittleFS.remove(cachePath_.c_str());
       return false;
     }
 
-    // Flush all data and directory metadata to SD before closing. Without an
-    // explicit sync, SdFat may keep the updated directory entry in its
-    // single-sector cache; if the next file operation (e.g. creating the next
-    // section) evicts that cached sector, the entry is lost and the file
-    // appears to vanish.
-    {
-      snapix::spi::SharedBusLock lk;
-      file_.sync();
-    }
-
-    closeFileProtected(file_);
+    file_.flush();
+    closeFile(file_);
     LOG_INF(TAG, "[CACHE] hot extend done path=%s pages=%u partial=%u", cachePath_.c_str(),
             static_cast<unsigned>(pageCount_), static_cast<unsigned>(isPartial_));
     LOG_INF(TAG, "Hot extend done: %d pages, partial=%d", pageCount_, isPartial_);
@@ -954,15 +876,41 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
   // new file preserves at least the already-visible page count. This keeps the
   // previous cache usable when an aborted rebuild fails to catch up.
   const uint16_t targetPages = pageCount_ + chunk;
-  LOG_INF(TAG, "Cold extend from %d to %d pages", currentPages, targetPages);
+
+  // v2.0.64: cold rebuild parses content from byte 0 with a fresh parser
+  // session.  That session allocates significantly more transient memory
+  // than a hot extend (whole-document anchor map, makePages buffers,
+  // freshly-built TextBlock pools per page).  The minimum-safe headroom
+  // we've measured for "Атомные привычки" pages is ~25 KB largest /
+  // ~50 KB total free — below that, mid-parse `make_shared<TextBlock>`
+  // hits a fragmented heap, throws std::bad_alloc, and the runtime can't
+  // even allocate the exception object → __terminate → abort() (see
+  // multi_heap_malloc:267 stack from v2.0.63 crash).
+  //
+  // The worker startup gate (isHeapCritical: free<28K || largest<10K)
+  // is too lenient for cold rebuild because cumulative alloc during
+  // parse exceeds that headroom.  Refuse to rebuild when heap is below
+  // the cold-rebuild-specific threshold; the caller treats this as a
+  // transient failure and BG cache stays partial until heap recovers
+  // (memory trim, parser reset, page eviction).
+  constexpr size_t kColdRebuildMinLargest = 25 * 1024;
+  constexpr size_t kColdRebuildMinFree = 50 * 1024;
+  const size_t freeBytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock < kColdRebuildMinLargest || freeBytes < kColdRebuildMinFree) {
+    LOG_INF(TAG,
+            "[CACHE] cold extend deferred — heap headroom insufficient (free=%u/%u largest=%u/%u)",
+            static_cast<unsigned>(freeBytes), static_cast<unsigned>(kColdRebuildMinFree),
+            static_cast<unsigned>(largestBlock), static_cast<unsigned>(kColdRebuildMinLargest));
+    return false;
+  }
+  LOG_INF(TAG, "Cold extend from %d to %d pages (free=%u largest=%u)", currentPages, targetPages,
+          static_cast<unsigned>(freeBytes), static_cast<unsigned>(largestBlock));
 
   parser.reset();
   const std::string rebuildPath = cachePath_ + ".rebuild";
-  {
-    snapix::spi::SharedBusLock lk;
-    if (SdMan.exists(rebuildPath.c_str())) {
-      SdMan.remove(rebuildPath.c_str());
-    }
+  if (LittleFS.exists(rebuildPath.c_str())) {
+    LittleFS.remove(rebuildPath.c_str());
   }
 
   PageCache rebuiltCache(rebuildPath);
@@ -975,52 +923,44 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     // hot-extend to append pages from an incompatible parser position onto the
     // old cache, corrupting section pagination.
     parser.reset();
-    {
-      snapix::spi::SharedBusLock lk;
-      if (SdMan.exists(rebuildPath.c_str())) {
-        SdMan.remove(rebuildPath.c_str());
-      }
+    if (LittleFS.exists(rebuildPath.c_str())) {
+      LittleFS.remove(rebuildPath.c_str());
     }
     LOG_INF(TAG, "[CACHE] cold extend kept previous path=%s rebuilt=%u rebuiltPages=%u current=%u",
             cachePath_.c_str(), static_cast<unsigned>(rebuildResult), static_cast<unsigned>(rebuiltCache.pageCount()),
             static_cast<unsigned>(currentPages));
     // Return false to break the caller's retry loop — the rebuild couldn't
     // produce enough pages and retrying with the same memory won't help.
-    // The outer retry mechanism (with its own retry limit) will handle
-    // transient failures.
     return false;
   }
 
   // ── Promote the rebuild file to replace the original ──────────────
-  // All SD-card operations below must be guarded by SharedBusLock so
-  // that the SPI bus is never accessed without arbitration while the
-  // display driver (or any other SPI user) might be active.
+  // v2.0.60: LittleFS lives on a separate SPI bus, no SharedBusLock dance
+  // needed.  Same backup/promote/rollback flow as before.
   bool result = false;
   {
-    snapix::spi::SharedBusLock lk;
-
     closeReadHandle();
-    closeFileProtected(file_);
+    closeFile(file_);
     clearResidentPages();
     pageLut_.clear();
 
     const std::string backupPath = cachePath_ + ".bak";
-    if (SdMan.exists(backupPath.c_str())) {
-      SdMan.remove(backupPath.c_str());
+    if (LittleFS.exists(backupPath.c_str())) {
+      LittleFS.remove(backupPath.c_str());
     }
 
-    const bool hadOldCache = SdMan.exists(cachePath_.c_str());
-    if (hadOldCache && !SdMan.rename(cachePath_.c_str(), backupPath.c_str())) {
+    const bool hadOldCache = LittleFS.exists(cachePath_.c_str());
+    if (hadOldCache && !LittleFS.rename(cachePath_.c_str(), backupPath.c_str())) {
       LOG_ERR(TAG, "Failed to back up old cache before cold promote: %s", cachePath_.c_str());
-      SdMan.remove(rebuildPath.c_str());
+      LittleFS.remove(rebuildPath.c_str());
       return false;
     }
 
-    if (!SdMan.rename(rebuildPath.c_str(), cachePath_.c_str())) {
+    if (!LittleFS.rename(rebuildPath.c_str(), cachePath_.c_str())) {
       LOG_ERR(TAG, "Failed to promote rebuilt cache: %s", cachePath_.c_str());
-      SdMan.remove(rebuildPath.c_str());
+      LittleFS.remove(rebuildPath.c_str());
       if (hadOldCache) {
-        SdMan.rename(backupPath.c_str(), cachePath_.c_str());
+        LittleFS.rename(backupPath.c_str(), cachePath_.c_str());
       }
       return false;
     }
@@ -1028,9 +968,9 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
     result = load(config_);
     if (!result) {
       LOG_ERR(TAG, "Failed to reload promoted cache: %s", cachePath_.c_str());
-      SdMan.remove(cachePath_.c_str());
+      LittleFS.remove(cachePath_.c_str());
       if (hadOldCache) {
-        SdMan.rename(backupPath.c_str(), cachePath_.c_str());
+        LittleFS.rename(backupPath.c_str(), cachePath_.c_str());
         if (load(config_)) {
           return true;
         }
@@ -1038,10 +978,10 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
       return false;
     }
 
-    if (hadOldCache && SdMan.exists(backupPath.c_str())) {
-      SdMan.remove(backupPath.c_str());
+    if (hadOldCache && LittleFS.exists(backupPath.c_str())) {
+      LittleFS.remove(backupPath.c_str());
     }
-  }  // SharedBusLock released
+  }
 
   // No forward progress — either content is truly finished or OOM/abort
   // prevented creating more pages.
@@ -1085,33 +1025,26 @@ std::shared_ptr<Page> PageCache::loadPage(uint16_t pageNum) {
     return nullptr;
   }
 
-  for (int attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) delay(50);
+  if (!ensureReadHandle()) return nullptr;
+  const size_t fileSize = readFileSize_;
+  const uint32_t pagePos = pageLut_[pageNum];
 
-    snapix::spi::SharedBusLock lk;
-    if (!ensureReadHandle()) {
-      continue;
-    }
-    const size_t fileSize = readFileSize_;
-    const uint32_t pagePos = pageLut_[pageNum];
+  // Validate page position
+  if (pagePos < HEADER_SIZE || pagePos >= fileSize) {
+    LOG_ERR(TAG, "Invalid page position: %u (file size: %zu)", pagePos, fileSize);
+    closeReadHandle();
+    return nullptr;
+  }
 
-    // Validate page position
-    if (pagePos < HEADER_SIZE || pagePos >= fileSize) {
-      LOG_ERR(TAG, "Invalid page position: %u (file size: %zu)", pagePos, fileSize);
-      closeReadHandle();
-      continue;
-    }
+  // Read page
+  readFile_.seek(pagePos);
+  auto page = Page::deserialize(readFile_);
 
-    // Read page
-    readFile_.seek(pagePos);
-    auto page = Page::deserialize(readFile_);
-
-    if (page) {
-      auto sharedPage = std::shared_ptr<Page>(std::move(page));
-      putResidentPage(pageNum, sharedPage);
-      perfLog("page-load", startMs, "(page=%u source=sd resident=%zu)", pageNum, residentPages_.size());
-      return sharedPage;
-    }
+  if (page) {
+    auto sharedPage = std::shared_ptr<Page>(std::move(page));
+    putResidentPage(pageNum, sharedPage);
+    perfLog("page-load", startMs, "(page=%u source=sd resident=%zu)", pageNum, residentPages_.size());
+    return sharedPage;
   }
 
   return nullptr;
@@ -1151,23 +1084,20 @@ void PageCache::prefetchWindow(uint16_t centerPage, int direction, uint8_t span)
   if (!hasMiss) return;
 
   const uint32_t startMs = perfMsNow();
-  {
-    snapix::spi::SharedBusLock lk;
-    if (!ensureReadHandle()) return;
+  if (!ensureReadHandle()) return;
 
-    const size_t fileSize = readFileSize_;
-    for (uint16_t pageNum : wanted) {
-      if (getResidentPage(pageNum)) continue;
-      if (pageNum >= pageLut_.size()) continue;
+  const size_t fileSize = readFileSize_;
+  for (uint16_t pageNum : wanted) {
+    if (getResidentPage(pageNum)) continue;
+    if (pageNum >= pageLut_.size()) continue;
 
-      const uint32_t pagePos = pageLut_[pageNum];
-      if (pagePos < HEADER_SIZE || pagePos >= fileSize) continue;
+    const uint32_t pagePos = pageLut_[pageNum];
+    if (pagePos < HEADER_SIZE || pagePos >= fileSize) continue;
 
-      readFile_.seek(pagePos);
-      auto page = Page::deserialize(readFile_);
-      if (page) {
-        putResidentPage(pageNum, std::shared_ptr<Page>(std::move(page)));
-      }
+    readFile_.seek(pagePos);
+    auto page = Page::deserialize(readFile_);
+    if (page) {
+      putResidentPage(pageNum, std::shared_ptr<Page>(std::move(page)));
     }
   }
   perfLog("page-prefetch", startMs, "(center=%u dir=%d resident=%zu)", centerPage, direction, residentPages_.size());
@@ -1177,12 +1107,12 @@ bool PageCache::clear() {
   clearResidentPages();
   pageLut_.clear();
   closeReadHandle();
-  closeFileProtected(file_);
+  closeFile(file_);
   pageCount_ = 0;
   isPartial_ = false;
   lutOffset_ = 0;
   readFileSize_ = 0;
-  if (!SdMan.exists(cachePath_.c_str())) {
+  if (!LittleFS.exists(cachePath_.c_str())) {
     return true;
   }
   return evictCacheFile(cachePath_, "clear");

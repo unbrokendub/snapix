@@ -479,23 +479,58 @@ void SettingsState::handleConfirm(Core& core) {
     case SettingsScreen::ConfirmDialog:
       if (confirmView_.isYesSelected()) {
         if (pendingAction_ == 10) {
-          // Clear Book Cache
+          // Clear Book Cache — v2.0.60: page cache moved to LittleFS, image
+          // cache already lived there since v2.0.53.  Wipe both /cache/ and
+          // /img/ recursively (Arduino LittleFS::rmdir is non-recursive,
+          // which is why we walk the trees manually).  Fonts under /font/
+          // and any other LittleFS content stay untouched.
           ui::centeredMessage(renderer_, THEME, THEME.uiFontId, "Clearing cache...");
 
-          const auto exists = core.storage.exists(SNAPIX_CACHE_DIR);
-          const bool hadCache = exists.ok() && *exists;
-          const auto result = hadCache ? core.storage.rmdir(SNAPIX_CACHE_DIR) : Ok();
+          // Local recursive-rmdir lambda: walks dir, deletes files, recurses
+          // into subdirs, finally rmdirs the now-empty directory.
+          std::function<bool(const char*)> rmTree = [&](const char* path) -> bool {
+            if (!LittleFS.exists(path)) return true;
+            File dir = LittleFS.open(path, "r");
+            if (!dir || !dir.isDirectory()) return false;
+            File entry = dir.openNextFile();
+            while (entry) {
+              const std::string entryPath = std::string(path) + "/" + entry.name();
+              const bool isDir = entry.isDirectory();
+              entry.close();
+              if (isDir) {
+                if (!rmTree(entryPath.c_str())) {
+                  dir.close();
+                  return false;
+                }
+              } else {
+                LittleFS.remove(entryPath.c_str());
+              }
+              entry = dir.openNextFile();
+            }
+            dir.close();
+            return LittleFS.rmdir(path);
+          };
 
-          // Recreate the empty base cache directory so downstream code
-          // (setupCacheDir, PageCache) can mkdir subdirectories without
-          // needing to recreate every parent from scratch.
-          if (hadCache && result.ok()) {
-            core.storage.mkdir(SNAPIX_CACHE_DIR);
+          const bool hadPageCache = LittleFS.exists(SNAPIX_CACHE_DIR);
+          const bool hadImageCache = LittleFS.exists("/img");
+          bool ok = true;
+          if (hadPageCache) ok = rmTree(SNAPIX_CACHE_DIR) && ok;
+          if (hadImageCache) ok = rmTree("/img") && ok;
+          // v2.0.60 migration: wipe orphaned SD-side cache from <=2.0.59.
+          // Cache moved to LittleFS — old SD path /.snapix/cache lingers
+          // and wastes card space until cleared.  Bookmarks/progress live
+          // at /.snapix/<other> and stay untouched.
+          const std::string oldSdCacheDir = std::string(SNAPIX_DIR) + "/cache";
+          const bool hadOldSdCache = core.storage.exists(oldSdCacheDir.c_str()).ok() &&
+                                     *core.storage.exists(oldSdCacheDir.c_str());
+          if (hadOldSdCache) {
+            core.storage.rmdir(oldSdCacheDir.c_str());
           }
+          const bool hadCache = hadPageCache || hadImageCache || hadOldSdCache;
 
-          const char* msg = !hadCache       ? "No cache to clear"
-                            : result.ok()   ? "Cache cleared"
-                                            : "Error clearing cache";
+          const char* msg = !hadCache ? "No cache to clear"
+                            : ok      ? "Cache cleared"
+                                      : "Error clearing cache";
           ui::centeredMessage(renderer_, THEME, THEME.uiFontId, msg);
           vTaskDelay(1500 / portTICK_PERIOD_MS);
 

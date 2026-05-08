@@ -5,6 +5,7 @@
 #include <Fb2Parser.h>
 #include <GfxRenderer.h>
 #include <HtmlParser.h>
+#include <LittleFS.h>  // v2.0.61: anchors file moved to LittleFS alongside page cache
 #include <Logging.h>
 #include <MarkdownParser.h>
 #include <Page.h>
@@ -311,9 +312,11 @@ void ReaderCacheController::saveAnchorMap(const ContentParser& parser, const std
   const auto& anchorMap = parser.getAnchorMap();
   if (anchorMap.empty()) return;
 
-  FsFile file;
+  // v2.0.61: anchors file lives on LittleFS alongside the page cache.
+  // It's TOC index data (cache-derivable from a re-parse), not user data.
   const std::string mapPath = cachePath + ".anchors";
-  if (!SdMan.openFileForWrite("CACHE", mapPath, file)) {
+  File file = LittleFS.open(mapPath.c_str(), "w");
+  if (!file) {
     return;
   }
 
@@ -338,9 +341,9 @@ int ReaderCacheController::loadAnchorPage(const std::string& cachePath, const st
 
 std::vector<std::pair<std::string, uint16_t>> ReaderCacheController::loadAnchorMap(const std::string& cachePath) {
   std::vector<std::pair<std::string, uint16_t>> anchors;
-  FsFile file;
   const std::string mapPath = cachePath + ".anchors";
-  if (!SdMan.openFileForRead("CACHE", mapPath, file)) {
+  File file = LittleFS.open(mapPath.c_str(), "r");
+  if (!file) {
     return anchors;
   }
 
@@ -766,11 +769,16 @@ BackgroundCachePlan ReaderCacheController::planBackgroundCacheWork(Core& core) {
   if (type != ContentType::Epub) {
     // FB2 with deferred image decode: pending JPEGs / PNGs left over from a
     // prior cache pass need a worker wake-up even when the page cache itself
-    // is complete.  Without this, decodePendingImages() would never run for
-    // a FB2 book whose cache finished before its images.
+    // is complete.  Same goes for binaries whose `cacheImage[fast]` stream
+    // was aborted by a page-turn cancel — they sit in fb2->deferredImages_
+    // until retryDeferredImages() re-streams them, at which point they
+    // become regular pending JPEGs and decodePendingImages picks them up.
+    // Without this wake-up neither pass would ever run for a FB2 book whose
+    // cache finished before its images.
     if (type == ContentType::Fb2) {
       const Fb2Provider* fb2Provider = core.content.asFb2();
-      if (fb2Provider && fb2Provider->getFb2() && fb2Provider->getFb2()->hasPendingImages()) {
+      if (fb2Provider && fb2Provider->getFb2() &&
+          (fb2Provider->getFb2()->hasPendingImages() || fb2Provider->getFb2()->hasDeferredImages())) {
         plan.shouldStart = true;
         plan.reason = BackgroundCacheWakeReason::CurrentCachePartial;
         plan.candidateSpine = activeSpine;

@@ -1101,8 +1101,16 @@ void ReaderState::navigateNext(Core& core) {
     return;
   }
 
-  if (deferPageTurnUntilCacheStops(1)) {
-    return;
+  // Page-turns no longer defer behind background work.  Instead, we ask the
+  // worker to abort and proceed immediately — every long-running phase
+  // (base64 stream, JPEG/PNG decode, parser inner loop) honours
+  // `shouldAbort` and bails within ~10-100 ms, so `stopBackgroundCaching()`
+  // below returns quickly.  Any image whose decode was preempted shows the
+  // "Loading image..." placeholder on the new page until the BG worker
+  // reawakens (post-render or idle trigger) and produces the next stage of
+  // the progressive preview chain.
+  if (isWorkerRunning()) {
+    requestWorkerCancel();
   }
 
   // Spine/section logic for EPUB, TXT, Markdown
@@ -1244,8 +1252,12 @@ void ReaderState::navigatePrev(Core& core) {
     return;                        // Already at cover
   }
 
-  if (deferPageTurnUntilCacheStops(-1)) {
-    return;
+  // See navigateNext: always proceed; cancel any running worker so the rest
+  // of the prev-navigation path (and stopBackgroundCaching below) sees an
+  // idle worker quickly.  Worker phases honour shouldAbort so the wait is
+  // short.
+  if (isWorkerRunning()) {
+    requestWorkerCancel();
   }
 
   // At first page of text content
@@ -2094,12 +2106,32 @@ void ReaderState::startBackgroundCaching(Core& core, const char* trigger) {
   // below ~10 KB the SdFat driver's internal state can become corrupt,
   // causing cascading SD-card access failures (files vanishing, directories
   // unreadable) that persist until reboot.
+  //
+  // v2.0.52 heap-pressure relief: ImageRenderCache can pin 30+ KB of
+  // contiguous heap that fragments the largest-free-block down past the
+  // worker's 10 KB threshold.  Once that happens, the worker can never
+  // run, the cache can never shrink (no eviction trigger), and image
+  // decodes stall forever (the v2.0.51 deadlock seen at
+  // free=17864/largest=8692 in the user's log).  Before giving up on the
+  // BG worker, drop the cache and re-check — the cache is purely an
+  // optimisation and rebuilding it lazily on next render is far cheaper
+  // than letting the decode pipeline deadlock.
   {
-    const auto heap = reader::readHeapState();
+    auto heap = reader::readHeapState();
     if (reader::isHeapCritical(heap)) {
-      LOG_DBG(TAG, "[ASYNC] skip background cache: heap critical (free=%u largest=%u)",
-              static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlock));
-      return;
+      const size_t cacheBytes = renderer_.imageCache().totalBytes();
+      if (cacheBytes > 0) {
+        LOG_INF(TAG, "[ASYNC] heap critical (free=%u largest=%u) — dropping image cache (%u bytes)",
+                static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlock),
+                static_cast<unsigned>(cacheBytes));
+        renderer_.imageCache().clear();
+        heap = reader::readHeapState();
+      }
+      if (reader::isHeapCritical(heap)) {
+        LOG_DBG(TAG, "[ASYNC] skip background cache: heap critical (free=%u largest=%u)",
+                static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlock));
+        return;
+      }
     }
   }
 

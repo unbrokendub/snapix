@@ -5,6 +5,7 @@
 #include <Fb2Parser.h>
 #include <GfxRenderer.h>
 #include <HtmlParser.h>
+#include <LittleFS.h>  // v2.0.61: anchors file moved to LittleFS
 #include <Logging.h>
 #include <MarkdownParser.h>
 #include <Page.h>
@@ -228,11 +229,32 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
     // decode.  We pick up the resulting pending/<id>.{jpg,png} files here and
     // materialise them into BMPs.  Each decoded image triggers a one-shot
     // repaint so the placeholder is replaced once the BMP exists.
+    //
+    // Step A (NEW): retryDeferredImages re-streams base64 for any binary id
+    // whose previous fast-mode call was aborted by a page-turn cancel.  This
+    // is what brings the placeholder ImageBlocks (registered with default
+    // dims by cacheImage's abort branch) back to life — without it, those
+    // placeholders would remain stuck forever on "Loading image...".
     if (type == ContentType::Fb2 && !(shouldAbort && shouldAbort())) {
       auto* fb2Provider = coreRef.content.asFb2();
-      if (fb2Provider && fb2Provider->getFb2() && fb2Provider->getFb2()->hasPendingImages()) {
-        const int decoded = fb2Provider->getFb2()->decodePendingImages(shouldAbort);
-        if (decoded > 0) {
+      if (fb2Provider && fb2Provider->getFb2()) {
+        auto* fb2 = fb2Provider->getFb2();
+        bool didImageWork = false;
+        if (fb2->hasDeferredImages()) {
+          const int reissued = fb2->retryDeferredImages(shouldAbort);
+          if (reissued > 0) {
+            LOG_INF(TAG, "[CACHE] re-streamed %d deferred FB2 image(s)", reissued);
+            didImageWork = true;
+          }
+        }
+        if (fb2->hasPendingImages()) {
+          const int decoded = fb2->decodePendingImages(shouldAbort);
+          if (decoded > 0) {
+            LOG_INF(TAG, "[CACHE] decoded %d pending FB2 image(s)", decoded);
+            didImageWork = true;
+          }
+        }
+        if (didImageWork) {
           didBackgroundWork = true;
           // Force a current-page repaint so newly decoded images replace the
           // placeholder on the visible page (if any).  Reuses the same
@@ -242,7 +264,7 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
           pendingBackgroundEpubRefreshPage_ = request.position.currentSectionPage < 0
                                                   ? 0
                                                   : request.position.currentSectionPage;
-          LOG_INF(TAG, "[CACHE] decoded %d pending FB2 image(s) — scheduled repaint spine=%d page=%d", decoded,
+          LOG_INF(TAG, "[CACHE] scheduled repaint after FB2 image work spine=%d page=%d",
                   request.position.currentSpineIndex, request.position.currentSectionPage);
         }
       }
@@ -300,7 +322,7 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
     EpubChapterParser parser(epub, request.targetSpine, renderer_, config, imageCachePath, true);
     PageCache cache(cachePath);
     bool cacheLoaded = cache.load(config);
-    if (cacheLoaded && !SdMan.exists((cachePath + ".anchors").c_str())) {
+    if (cacheLoaded && !LittleFS.exists((cachePath + ".anchors").c_str())) {
       cacheLoaded = false;
       cache.clear();
     }
@@ -344,7 +366,7 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
   PageCache cache(cachePath);
   bool cacheLoaded = cache.load(config);
   int targetPageHint = request.targetPageHint;
-  if (cacheLoaded && !SdMan.exists((cachePath + ".anchors").c_str())) {
+  if (cacheLoaded && !LittleFS.exists((cachePath + ".anchors").c_str())) {
     cacheLoaded = false;
     cache.clear();
   }

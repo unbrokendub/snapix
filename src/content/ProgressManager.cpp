@@ -5,7 +5,9 @@
 #include <SdFat.h>
 
 #include <cstdio>
+#include <cstring>
 
+#include "../config.h"
 #include "../content/ContentHandle.h"
 #include "../core/Core.h"
 
@@ -15,15 +17,33 @@ namespace snapix {
 
 namespace {
 constexpr uint8_t kFb2SectionedMarker = 0x80;
+
+// v2.0.61: progress lives on SD under /.snapix/progress/<book_id>.bin
+// (was /<cacheDir>/progress.bin, but cacheDir moved to LittleFS in v2.0.60
+// while user data stays on SD).  Extract `<book_id>` (e.g. "fb2_3067980859")
+// from the LittleFS cacheDir's tail.  Buffer is the progress directory
+// always — caller-provided cacheDir provides only the book identifier.
+void buildProgressPath(char* out, size_t outSize, const char* cacheDir) {
+  // book_id = portion of cacheDir after the last '/'.  cacheDir has the
+  // form "/cache/fb2_<hash>" → book_id = "fb2_<hash>".
+  const char* slash = std::strrchr(cacheDir, '/');
+  const char* bookId = slash ? slash + 1 : cacheDir;
+  snprintf(out, outSize, "%s/progress/%s.bin", SNAPIX_DIR, bookId);
 }
+}  // namespace
 
 bool ProgressManager::save(Core& core, const char* cacheDir, ContentType type, const Progress& progress) {
   if (!cacheDir || cacheDir[0] == '\0') {
     return false;
   }
 
+  // Make sure the SD progress directory exists (one-time mkdir per session).
+  char progressDir[280];
+  snprintf(progressDir, sizeof(progressDir), "%s/progress", SNAPIX_DIR);
+  core.storage.mkdir(progressDir);
+
   char progressPath[280];
-  snprintf(progressPath, sizeof(progressPath), "%s/progress.bin", cacheDir);
+  buildProgressPath(progressPath, sizeof(progressPath), cacheDir);
 
   FsFile file;
   auto result = core.storage.openWrite(progressPath, file);
@@ -80,7 +100,7 @@ ProgressManager::Progress ProgressManager::load(Core& core, const char* cacheDir
   }
 
   char progressPath[280];
-  snprintf(progressPath, sizeof(progressPath), "%s/progress.bin", cacheDir);
+  buildProgressPath(progressPath, sizeof(progressPath), cacheDir);
 
   FsFile file;
   auto result = core.storage.openRead(progressPath, file);

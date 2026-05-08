@@ -31,7 +31,7 @@ IRAM_ATTR void PageLine::render(GfxRenderer& renderer, const int fontId, const i
   block->render(renderer, fontId, xPos + xOffset, yPos + yOffset, black);
 }
 
-bool PageLine::serialize(FsFile& file) {
+bool PageLine::serialize(File& file) {
   serialization::writePod(file, xPos);
   serialization::writePod(file, yPos);
 
@@ -39,7 +39,7 @@ bool PageLine::serialize(FsFile& file) {
   return block->serialize(file);
 }
 
-std::unique_ptr<PageLine> PageLine::deserialize(FsFile& file) {
+std::unique_ptr<PageLine> PageLine::deserialize(File& file) {
   int16_t xPos;
   int16_t yPos;
   serialization::readPod(file, xPos);
@@ -61,13 +61,13 @@ void PageImage::render(GfxRenderer& renderer, const int fontId, const int xOffse
   block->render(renderer, fontId, xPos + xOffset, yPos + yOffset);
 }
 
-bool PageImage::serialize(FsFile& file) {
+bool PageImage::serialize(File& file) {
   serialization::writePod(file, xPos);
   serialization::writePod(file, yPos);
   return block->serialize(file);
 }
 
-std::unique_ptr<PageImage> PageImage::deserialize(FsFile& file) {
+std::unique_ptr<PageImage> PageImage::deserialize(File& file) {
   int16_t xPos;
   int16_t yPos;
   serialization::readPod(file, xPos);
@@ -128,7 +128,7 @@ void Page::warmGlyphs(const GfxRenderer& renderer, const int fontId) const {
   }
 }
 
-bool Page::serialize(FsFile& file) const {
+bool Page::serialize(File& file) const {
   const uint16_t count = elements.size();
   serialization::writePod(file, count);
 
@@ -142,7 +142,7 @@ bool Page::serialize(FsFile& file) const {
   return true;
 }
 
-std::unique_ptr<Page> Page::deserialize(FsFile& file) {
+std::unique_ptr<Page> Page::deserialize(File& file) {
   auto page = std::unique_ptr<Page>(new Page());
 
   // Max elements per page - prevents memory exhaustion from corrupted cache

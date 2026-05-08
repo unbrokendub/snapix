@@ -6,6 +6,10 @@
 
 #include "Fb2.h"
 
+#include "Base64JpegPump.h"
+
+#include <LittleFS.h>  // Internal-flash image cache (v2.0.53+) — see flashImageCacheDir below
+
 #include <CoverHelpers.h>
 #include <FsHelpers.h>
 #include <JpegToBmpConverter.h>
@@ -19,6 +23,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>  // v2.0.60: std::function for recursive rmTree lambda in clearCache
+#include <memory>
 
 namespace {
 constexpr uint8_t kMetaCacheVersion = 5;  // v5: adds binary index for inline images
@@ -51,10 +57,18 @@ int8_t base64DecodeChar(uint8_t c) {
 // bytes (up to start of `</binary>`).  The opening-tag prefix is detected
 // and skipped — first '>' encountered marks the start of base64 content.
 //
-// Streaming keeps RAM usage bounded to ~(in 256B + out 192B) ≈ 450 B.  This
-// matters because the largest <binary> in a Russian FB2 commonly hits 200 KB
-// of base64 → 150 KB of JPEG, which won't fit in a single allocation on
-// ESP32-C3 under load.
+// v2.0.49 perf rework: per-chunk lock granularity used to dominate wall-time.
+// Old code held the SharedBusLock for ~256 B at a time → 800 lock acquisitions
+// for a 200 KB block → ~9 s total under display-refresh contention.  Bumping
+// to 4 KB (one SD cluster) gives us ~50 acquires → ~600 ms total.  Hold the
+// lock around the read+write+sync so the in-flight decode buffers fully drain
+// to SD as one batch, not interleaved with display SPI ops.
+//
+// We also DROP shouldAbort propagation here.  Previously a mid-stream abort
+// would leave the binary in a "deferred" limbo that needed a retry path AND
+// caused ImageBlocks to vanish from page cache (the parser's makePages flush
+// dropped the placeholder block).  At the new ~600 ms speed it's no longer
+// worth interrupting — the worker just commits to finishing the stream.
 bool streamDecodeBase64ToJpegFile(const std::string& srcPath, uint32_t offset, uint32_t length,
                                   const std::string& dstPath) {
   FsFile src;
@@ -74,8 +88,19 @@ bool streamDecodeBase64ToJpegFile(const std::string& srcPath, uint32_t offset, u
     }
   }
 
-  uint8_t inBuf[256];
-  uint8_t outBuf[192];
+  // 4 KB IO buffers — match SD cluster size for write coalescing.  out is
+  // sized at 3 KB so a full inBuf of base64 (~4096 chars / 4 × 3 = 3072
+  // decoded bytes) fits exactly without mid-buffer flush.
+  static constexpr size_t kInBuf = 4096;
+  static constexpr size_t kOutBuf = 3072;
+  std::unique_ptr<uint8_t[]> inBuf(new (std::nothrow) uint8_t[kInBuf]);
+  std::unique_ptr<uint8_t[]> outBuf(new (std::nothrow) uint8_t[kOutBuf]);
+  if (!inBuf || !outBuf) {
+    src.close();
+    dst.close();
+    return false;
+  }
+
   size_t outIdx = 0;
   uint32_t accum = 0;
   int accumBits = 0;
@@ -84,11 +109,11 @@ bool streamDecodeBase64ToJpegFile(const std::string& srcPath, uint32_t offset, u
   bool ok = true;
 
   while (remaining > 0) {
-    int toRead = static_cast<int>(std::min<uint32_t>(sizeof(inBuf), remaining));
+    int toRead = static_cast<int>(std::min<uint32_t>(kInBuf, remaining));
     int got = 0;
     {
       snapix::spi::SharedBusLock lk;
-      got = src.read(inBuf, toRead);
+      got = src.read(inBuf.get(), toRead);
     }
     if (got <= 0) {
       ok = (got == 0);  // genuine EOF is fine; negative is an SD read error
@@ -109,9 +134,9 @@ bool streamDecodeBase64ToJpegFile(const std::string& srcPath, uint32_t offset, u
       if (accumBits >= 8) {
         accumBits -= 8;
         outBuf[outIdx++] = static_cast<uint8_t>((accum >> accumBits) & 0xFF);
-        if (outIdx >= sizeof(outBuf)) {
+        if (outIdx >= kOutBuf) {
           snapix::spi::SharedBusLock lk;
-          dst.write(outBuf, outIdx);
+          dst.write(outBuf.get(), outIdx);
           outIdx = 0;
         }
       }
@@ -119,7 +144,7 @@ bool streamDecodeBase64ToJpegFile(const std::string& srcPath, uint32_t offset, u
   }
   if (outIdx > 0) {
     snapix::spi::SharedBusLock lk;
-    dst.write(outBuf, outIdx);
+    dst.write(outBuf.get(), outIdx);
   }
   {
     snapix::spi::SharedBusLock lk;
@@ -129,6 +154,94 @@ bool streamDecodeBase64ToJpegFile(const std::string& srcPath, uint32_t offset, u
   }
   return ok;
 }
+
+// ============================================================================
+// LittleFS image cache (v2.0.53)
+//
+// Inline FB2 image BMPs live on the internal flash partition instead of the
+// SD card.  Three reasons:
+//
+// 1) Internal flash uses a separate SPI bus from the SD-card / e-paper
+//    display pair, so image reads during render don't fight with display
+//    refresh (no more 100-200 ms post-write-recovery latency cliff per
+//    SdMan.openFileForRead).
+//
+// 2) LittleFS reads have stable ~5-10 ms latency for our typical 30 KB BMP
+//    regardless of recent write activity.  This kills the "first render
+//    after decode is 1.5 s" pathology of v2.0.51-52.
+//
+// 3) The in-memory ImageRenderCache that v2.0.50-52 used to dodge SD
+//    contention pinned 30+ KB of contiguous heap and tipped the BG
+//    worker's `isHeapCritical` watchdog into a permanent deadlock.  With
+//    flash reads being fast, we no longer need that cache at all — saves
+//    32 KB of pinned heap budget.
+//
+// Capacity: the LittleFS partition is 3.4 MB total.  Existing usage is
+// effectively read-only (font files only), leaving ~2 MB free for image
+// cache.  At ~30 KB per BMP that's room for ~60-70 cached images, more
+// than any single book typically references.
+//
+// Wear: industry-standard 100 K erase cycles per 4 KB block × 870 blocks
+// gives ~10 M total cache writes.  Realistic intensive reading patterns
+// would take ~1000 years to wear this out.  See conversation context for
+// the full math.
+// ============================================================================
+
+constexpr char kFlashImageCacheRoot[] = "/img";
+
+// Compute the per-book LittleFS image cache directory.  Keyed by the book's
+// existing FB2 cache hash so books on the same device get isolated cache
+// spaces (and clearing one book's cache doesn't trash others).
+std::string flashImageCacheDir(const std::string& cachePath) {
+  // cachePath is "<cacheDir>/fb2_<hash>"; we want just "fb2_<hash>".
+  size_t lastSlash = cachePath.find_last_of('/');
+  const std::string bookDir = (lastSlash == std::string::npos) ? cachePath : cachePath.substr(lastSlash + 1);
+  return std::string(kFlashImageCacheRoot) + "/" + bookDir;
+}
+
+// Recursively create LittleFS directory tree (Arduino LittleFS::mkdir is
+// non-recursive — it fails if a parent doesn't exist).  Returns true if
+// the directory exists or was created successfully.
+bool ensureFlashDir(const std::string& path) {
+  if (path.empty() || path == "/") return true;
+  if (LittleFS.exists(path.c_str())) return true;
+
+  size_t lastSlash = path.find_last_of('/');
+  if (lastSlash != std::string::npos && lastSlash > 0) {
+    if (!ensureFlashDir(path.substr(0, lastSlash))) return false;
+  }
+  return LittleFS.mkdir(path.c_str());
+}
+
+// Slurp a LittleFS file into a heap buffer.  Returns nullptr on miss / OOM.
+// `outSize` is the file size in bytes.  Caller owns the returned buffer.
+std::unique_ptr<uint8_t[]> loadBmpFromFlash(const std::string& path, size_t& outSize) {
+  outSize = 0;
+  if (!LittleFS.exists(path.c_str())) return nullptr;
+
+  File f = LittleFS.open(path.c_str(), "r");
+  if (!f) return nullptr;
+  const size_t size = f.size();
+  // Sanity bounds: BMP must be ≥ 62 B (header) and we never expect to cache
+  // anything bigger than ~96 KB on this constrained device.
+  if (size < 62 || size > 96 * 1024) {
+    f.close();
+    return nullptr;
+  }
+
+  std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[size]);
+  if (!buf) {
+    f.close();
+    return nullptr;
+  }
+  const size_t got = f.read(buf.get(), size);
+  f.close();
+  if (got != size) return nullptr;
+
+  outSize = size;
+  return buf;
+}
+
 }  // namespace
 
 std::string Fb2::metaCachePath() const { return cachePath + kMetaCacheFile; }
@@ -162,6 +275,41 @@ Fb2::~Fb2() {
   }
 }
 
+// Wipe all stale `*.failed` markers from this book's LittleFS image cache
+// directory.  Called once per book load to recover from false-positive
+// markers left behind by older firmware bugs (e.g. v2.0.53's
+// decodeImageDirect mis-classifying heap-low aborts as permanent failures).
+//
+// Truly broken binaries will get `.failed` re-written by decodePendingImages
+// after kMaxJpegDecodeRetries consecutive failures in this session, so this
+// cleanup doesn't cause infinite-retry loops on genuinely unsupported images.
+//
+// Cost: one LittleFS dir scan + N small file deletes (typically 0-3 entries).
+static void clearStaleFailedMarkers(const std::string& flashImagesDir) {
+  if (!LittleFS.exists(flashImagesDir.c_str())) return;
+  File dir = LittleFS.open(flashImagesDir.c_str(), "r");
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return;
+  }
+  std::vector<std::string> toRemove;
+  while (true) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+    const char* name = entry.name();
+    const size_t nameLen = name ? strlen(name) : 0;
+    entry.close();
+    if (nameLen >= 7 && strcmp(name + nameLen - 7, ".failed") == 0) {
+      toRemove.push_back(flashImagesDir + "/" + name);
+    }
+  }
+  dir.close();
+  for (const auto& path : toRemove) {
+    LittleFS.remove(path.c_str());
+    LOG_INF(TAG, "clearStaleFailedMarkers: removed %s", path.c_str());
+  }
+}
+
 bool Fb2::load() {
   LOG_INF(TAG, "Loading FB2: %s", filepath.c_str());
 
@@ -169,6 +317,11 @@ bool Fb2::load() {
     LOG_ERR(TAG, "File does not exist");
     return false;
   }
+
+  // v2.0.55: clear any stale `.failed` markers from previous sessions (in
+  // case earlier firmware versions wrote false-positive markers).  Per-load
+  // cleanup ensures we always retry images at least once per book open.
+  clearStaleFailedMarkers(flashImageCacheDir(cachePath));
 
   // Try loading from metadata cache first
   if (loadMetaCache()) {
@@ -523,14 +676,52 @@ void Fb2::postProcessMetadata() {
 }
 
 bool Fb2::clearCache() const {
-  if (!SdMan.exists(cachePath.c_str())) {
+  // v2.0.60: cache lives on LittleFS now, not SD.  Recursively walk the
+  // book's cache subtree (page-cache section files plus the LittleFS image
+  // cache dir if it exists) and remove everything.
+  if (!LittleFS.exists(cachePath.c_str())) {
     LOG_INF(TAG, "Cache does not exist, no action needed");
     return true;
   }
 
-  if (!SdMan.removeDir(cachePath.c_str())) {
+  // Recursive rmTree — Arduino LittleFS::rmdir is non-recursive.
+  std::function<bool(const std::string&)> rmTree = [&](const std::string& p) -> bool {
+    if (!LittleFS.exists(p.c_str())) return true;
+    File dir = LittleFS.open(p.c_str(), "r");
+    if (!dir) return false;
+    if (!dir.isDirectory()) {
+      dir.close();
+      return LittleFS.remove(p.c_str());
+    }
+    File entry = dir.openNextFile();
+    while (entry) {
+      const std::string entryPath = p + "/" + entry.name();
+      const bool isDir = entry.isDirectory();
+      entry.close();
+      if (isDir) {
+        if (!rmTree(entryPath)) {
+          dir.close();
+          return false;
+        }
+      } else {
+        LittleFS.remove(entryPath.c_str());
+      }
+      entry = dir.openNextFile();
+    }
+    dir.close();
+    return LittleFS.rmdir(p.c_str());
+  };
+
+  if (!rmTree(cachePath)) {
     LOG_ERR(TAG, "Failed to clear cache");
     return false;
+  }
+
+  // Image cache lives at /img/<book>/.  Wipe that too for symmetry with the
+  // pre-LittleFS clear semantics.
+  const std::string imagesDir = flashImageCacheDir(cachePath);
+  if (LittleFS.exists(imagesDir.c_str())) {
+    rmTree(imagesDir);
   }
 
   LOG_INF(TAG, "Cache cleared successfully");
@@ -538,24 +729,18 @@ bool Fb2::clearCache() const {
 }
 
 void Fb2::setupCacheDir() const {
-  if (!SdMan.exists(cachePath.c_str())) {
-    // Create directories recursively
-    for (size_t i = 1; i < cachePath.length(); i++) {
-      if (cachePath[i] == '/') {
-        SdMan.mkdir(cachePath.substr(0, i).c_str());
-      }
-    }
-    if (!SdMan.mkdir(cachePath.c_str())) {
-      LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
-    }
+  // v2.0.60: cache moved to LittleFS.  Recursive mkdir via the same helper
+  // used by image cache (ensureFlashDir defined earlier in this file).
+  if (!ensureFlashDir(cachePath)) {
+    LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
   }
 
-  // Always verify sections/ exists — partial cache clear may have removed it
+  // Always verify sections/ exists — partial cache clear may have removed it.
+  // ensureFlashDir handles the recursive case (LittleFS::mkdir is not
+  // recursive, but ensureFlashDir walks parents).
   const auto sectionsDir = cachePath + "/sections";
-  if (!SdMan.exists(sectionsDir.c_str())) {
-    if (!SdMan.mkdir(sectionsDir.c_str())) {
-      LOG_ERR(TAG, "Failed to create sections dir: %s", sectionsDir.c_str());
-    }
+  if (!ensureFlashDir(sectionsDir)) {
+    LOG_ERR(TAG, "Failed to create sections dir: %s", sectionsDir.c_str());
   }
 }
 
@@ -574,6 +759,10 @@ std::string Fb2::findCoverImage() const {
 
 bool Fb2::generateCoverBmp(bool use1BitDithering) const {
   const auto coverPath = getCoverBmpPath();
+  // v2.0.61: failure marker lives on LittleFS alongside the cache (it's
+  // metadata about whether cover generation should retry, not user data).
+  // Cover BMP itself stays on SD via getCoverBmpPath() — that's a separate
+  // concern (covers are part of the home-screen thumbnail flow).
   const auto failedMarkerPath = cachePath + "/.cover.failed";
 
   // Already generated
@@ -582,7 +771,7 @@ bool Fb2::generateCoverBmp(bool use1BitDithering) const {
   }
 
   // Previously failed, don't retry
-  if (SdMan.exists(failedMarkerPath.c_str())) {
+  if (LittleFS.exists(failedMarkerPath.c_str())) {
     return false;
   }
 
@@ -590,9 +779,11 @@ bool Fb2::generateCoverBmp(bool use1BitDithering) const {
   std::string coverImagePath = findCoverImage();
   if (coverImagePath.empty()) {
     LOG_INF(TAG, "No cover image found");
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("FB2", failedMarkerPath, marker)) {
+    // Create failure marker on LittleFS.  Make sure parent dir exists first
+    // (cache dir might not have been created if the book has no images).
+    setupCacheDir();
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) {
       marker.close();
     }
     return false;
@@ -604,9 +795,8 @@ bool Fb2::generateCoverBmp(bool use1BitDithering) const {
   // Convert to BMP using shared helper
   const bool success = CoverHelpers::convertImageToBmp(coverImagePath, coverPath, "FB2", use1BitDithering);
   if (!success) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("FB2", failedMarkerPath, marker)) {
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) {
       marker.close();
     }
   }
@@ -676,13 +866,17 @@ bool readBmpDimensions(const std::string& bmpPath, uint16_t& outW, uint16_t& out
 // so the reader thread either sees a complete valid BMP or no file at all.
 bool decodeOnePending(const std::string& pendingPath, bool isPng, const std::string& bmpPath, int maxBoxWidth,
                       int maxBoxHeight, const std::function<bool()>& shouldAbort) {
+  // v2.0.53: BMP output target is on LittleFS (internal flash) instead of
+  // SD.  Source pending file (PNG / legacy JPEG) is still on SD because
+  // pngle / SdFat work with FsFile.  Atomic write via .tmp + rename is
+  // honoured on LittleFS.
   FsFile srcFile;
   if (!SdMan.openFileForRead("FB2", pendingPath, srcFile)) return false;
   const std::string tmpBmpPath = bmpPath + ".tmp";
-  // Clean up any stale tmp from a previous aborted run.
-  if (SdMan.exists(tmpBmpPath.c_str())) SdMan.remove(tmpBmpPath.c_str());
-  FsFile bmpFile;
-  if (!SdMan.openFileForWrite("FB2", tmpBmpPath, bmpFile)) {
+  if (LittleFS.exists(tmpBmpPath.c_str())) LittleFS.remove(tmpBmpPath.c_str());
+
+  File bmpFile = LittleFS.open(tmpBmpPath.c_str(), "w");
+  if (!bmpFile) {
     srcFile.close();
     return false;
   }
@@ -692,15 +886,13 @@ bool decodeOnePending(const std::string& pendingPath, bool isPng, const std::str
   srcFile.close();
   bmpFile.close();
   if (!ok) {
-    SdMan.remove(tmpBmpPath.c_str());
+    LittleFS.remove(tmpBmpPath.c_str());
     return false;
   }
-  // Promote: the rename is atomic — readers always see either no file or a
-  // fully-formed BMP, never a half-written one.
-  if (SdMan.exists(bmpPath.c_str())) SdMan.remove(bmpPath.c_str());
-  if (!SdMan.rename(tmpBmpPath.c_str(), bmpPath.c_str())) {
+  if (LittleFS.exists(bmpPath.c_str())) LittleFS.remove(bmpPath.c_str());
+  if (!LittleFS.rename(tmpBmpPath.c_str(), bmpPath.c_str())) {
     LOG_ERR(TAG, "decodeOnePending: failed to promote %s -> %s", tmpBmpPath.c_str(), bmpPath.c_str());
-    SdMan.remove(tmpBmpPath.c_str());
+    LittleFS.remove(tmpBmpPath.c_str());
     return false;
   }
   return true;
@@ -708,7 +900,8 @@ bool decodeOnePending(const std::string& pendingPath, bool isPng, const std::str
 }  // namespace
 
 bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint16_t& outWidth, uint16_t& outHeight,
-                     int maxBoxWidth, int maxBoxHeight, bool fastMode) const {
+                     int maxBoxWidth, int maxBoxHeight, bool fastMode,
+                     const std::function<bool()>& shouldAbort) const {
   if (binaryId.empty()) return false;
   auto it = binaryIndex_.find(binaryId);
   if (it == binaryIndex_.end()) {
@@ -723,123 +916,195 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
   const bool isPng = (entry.mimeType == 1);
   const char* extDot = isPng ? ".png" : ".jpg";
 
-  const std::string imagesDir = cachePath + "/images";
-  const std::string pendingDir = imagesDir + "/pending";
+  // v2.0.53: BMP cache lives on internal flash (LittleFS), not SD.  See
+  // the long comment above flashImageCacheDir for the rationale.  PNG
+  // pending files are still on SD because pngle requires a real seekable
+  // file (no pump path for PNG yet).
+  const std::string imagesDir = flashImageCacheDir(cachePath);
+  const std::string pendingDir = cachePath + "/images/pending";
   const std::string bmpPath = imagesDir + "/" + binaryId + ".bmp";
   const std::string failPath = imagesDir + "/" + binaryId + ".failed";
   const std::string pendingPath = pendingDir + "/" + binaryId + extDot;
 
-  // Already fully decoded (idempotent) — fast path for both modes.
-  if (SdMan.exists(bmpPath.c_str())) {
-    if (readBmpDimensions(bmpPath, outWidth, outHeight)) {
-      outBmpPath = bmpPath;
-      return true;
+  // Already fully decoded (idempotent) — fast path for both modes.  Probe
+  // LittleFS, then peek BMP dims via a small flash read.
+  if (LittleFS.exists(bmpPath.c_str())) {
+    File hf = LittleFS.open(bmpPath.c_str(), "r");
+    if (hf) {
+      uint8_t hdr[26];
+      const size_t got = hf.read(hdr, sizeof(hdr));
+      hf.close();
+      if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
+        const int32_t w32 = static_cast<int32_t>(hdr[18]) | (static_cast<int32_t>(hdr[19]) << 8) |
+                            (static_cast<int32_t>(hdr[20]) << 16) | (static_cast<int32_t>(hdr[21]) << 24);
+        const int32_t h32 = static_cast<int32_t>(hdr[22]) | (static_cast<int32_t>(hdr[23]) << 8) |
+                            (static_cast<int32_t>(hdr[24]) << 16) | (static_cast<int32_t>(hdr[25]) << 24);
+        const int32_t aw = w32 < 0 ? -w32 : w32;
+        const int32_t ah = h32 < 0 ? -h32 : h32;
+        if (aw > 0 && aw <= 0xFFFF && ah > 0 && ah <= 0xFFFF) {
+          outWidth = static_cast<uint16_t>(aw);
+          outHeight = static_cast<uint16_t>(ah);
+          outBmpPath = bmpPath;
+          return true;
+        }
+      }
     }
-    // Header read failed / absurd dimensions — the BMP is broken (likely
-    // from a session aborted mid-write before the v2.0.35 atomic-rename
-    // landed).  Delete it explicitly: leaving the corpse on disk would let
-    // ImageBlock::render keep falling back to the placeholder until the BG
-    // worker happens to overwrite it again, which can take many seconds
-    // because peek-only fastMode does not trigger a re-decode by itself.
+    // Header read failed / absurd dimensions — drop the broken BMP.
     LOG_INF(TAG, "cacheImage: removing corrupt %s (no 'BM' header / bad dims)", bmpPath.c_str());
-    SdMan.remove(bmpPath.c_str());
+    LittleFS.remove(bmpPath.c_str());
   }
 
   // Previous attempt failed sentinel — don't retry the same decode every
   // page render in case the source is malformed / OOM-bait.
-  if (SdMan.exists(failPath.c_str())) {
+  if (LittleFS.exists(failPath.c_str())) {
     return false;
   }
 
-  // Ensure target directories exist (cheap if they already do).
-  if (!SdMan.exists(imagesDir.c_str())) {
-    if (!SdMan.mkdir(imagesDir.c_str())) {
-      LOG_ERR(TAG, "cacheImage: failed to create images dir: %s", imagesDir.c_str());
-      return false;
-    }
-  }
-  if (!SdMan.exists(pendingDir.c_str())) {
-    if (!SdMan.mkdir(pendingDir.c_str())) {
-      LOG_ERR(TAG, "cacheImage: failed to create pending dir: %s", pendingDir.c_str());
-      return false;
-    }
+  // Ensure flash images dir exists (cheap if it does).  ensureFlashDir is
+  // recursive — Arduino LittleFS::mkdir bails on missing parents.  Pending
+  // dir on SD is only needed for PNG / synchronous paths; created below.
+  if (!ensureFlashDir(imagesDir)) {
+    LOG_ERR(TAG, "cacheImage: failed to create flash images dir: %s", imagesDir.c_str());
+    return false;
   }
 
-  // Step 1: stream-decode base64 to the pending file (idempotent — if the
-  // pending file already exists from a prior fast-mode call, reuse it).
-  if (!SdMan.exists(pendingPath.c_str())) {
-    if (!streamDecodeBase64ToJpegFile(filepath, entry.fileOffset, entry.byteLength, pendingPath)) {
-      LOG_ERR(TAG, "cacheImage: base64 decode failed for id=%s", binaryId.c_str());
-      SdMan.remove(pendingPath.c_str());
-      FsFile m;
-      if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
-      return false;
+  // v2.0.50 fast-mode JPEG path skips Step 1 entirely — `peekImageDims` and
+  // `decodeImageDirect` stream base64 from FB2 directly through the
+  // Base64JpegPump.  Only PNG fastMode and synchronous (non-fastMode) paths
+  // still need the pending JPEG/PNG on SD.
+  const bool needPendingFile = !fastMode || isPng;
+  if (needPendingFile) {
+    if (!SdMan.exists(pendingDir.c_str())) {
+      if (!SdMan.mkdir(pendingDir.c_str())) {
+        LOG_ERR(TAG, "cacheImage: failed to create pending dir: %s", pendingDir.c_str());
+        return false;
+      }
+    }
+    if (!SdMan.exists(pendingPath.c_str())) {
+      if (!streamDecodeBase64ToJpegFile(filepath, entry.fileOffset, entry.byteLength, pendingPath)) {
+        LOG_ERR(TAG, "cacheImage: base64 decode failed for id=%s", binaryId.c_str());
+        SdMan.remove(pendingPath.c_str());
+        File m = LittleFS.open(failPath.c_str(), "w");
+        if (m) m.close();
+        return false;
+      }
     }
   }
+  (void)shouldAbort;  // Retained in signature for callers' convenience; ignored here.
 
   if (fastMode) {
-    // Step 2a (fast): peek dimensions from the source header without doing
-    // pixel decode — the BG worker will pick up the pending file later via
-    // decodePendingImages().  ImageBlock::render gracefully shows a "[Image]"
-    // placeholder while the BMP is missing.
-    FsFile srcFile;
-    if (!SdMan.openFileForRead("FB2", pendingPath, srcFile)) {
-      LOG_ERR(TAG, "cacheImage: failed to reopen pending %s", pendingPath.c_str());
-      return false;
-    }
+    // Step 2a (fast): peek dims from the source header.  v2.0.50: peek runs
+    // BEFORE we ever write a pending file — in fact for JPEGs we don't write
+    // one at all on the fast path.  Base64JpegPump streams just enough bytes
+    // (~1 KB) directly from the FB2 source to find the JPEG SOF marker.
     int srcW = 0, srcH = 0;
-    const bool peekOk = isPng ? PngToBmpConverter::peekDimensions(srcFile, srcW, srcH)
-                              : JpegToBmpConverter::peekDimensions(srcFile, srcW, srcH);
-    srcFile.close();
-    if (!peekOk) {
-      LOG_ERR(TAG, "cacheImage: %s header peek failed for id=%s", isPng ? "PNG" : "JPEG", binaryId.c_str());
-      SdMan.remove(pendingPath.c_str());
-      FsFile m;
-      if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
-      return false;
+    if (isPng) {
+      // PNG: pending file was already streamed to disk by the outer
+      // needPendingFile block.  Peek with pngle.
+      FsFile srcFile;
+      if (!SdMan.openFileForRead("FB2", pendingPath, srcFile)) return false;
+      const bool peekOk = PngToBmpConverter::peekDimensions(srcFile, srcW, srcH);
+      srcFile.close();
+      if (!peekOk) {
+        LOG_ERR(TAG, "cacheImage: PNG header peek failed for id=%s", binaryId.c_str());
+        SdMan.remove(pendingPath.c_str());
+        File m = LittleFS.open(failPath.c_str(), "w");
+        if (m) m.close();
+        return false;
+      }
+    } else {
+      // JPEG: pump-based peek directly from FB2.  No pending file needed.
+      uint16_t pw = 0, ph = 0;
+      if (!peekImageDims(binaryId, pw, ph)) {
+        LOG_ERR(TAG, "cacheImage: JPEG SOF peek failed for id=%s", binaryId.c_str());
+        File m = LittleFS.open(failPath.c_str(), "w");
+        if (m) m.close();
+        return false;
+      }
+      srcW = pw;
+      srcH = ph;
     }
+
     int outW = 0, outH = 0;
     scaledFit(srcW, srcH, maxBoxWidth, maxBoxHeight, outW, outH);
-    if (outW <= 0 || outH <= 0 || outW > 0xFFFF || outH > 0xFFFF) {
-      SdMan.remove(pendingPath.c_str());
-      return false;
-    }
+    if (outW <= 0 || outH <= 0 || outW > 0xFFFF || outH > 0xFFFF) return false;
     outWidth = static_cast<uint16_t>(outW);
     outHeight = static_cast<uint16_t>(outH);
-    outBmpPath = bmpPath;  // Will exist later, after decodePendingImages() runs.
+    outBmpPath = bmpPath;  // Will exist later, after decodeImageDirect() / decodePendingImages() runs.
+
+    // Queue the binary for BG decode.  For JPEGs the BG worker will use
+    // decodeImageDirect — no pending file ever lands on SD.  PNGs are
+    // already on disk (we wrote pending/<id>.png above) and the BG worker's
+    // legacy pending-dir scan will pick them up; we still queue them here
+    // so a single drain loop covers both.
+    if (!isPng) {
+      bool already = false;
+      for (const auto& q : pendingJpegDecodes_) {
+        if (q.binaryId == binaryId) {
+          already = true;
+          break;
+        }
+      }
+      if (!already) {
+        pendingJpegDecodes_.push_back({binaryId, maxBoxWidth, maxBoxHeight});
+      }
+    }
     LOG_INF(TAG, "cacheImage[fast]: registered %s src=%dx%d -> %dx%d (BMP pending)", binaryId.c_str(), srcW, srcH, outW,
             outH);
     return true;
   }
 
-  // Step 2b (sync): full pixel decode.
+  // Step 2b (sync): full pixel decode.  Output BMP lands on LittleFS
+  // (decodeOnePending writes via Arduino File API now).
   if (!decodeOnePending(pendingPath, isPng, bmpPath, maxBoxWidth, maxBoxHeight, nullptr)) {
     LOG_ERR(TAG, "cacheImage: %s decode failed for id=%s", isPng ? "PNG" : "JPEG", binaryId.c_str());
-    SdMan.remove(bmpPath.c_str());
+    LittleFS.remove(bmpPath.c_str());
     SdMan.remove(pendingPath.c_str());
-    FsFile m;
-    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+    File m = LittleFS.open(failPath.c_str(), "w");
+    if (m) m.close();
     return false;
   }
   SdMan.remove(pendingPath.c_str());
 
   // Step 3: read back BMP dimensions for the caller (ImageBlock needs w/h).
-  if (readBmpDimensions(bmpPath, outWidth, outHeight)) {
-    outBmpPath = bmpPath;
-    LOG_INF(TAG, "cacheImage: decoded %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
-            static_cast<unsigned>(outWidth), static_cast<unsigned>(outHeight));
-    return true;
+  // Peek BMP header from LittleFS (mirrors the cached-fast-path logic).
+  {
+    File hf = LittleFS.open(bmpPath.c_str(), "r");
+    if (hf) {
+      uint8_t hdr[26];
+      const size_t got = hf.read(hdr, sizeof(hdr));
+      hf.close();
+      if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
+        const int32_t w32 = static_cast<int32_t>(hdr[18]) | (static_cast<int32_t>(hdr[19]) << 8) |
+                            (static_cast<int32_t>(hdr[20]) << 16) | (static_cast<int32_t>(hdr[21]) << 24);
+        const int32_t h32 = static_cast<int32_t>(hdr[22]) | (static_cast<int32_t>(hdr[23]) << 8) |
+                            (static_cast<int32_t>(hdr[24]) << 16) | (static_cast<int32_t>(hdr[25]) << 24);
+        const int32_t aw = w32 < 0 ? -w32 : w32;
+        const int32_t ah = h32 < 0 ? -h32 : h32;
+        if (aw > 0 && aw <= 0xFFFF && ah > 0 && ah <= 0xFFFF) {
+          outWidth = static_cast<uint16_t>(aw);
+          outHeight = static_cast<uint16_t>(ah);
+          outBmpPath = bmpPath;
+          LOG_INF(TAG, "cacheImage: decoded %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
+                  static_cast<unsigned>(outWidth), static_cast<unsigned>(outHeight));
+          return true;
+        }
+      }
+    }
   }
 
   // BMP exists but unreadable header — give up and mark failed.
   LOG_ERR(TAG, "cacheImage: BMP %s has unreadable / absurd dimensions", bmpPath.c_str());
-  SdMan.remove(bmpPath.c_str());
-  FsFile m;
-  if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+  LittleFS.remove(bmpPath.c_str());
+  File m = LittleFS.open(failPath.c_str(), "w");
+  if (m) m.close();
   return false;
 }
 
 bool Fb2::hasPendingImages() const {
+  // v2.0.50: queued JPEGs (no pending file on SD) AND legacy pending dir
+  // (PNGs + leftover JPEGs from older versions) both count as "has work".
+  if (!pendingJpegDecodes_.empty()) return true;
   const std::string pendingDir = cachePath + "/images/pending";
   if (!SdMan.exists(pendingDir.c_str())) return false;
   // Open the directory and check for any entry — directories with no entries
@@ -875,16 +1140,239 @@ bool Fb2::hasPendingImages() const {
   return found;
 }
 
+int Fb2::retryDeferredImages(const std::function<bool()>& shouldAbort) const {
+  // v2.0.49+: deferred-retry path is dead.  No mid-stream abort branch means
+  // deferredImages_ is always empty.  Kept as a no-op so existing call sites
+  // in runBackgroundCacheJob and ReaderCacheController don't need rewiring.
+  (void)shouldAbort;
+  return 0;
+}
+
+// ============================================================================
+// v2.0.50 direct-stream pipeline implementations.
+// ============================================================================
+
+bool Fb2::peekImageDims(const std::string& binaryId, uint16_t& outSrcW, uint16_t& outSrcH) const {
+  outSrcW = 0;
+  outSrcH = 0;
+  if (binaryId.empty()) return false;
+  auto it = binaryIndex_.find(binaryId);
+  if (it == binaryIndex_.end()) return false;
+  const BinaryEntry& entry = it->second;
+  if (entry.byteLength == 0 || entry.mimeType >= 2) return false;
+  if (entry.mimeType == 1) return false;  // PNG: peek not implemented (rare for inline FB2 figs)
+
+  // Cache hit?  We already peeked this binary earlier in the session.
+  auto cachedIt = peekedSourceDims_.find(binaryId);
+  if (cachedIt != peekedSourceDims_.end()) {
+    outSrcW = cachedIt->second.first;
+    outSrcH = cachedIt->second.second;
+    return outSrcW > 0 && outSrcH > 0;
+  }
+
+  FsFile src;
+  if (!SdMan.openFileForRead("FB2", filepath, src)) return false;
+
+  Base64JpegPump pump;
+  pump.init(src, entry.fileOffset, entry.byteLength);
+
+  // Pull just enough JPEG bytes to find SOF.  1 KB is comfortably larger
+  // than any baseline JPEG header — typical SOF lives within the first
+  // 200-500 bytes after SOI + DQT + APP segments.
+  uint8_t header[1024];
+  JPEGFILE jpegFile{};
+  jpegFile.fHandle = &pump;
+  const int32_t got = Base64JpegPump::pfnRead(&jpegFile, header, sizeof(header));
+  src.close();
+
+  if (got < 16) return false;
+
+  uint16_t w = 0, h = 0;
+  if (!parseJpegSofDims(header, static_cast<size_t>(got), &w, &h)) return false;
+  if (w == 0 || h == 0) return false;
+
+  outSrcW = w;
+  outSrcH = h;
+  peekedSourceDims_[binaryId] = {w, h};
+  return true;
+}
+
+bool Fb2::decodeImageDirect(const std::string& binaryId, int targetMaxWidth, int targetMaxHeight,
+                            const std::function<bool()>& shouldAbort) const {
+  if (binaryId.empty()) return false;
+  auto it = binaryIndex_.find(binaryId);
+  if (it == binaryIndex_.end()) return false;
+  const BinaryEntry& entry = it->second;
+  if (entry.byteLength == 0 || entry.mimeType >= 2) return false;
+  if (entry.mimeType == 1) {
+    // PNG fallthrough: pngle has no equivalent stream-pump interface in this
+    // codebase.  The legacy pending/<id>.png + decodeOnePending path still
+    // works for PNGs.  Caller (decodePendingImages) handles this.
+    return false;
+  }
+
+  // v2.0.53: BMP cache lives on internal flash via LittleFS.  Idempotent
+  // fast path — if the BMP is already on flash, nothing to do.
+  const std::string imagesDir = flashImageCacheDir(cachePath);
+  const std::string bmpPath = imagesDir + "/" + binaryId + ".bmp";
+  const std::string failPath = imagesDir + "/" + binaryId + ".failed";
+  if (LittleFS.exists(bmpPath.c_str())) return true;
+  if (LittleFS.exists(failPath.c_str())) return false;
+
+  // Ensure target dir exists (cheap if it does).  Recursive mkdir because
+  // Arduino LittleFS::mkdir doesn't auto-create parents.
+  if (!ensureFlashDir(imagesDir)) {
+    LOG_ERR(TAG, "decodeImageDirect: failed to create flash images dir: %s", imagesDir.c_str());
+    return false;
+  }
+
+  FsFile src;
+  if (!SdMan.openFileForRead("FB2", filepath, src)) return false;
+
+  Base64JpegPump pump;
+  pump.init(src, entry.fileOffset, entry.byteLength);
+
+  // Atomic write: BMP lands on .tmp on LittleFS, rename on success.
+  // Mirrors decodeOnePending's flow so a partial / aborted decode never
+  // leaves a half-written .bmp.  Arduino LittleFS::File inherits Print
+  // so we can pass it directly to jpegStreamToBmp's bmpOut sink.
+  const std::string tmpPath = bmpPath + ".tmp";
+  if (LittleFS.exists(tmpPath.c_str())) LittleFS.remove(tmpPath.c_str());
+
+  File dst = LittleFS.open(tmpPath.c_str(), "w");
+  if (!dst) {
+    src.close();
+    return false;
+  }
+
+  const bool ok = JpegToBmpConverter::jpegStreamToBmp(
+      Base64JpegPump::pfnRead, Base64JpegPump::pfnSeek, Base64JpegPump::pfnClose, &pump,
+      static_cast<int32_t>(pump.logicalSize()), dst, targetMaxWidth, targetMaxHeight, shouldAbort);
+
+  dst.close();
+  src.close();
+
+  if (!ok) {
+    LittleFS.remove(tmpPath.c_str());
+    // Treat ALL decode failures as transient — let the caller's retry
+    // counter (decodePendingImages) decide when to give up permanently.
+    //
+    // v2.0.53 bug context: this branch USED to mark the binary as .failed
+    // when shouldAbort() returned false at the time of the post-failure
+    // check.  But the abort callback fires when free heap drops below 15 KB
+    // — the moment JPEGDEC's ~25 KB workspace gets freed (right after the
+    // aborted decode returns), heap recovers above the threshold so
+    // shouldAbort() now reads "false".  We mis-classified a heap-low
+    // transient as a permanent failure and wrote .failed.  Subsequent
+    // parses of the same binary saw the marker and silently dropped the
+    // ImageBlock entirely, so the user got "no placeholder, no image,
+    // just text" pathology (i_001 in the user's v2.0.53 log).
+    LOG_INF(TAG, "decodeImageDirect: %s decode failed (transient or aborted) — caller retries", binaryId.c_str());
+    return false;
+  }
+
+  if (LittleFS.exists(bmpPath.c_str())) LittleFS.remove(bmpPath.c_str());
+  if (!LittleFS.rename(tmpPath.c_str(), bmpPath.c_str())) {
+    LOG_ERR(TAG, "decodeImageDirect: failed to promote %s -> %s", tmpPath.c_str(), bmpPath.c_str());
+    LittleFS.remove(tmpPath.c_str());
+    return false;
+  }
+
+  // Peek dims from the freshly-written flash BMP for logging.
+  {
+    File hf = LittleFS.open(bmpPath.c_str(), "r");
+    if (hf) {
+      uint8_t hdr[26];
+      const size_t got = hf.read(hdr, sizeof(hdr));
+      hf.close();
+      if (got == sizeof(hdr) && hdr[0] == 'B' && hdr[1] == 'M') {
+        const int32_t w32 = static_cast<int32_t>(hdr[18]) | (static_cast<int32_t>(hdr[19]) << 8) |
+                            (static_cast<int32_t>(hdr[20]) << 16) | (static_cast<int32_t>(hdr[21]) << 24);
+        const int32_t h32 = static_cast<int32_t>(hdr[22]) | (static_cast<int32_t>(hdr[23]) << 8) |
+                            (static_cast<int32_t>(hdr[24]) << 16) | (static_cast<int32_t>(hdr[25]) << 24);
+        const uint32_t aw = static_cast<uint32_t>(w32 < 0 ? -w32 : w32);
+        const uint32_t ah = static_cast<uint32_t>(h32 < 0 ? -h32 : h32);
+        LOG_INF(TAG, "decodeImageDirect: %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
+                static_cast<unsigned>(aw), static_cast<unsigned>(ah));
+        return true;
+      }
+    }
+  }
+  LOG_INF(TAG, "decodeImageDirect: %s -> %s (dim read failed)", binaryId.c_str(), bmpPath.c_str());
+  return true;
+}
+
 int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
-  const std::string imagesDir = cachePath + "/images";
-  const std::string pendingDir = imagesDir + "/pending";
+  // ===========================================================================
+  // v2.0.50 fast path: drain queued JPEG decodes via Base64JpegPump.
+  //
+  // For every binaryId enqueued by cacheImage[fast], call decodeImageDirect
+  // which streams base64 directly from the FB2 source through a JPEGDEC pump,
+  // skipping the legacy pending/<id>.jpg round-trip entirely.  We drain
+  // ONE id per sweep so a navigation cancel doesn't have to wait for an
+  // arbitrary number of pending decodes to finish.
+  // ===========================================================================
+  if (!pendingJpegDecodes_.empty()) {
+    if (shouldAbort && shouldAbort()) return 0;
+    PendingJpegDecode q;
+    {
+      // Pop the first entry (FIFO order matches the parser's emit order, so
+      // images visible on the current page get decoded before far prefetched
+      // ones).
+      q = pendingJpegDecodes_.front();
+      pendingJpegDecodes_.erase(pendingJpegDecodes_.begin());
+    }
+    if (decodeImageDirect(q.binaryId, q.maxBoxWidth, q.maxBoxHeight, shouldAbort)) {
+      return 1;
+    }
+    // ANY failure → bump retry counter and re-queue.  decodeImageDirect no
+    // longer distinguishes abort vs permanent error itself (see v2.0.54
+    // context comment in decodeImageDirect): the abort callback can fire
+    // and clear within microseconds (heap-low transient), so we can't
+    // reliably read the abort state post-failure.  Trust the retry
+    // counter — after kMaxJpegDecodeRetries consecutive failures the
+    // binary is marked .failed permanently.
+    ++q.retries;
+    if (q.retries < kMaxJpegDecodeRetries) {
+      pendingJpegDecodes_.push_back(q);
+    } else {
+      LOG_INF(TAG, "decodePendingImages: giving up on %s after %u retries", q.binaryId.c_str(),
+              static_cast<unsigned>(q.retries));
+      const std::string failPath = flashImageCacheDir(cachePath) + "/" + q.binaryId + ".failed";
+      File m = LittleFS.open(failPath.c_str(), "w");
+      if (m) m.close();
+    }
+    return 0;
+  }
+
+  // Legacy path (PNGs and any leftover pending/ files from older versions):
+  // ===========================================================================
+  // v2.0.49 simplified pipeline: 2 stages instead of 5.
+  //
+  // Old design had preview / low / mid / high / full BMPs (~5 separate decode
+  // passes per image, 5 BMP files on disk per image).  Each intermediate
+  // stage was a full JPEGDEC decode pass at a different hardware scale, costing
+  // 1-5 s + ~30 KB heap.  The visible benefit between stages was marginal
+  // (jumps from chunky-pixelated to slightly-less-chunky), and it tangled us
+  // up in skip-when-useless / skip-when-failed bookkeeping that produced
+  // infinite worker wakeup loops on small / tall sources.
+  //
+  // New design: just preview (chunky 64w via JPEGDEC's HW /8 scale, ~1 s) and
+  // full (target dims via the standard converter, ~3 s).  Two BMP files per
+  // image max.  ImageBlock::render falls back full → preview → placeholder.
+  // No skip rules, no per-stage failure tracking, no givenUp set — the
+  // pipeline is small enough that there's nothing to "get stuck" on.
+  // ===========================================================================
+  // v2.0.53: BMPs land on LittleFS (flash) instead of SD.  Pending source
+  // files (PNG / leftover JPEGs from older versions) still on SD because
+  // pngle / SdFat work with FsFile.
+  const std::string imagesDir = flashImageCacheDir(cachePath);
+  const std::string pendingDir = cachePath + "/images/pending";
   if (!SdMan.exists(pendingDir.c_str())) return 0;
 
-  // Mirrors the maxBox used during fast-mode registration.  Reader-side viewport
-  // is always 452×699 in current themes; using the same constraint here ensures
-  // the eventual BMP matches the placeholder dimensions stored on the page.
-  // (If the viewport ever becomes user-configurable, this should pick the value
-  // up from the same source as Fb2Parser; for now they're both hard-wired.)
+  // Reader-side viewport is hard-wired to 452×699 in current themes; the
+  // converter below honours scaledFit aspect math, so target output dims are
+  // bounded by this box.
   constexpr int kMaxBoxWidth = 452;
   constexpr int kMaxBoxHeight = 699;
 
@@ -916,106 +1404,119 @@ int Fb2::decodePendingImages(const std::function<bool()>& shouldAbort) const {
     dir.close();
   }
 
-  int decoded = 0;
+  if (pendingFiles.empty()) return 0;
+
+  // Pick the image whose progression is furthest behind: the one missing
+  // BOTH preview and full goes first (preview is cheap), then images that
+  // have preview but not full advance to full.  This keeps multiple images
+  // on a page progressing in lockstep instead of one racing to full while
+  // the other sits on placeholder.
+  enum Stage { kNone = 0, kPreview = 1, kFull = 2 };
+
+  struct Item {
+    std::string name;
+    std::string binaryId;
+    std::string pendingPath;
+    std::string bmpPath;
+    std::string previewPath;
+    std::string failPath;
+    bool isPng = false;
+    int currentStage = kNone;
+  };
+
+  Item* picked = nullptr;
+  std::vector<Item> items;
+  items.reserve(pendingFiles.size());
   for (const auto& name : pendingFiles) {
-    // Abort BETWEEN phases / images, not inside the converter.  picojpeg
-    // can't resume mid-decode (every preempted attempt restarts at MCU 0),
-    // so we commit to finishing each phase once started.  ReaderState defers
-    // user input via deferPageTurnUntilWorkerStops, so the lag is bounded by
-    // a single phase's decode time.
-    if (shouldAbort && shouldAbort()) {
-      LOG_INF(TAG, "decodePendingImages: aborted after %d phase(s)", decoded);
-      break;
-    }
-
+    Item it;
+    it.name = name;
     const size_t len = name.size();
-    const bool isPng = (len >= 4 && name.compare(len - 4, 4, ".png") == 0);
-    const std::string binaryId = name.substr(0, len - 4);
-    const std::string pendingPath = pendingDir + "/" + name;
-    const std::string bmpPath = imagesDir + "/" + binaryId + ".bmp";
-    const std::string previewPath = imagesDir + "/" + binaryId + ".preview.bmp";
-    const std::string failPath = imagesDir + "/" + binaryId + ".failed";
+    it.isPng = (len >= 4 && name.compare(len - 4, 4, ".png") == 0);
+    it.binaryId = name.substr(0, len - 4);
+    it.pendingPath = pendingDir + "/" + name;
+    it.bmpPath = imagesDir + "/" + it.binaryId + ".bmp";
+    it.previewPath = imagesDir + "/" + it.binaryId + ".preview.bmp";
+    it.failPath = imagesDir + "/" + it.binaryId + ".failed";
 
-    // Skip if final BMP already exists (idempotent).  Clean up any stale
-    // preview as well — drawBitmap would prefer the full BMP anyway, no need
-    // to keep both on SD.
-    if (SdMan.exists(bmpPath.c_str())) {
-      if (SdMan.exists(previewPath.c_str())) SdMan.remove(previewPath.c_str());
-      SdMan.remove(pendingPath.c_str());
+    // Already at full → clean up the now-stale preview (LittleFS) +
+    // pending (SD) and skip.
+    if (LittleFS.exists(it.bmpPath.c_str())) {
+      if (LittleFS.exists(it.previewPath.c_str())) LittleFS.remove(it.previewPath.c_str());
+      SdMan.remove(it.pendingPath.c_str());
       continue;
     }
 
-    // Phase 1: blurry preview via picojpeg reduce=1 mode (~5-10× faster than
-    // full decode).  Skipped for PNG because pngle has no equivalent — PNGs
-    // go straight to phase 2.  After preview is written, break out of the
-    // sweep so the reader gets a chance to render it; the next BG trigger
-    // (post-render or idle) picks up phase 2 for the same image.
-    const bool needPreview = !isPng && !SdMan.exists(previewPath.c_str());
-    if (needPreview) {
-      FsFile srcFile;
-      if (!SdMan.openFileForRead("FB2", pendingPath, srcFile)) {
-        SdMan.remove(pendingPath.c_str());
-        continue;
-      }
-      // Atomic: write to .tmp, rename on success.  Same reasoning as
-      // decodeOnePending — a failed/aborted preview decode would otherwise
-      // leave a corrupt .preview.bmp that ImageBlock::render's fallback
-      // chain would then surface as a placeholder forever.
-      const std::string previewTmpPath = previewPath + ".tmp";
-      if (SdMan.exists(previewTmpPath.c_str())) SdMan.remove(previewTmpPath.c_str());
-      FsFile previewFile;
-      if (!SdMan.openFileForWrite("FB2", previewTmpPath, previewFile)) {
-        srcFile.close();
-        SdMan.remove(pendingPath.c_str());
-        continue;
-      }
-      const bool ok = JpegToBmpConverter::jpegFileToBmpStreamPreview(srcFile, previewFile);
-      srcFile.close();
-      previewFile.close();
-      if (ok) {
-        if (SdMan.exists(previewPath.c_str())) SdMan.remove(previewPath.c_str());
-        if (SdMan.rename(previewTmpPath.c_str(), previewPath.c_str())) {
-          LOG_INF(TAG, "decodePendingImages[preview]: %s -> %s", binaryId.c_str(), previewPath.c_str());
-          ++decoded;
-          // Yield: let the reader re-render with the preview before we eat
-          // the 5-6 s that the full decode costs.
-          break;
-        }
-        SdMan.remove(previewTmpPath.c_str());
-      } else {
-        SdMan.remove(previewTmpPath.c_str());
-      }
-      // Preview failed / promote failed — fall through to phase 2 so we
-      // still get a full decode if possible.
+    if (LittleFS.exists(it.previewPath.c_str())) {
+      it.currentStage = kPreview;
     }
-
-    // Phase 2: full decode via the standard quick path (Atkinson-thresholded
-    // 2-bit BMP).  shouldAbort=nullptr — we're committed once started.
-    if (decodeOnePending(pendingPath, isPng, bmpPath, kMaxBoxWidth, kMaxBoxHeight, nullptr)) {
-      SdMan.remove(pendingPath.c_str());
-      if (SdMan.exists(previewPath.c_str())) SdMan.remove(previewPath.c_str());
-      ++decoded;
-      uint16_t w = 0, h = 0;
-      if (readBmpDimensions(bmpPath, w, h)) {
-        LOG_INF(TAG, "decodePendingImages[full]: %s -> %s (%ux%u)", binaryId.c_str(), bmpPath.c_str(),
-                static_cast<unsigned>(w), static_cast<unsigned>(h));
-      } else {
-        LOG_INF(TAG, "decodePendingImages[full]: %s -> %s (dim read failed)", binaryId.c_str(), bmpPath.c_str());
-      }
-      // Hard cap: at most one image per BG sweep.  The
-      // pendingBackgroundEpubRefresh_ repaint flag schedules a redraw, and
-      // the next post-render / idle trigger fires another sweep for the
-      // next image.
-      break;
-    }
-    LOG_ERR(TAG, "decodePendingImages: %s decode failed (id=%s)", isPng ? "PNG" : "JPEG", binaryId.c_str());
-    SdMan.remove(bmpPath.c_str());
-    if (SdMan.exists(previewPath.c_str())) SdMan.remove(previewPath.c_str());
-    SdMan.remove(pendingPath.c_str());
-    FsFile m;
-    if (SdMan.openFileForWrite("FB2", failPath, m)) m.close();
+    items.push_back(std::move(it));
   }
-  return decoded;
+  if (items.empty()) return 0;
+
+  for (auto& it : items) {
+    if (!picked || it.currentStage < picked->currentStage) {
+      picked = &it;
+    }
+  }
+  if (!picked) return 0;
+
+  if (shouldAbort && shouldAbort()) {
+    LOG_INF(TAG, "decodePendingImages: aborted before phase");
+    return 0;
+  }
+
+  // PNGs skip preview (pngle has no hardware-scale equivalent — it'd cost the
+  // same as a full decode) and jump straight to full.
+  const int nextStage = picked->isPng ? kFull : (picked->currentStage + 1);
+
+  if (nextStage == kPreview) {
+    FsFile srcFile;
+    if (!SdMan.openFileForRead("FB2", picked->pendingPath, srcFile)) return 0;
+    const std::string tmpPath = picked->previewPath + ".tmp";
+    if (LittleFS.exists(tmpPath.c_str())) LittleFS.remove(tmpPath.c_str());
+    File dstFile = LittleFS.open(tmpPath.c_str(), "w");
+    if (!dstFile) {
+      srcFile.close();
+      return 0;
+    }
+    const bool ok = JpegToBmpConverter::jpegFileToBmpStreamPreview(srcFile, dstFile, shouldAbort);
+    srcFile.close();
+    dstFile.close();
+    if (!ok) {
+      LittleFS.remove(tmpPath.c_str());
+      return 0;
+    }
+    if (LittleFS.exists(picked->previewPath.c_str())) LittleFS.remove(picked->previewPath.c_str());
+    if (!LittleFS.rename(tmpPath.c_str(), picked->previewPath.c_str())) {
+      LittleFS.remove(tmpPath.c_str());
+      return 0;
+    }
+    LOG_INF(TAG, "decodePendingImages[preview]: %s -> %s", picked->binaryId.c_str(), picked->previewPath.c_str());
+    return 1;
+  }
+
+  // kFull: standard atomic .bmp.tmp + rename via decodeOnePending (PNG-aware).
+  // decodeOnePending writes BMP to LittleFS now (see its v2.0.53 update).
+  if (decodeOnePending(picked->pendingPath, picked->isPng, picked->bmpPath, kMaxBoxWidth, kMaxBoxHeight,
+                       shouldAbort)) {
+    SdMan.remove(picked->pendingPath.c_str());
+    if (LittleFS.exists(picked->previewPath.c_str())) LittleFS.remove(picked->previewPath.c_str());
+    LOG_INF(TAG, "decodePendingImages[full]: %s -> %s", picked->binaryId.c_str(), picked->bmpPath.c_str());
+    return 1;
+  }
+  // Genuine failure (or abort).  Only mark .failed for non-aborts so an
+  // aborted decode gets retried on the next BG sweep instead of being
+  // permanently poisoned.
+  if (!shouldAbort || !shouldAbort()) {
+    LOG_ERR(TAG, "decodePendingImages: %s decode failed (id=%s)", picked->isPng ? "PNG" : "JPEG",
+            picked->binaryId.c_str());
+    LittleFS.remove(picked->bmpPath.c_str());
+    if (LittleFS.exists(picked->previewPath.c_str())) LittleFS.remove(picked->previewPath.c_str());
+    SdMan.remove(picked->pendingPath.c_str());
+    File m = LittleFS.open(picked->failPath.c_str(), "w");
+    if (m) m.close();
+  }
+  return 0;
 }
 
 std::string Fb2::getThumbBmpPath() const { return cachePath + "/thumb.bmp"; }
@@ -1056,12 +1557,13 @@ bool Fb2::generateThumbBmp() const {
 }
 
 bool Fb2::loadMetaCache() {
-  FsFile file;
-  if (!SdMan.openFileForRead("FB2", metaCachePath(), file)) {
+  // v2.0.61: meta cache lives on LittleFS alongside page cache (TOC info
+  // is part of "cache", not user data).  No SharedBusLock needed —
+  // LittleFS is on a separate SPI bus from SD/display.
+  File file = LittleFS.open(metaCachePath().c_str(), "r");
+  if (!file) {
     return false;
   }
-
-  snapix::spi::SharedBusLock lk;
 
   uint8_t version;
   if (!serialization::readPodChecked(file, version) || version != kMetaCacheVersion) {
@@ -1144,13 +1646,11 @@ bool Fb2::loadMetaCache() {
 bool Fb2::saveMetaCache() const {
   setupCacheDir();
 
-  FsFile file;
-  if (!SdMan.openFileForWrite("FB2", metaCachePath(), file)) {
+  File file = LittleFS.open(metaCachePath().c_str(), "w");
+  if (!file) {
     LOG_ERR(TAG, "Failed to create meta cache");
     return false;
   }
-
-  snapix::spi::SharedBusLock lk;
 
   serialization::writePod(file, kMetaCacheVersion);
   serialization::writeString(file, title);
@@ -1188,11 +1688,9 @@ bool Fb2::saveMetaCache() const {
     ++written;
   }
 
-  // Explicit sync flushes both file data and the parent directory entry to the
-  // SD card before close().  Without this, SdFat keeps the directory cluster
-  // dirty in its single-sector cache; if the next file operation evicts that
-  // sector, the freshly written meta.bin appears to vanish on the next open.
-  file.sync();
+  // v2.0.61: meta cache moved to LittleFS — flush() is the Arduino File
+  // equivalent of SdFat's sync().  No SD-cache-eviction concerns either.
+  file.flush();
   file.close();
   LOG_INF(TAG, "Saved meta cache (%u TOC items, %u binaries)", tocItemCount, binaryCount);
   return true;
@@ -1202,10 +1700,8 @@ Fb2::TocItem Fb2::getTocItem(uint16_t index) const {
   TocItem item;
   if (index >= tocItemCount_) return item;
 
-  FsFile file;
-  if (!SdMan.openFileForRead("FB2", metaCachePath(), file)) return item;
-
-  snapix::spi::SharedBusLock lk;
+  File file = LittleFS.open(metaCachePath().c_str(), "r");
+  if (!file) return item;
   file.seek(tocLut_[index]);
   if (!serialization::readString(file, item.title)) {
     file.close();

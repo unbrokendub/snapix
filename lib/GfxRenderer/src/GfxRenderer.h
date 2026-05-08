@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Bitmap.h"
+#include "ImageRenderCache.h"
 
 // Forward declaration for external CJK font support
 class ExternalFont;
@@ -86,6 +87,13 @@ class GfxRenderer {
   mutable uint64_t widthCacheKeys_[MAX_WIDTH_CACHE_SIZE] = {};  // 0 = empty sentinel
   mutable int16_t widthCacheValues_[MAX_WIDTH_CACHE_SIZE] = {};
   mutable uint16_t widthCacheCount_ = 0;
+
+  // In-memory BMP cache used by ImageBlock::render to skip the post-decode
+  // SD-read latency cliff.  See ImageRenderCache.h.  Mutable so the const
+  // accessor in the public API can hand out a non-const reference (callers
+  // need to mutate the cache via get/put — render is logically const but
+  // the cache is conceptually a memoization sidecar).
+  mutable ImageRenderCache imageCache_;
 
   static uint64_t makeWidthCacheKey(int fontId, const char* text, EpdFontFamily::Style style) {
     // FNV-1a hash
@@ -199,6 +207,12 @@ class GfxRenderer {
   void fillRect(int x, int y, int width, int height, bool state = true) const;
   void drawImage(const uint8_t bitmap[], int x, int y, int width, int height) const;
   void drawBitmap(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight) const;
+
+  // In-memory BMP cache.  Renderer owns the cache because both the BG
+  // worker (after a JPEG decode lands a fresh BMP on disk) and the
+  // foreground render path (every ImageBlock::render call) need a single
+  // shared instance to coordinate.  See ImageRenderCache.h for details.
+  ImageRenderCache& imageCache() const { return imageCache_; }
 
   // Text
   int getTextWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;

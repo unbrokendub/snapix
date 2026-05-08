@@ -1,8 +1,7 @@
 #pragma once
 
+#include <FS.h>  // v2.0.60: page cache moved to LittleFS — Arduino File type
 #include <RenderConfig.h>
-#include <SdFat.h>
-#include <SharedSpiLock.h>
 
 #include <functional>
 #include <memory>
@@ -43,8 +42,8 @@ class PageCache {
   };
 
   std::string cachePath_;
-  FsFile file_;
-  FsFile readFile_;
+  File file_;
+  File readFile_;
   uint16_t pageCount_ = 0;
   bool isPartial_ = false;
   RenderConfig config_;
@@ -66,14 +65,14 @@ class PageCache {
  public:
   explicit PageCache(std::string cachePath);
   ~PageCache() {
-    snapix::spi::SharedBusLock lk;
+    // v2.0.60: page cache lives on LittleFS now — no SharedBusLock needed
+    // (LittleFS is on a separate SPI bus from SD/display).  flush() is the
+    // Arduino File equivalent of SdFat's sync().
     if (readFile_) {
       readFile_.close();
     }
     if (file_) {
-#ifdef ARDUINO
-      file_.sync();
-#endif
+      file_.flush();
       file_.close();
     }
     residentPages_.clear();

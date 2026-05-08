@@ -26,9 +26,10 @@ constexpr uint8_t SETTINGS_COUNT = 30;
 }  // namespace
 
 Result<void> Settings::save(drivers::Storage& storage) const {
-  // Make sure the directories exist
+  // Make sure the SD-side settings directory exists.  v2.0.60: page cache
+  // moved to LittleFS — PageCache::create ensures the LittleFS cache dir
+  // lazily, no upfront mkdir needed here.
   storage.mkdir(SNAPIX_DIR);
-  storage.mkdir(SNAPIX_CACHE_DIR);
 
   FsFile outputFile;
   auto result = storage.openWrite(SNAPIX_SETTINGS_FILE, outputFile);
@@ -249,7 +250,7 @@ RenderConfig Settings::getRenderConfig(const Theme& theme, uint16_t viewportWidt
 // Legacy methods that use SdMan directly (for early init before Core)
 bool Settings::saveToFile() const {
   SdMan.mkdir(SNAPIX_DIR);
-  SdMan.mkdir(SNAPIX_CACHE_DIR);
+  // v2.0.60: page cache lives on LittleFS now; no SD cache dir to mkdir here.
 
   FsFile outputFile;
   if (!SdMan.openFileForWrite("SET", SNAPIX_SETTINGS_FILE, outputFile)) {

@@ -2,6 +2,7 @@
 
 #include <ParsedText.h>
 #include <RenderConfig.h>
+#include <SdFat.h>  // v2.0.60: FsFile file_ — was previously coming in transitively via TextBlock.h before page-cache moved off SD
 #include <blocks/ImageBlock.h>
 #include <blocks/TextBlock.h>
 #include <expat.h>

@@ -382,6 +382,19 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
   return true;
 }
 
+// v2.0.63 had try/catch wrappers in each expat callback to absorb
+// std::bad_alloc.  Removed in v2.0.64 — the wrapper turned out to be
+// purely cosmetic on a truly OOM heap: throwing std::bad_alloc itself
+// requires __cxa_allocate_exception to malloc ~16 B for the exception
+// object, and that allocation also fails on a fragmented heap.  The
+// C++ runtime then calls __terminate() → abort(), bypassing any
+// catch block we wrote.  The right fix is to NOT enter parser code
+// paths when heap headroom is insufficient — see the pre-flight check
+// in PageCache::extend (cold path) which gates rebuild on
+// largest>=25K & free>=50K.  Combined with ParsedText::words pre-
+// reservation (64 entries) the parser doesn't trigger mid-parse
+// vector growth that would have OOM'd.
+
 void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const XML_Char** atts) {
   auto* self = static_cast<Fb2Parser*>(userData);
   const char* localName = stripNamespace(name);
@@ -530,7 +543,8 @@ void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const
     // shows a placeholder ("[Image]") until then.  The trade-off keeps the
     // page-turn under the user's perceptual threshold instead of stalling
     // for 3-8 s per image.
-    if (!self->fb2_->cacheImage(binaryId, bmpPath, w, h, maxW, maxH, /*fastMode*/ true) || w == 0 || h == 0) {
+    if (!self->fb2_->cacheImage(binaryId, bmpPath, w, h, maxW, maxH, /*fastMode*/ true, self->shouldAbort_) ||
+        w == 0 || h == 0) {
       LOG_DBG(TAG, "image <%s>: cache miss, falling back to skip", binaryId.c_str());
       return;
     }
@@ -538,9 +552,18 @@ void XMLCALL Fb2Parser::startElement(void* userData, const XML_Char* name, const
     auto imageBlock = std::make_shared<ImageBlock>(bmpPath, w, h, /*nodeId*/ "", binaryId, /*resolved*/ "");
 
     // Flush the current text run so the image lands on its own paragraph.
+    // Note: makePages() may call requestXmlSuspend() if it commits the
+    // page that hits the per-batch maxPages limit, which sets
+    // stopRequested_=true.  We must NOT bail out here on stopRequested_
+    // — that would drop `imageBlock` on the floor.  When this happens the
+    // user's just-decoded placeholder ImageBlock would never reach the
+    // serialised page; the next page-render shows ONLY text and the
+    // figure's caption awkwardly slides to the next page (as the user
+    // observed for "рисунок 10" / i_019.jpg in the v2.0.47 trace).
+    // Instead, ALWAYS add the image to whatever page is current after
+    // the flush, then let the outer parser loop handle the suspend.
     if (self->currentTextBlock_ && !self->currentTextBlock_->isEmpty()) {
       self->makePages();
-      if (self->stopRequested_) return;
     }
     self->addImageToPage(std::move(imageBlock));
   }
@@ -632,7 +655,6 @@ void XMLCALL Fb2Parser::endElement(void* userData, const XML_Char* name) {
 
 void XMLCALL Fb2Parser::characterData(void* userData, const XML_Char* s, int len) {
   auto* self = static_cast<Fb2Parser*>(userData);
-
   if (self->skipUntilDepth_ < self->depth_) return;
   if (!self->inBody_) return;
 
@@ -841,15 +863,22 @@ void Fb2Parser::addImageToPage(std::shared_ptr<ImageBlock> image) {
   // If the image won't fit in the remaining space on the current page (with
   // caption reserve), complete the current page first.  This avoids both
   // image clipping AND orphaned captions.
+  //
+  // v2.0.58 bug context: this branch USED to bail with `return` when
+  // committing the current page bumped pagesCreated_ over the per-batch
+  // maxPages limit.  But by the time control reaches here, the XML parser
+  // has already consumed the <image> element — bailing without placing
+  // means the image is dropped from the page layout permanently.  The
+  // serialised cache page contains only text; the user observes "image
+  // never renders, no placeholder, caption flows to next page" exactly
+  // (i_029 / "Таблица 12" pathology).  Fix: ALWAYS place the image, then
+  // suspend afterwards if the page budget is exceeded.  The in-flight
+  // currentPage_ holding the image survives across XML suspend/resume,
+  // and the next batch's first commit (or end-of-file flush) emits it.
   if (currentPageNextY_ + imageHeight + reserveBelow > config_.viewportHeight) {
     if (currentPage_ && !currentPage_->elements.empty()) {
       onPageComplete_(std::move(currentPage_));
       pagesCreated_++;
-      if (maxPages_ > 0 && pagesCreated_ >= maxPages_) {
-        hitMaxPages_ = true;
-        requestXmlSuspend();
-        return;
-      }
     }
     startNewPage();
   }
@@ -867,6 +896,14 @@ void Fb2Parser::addImageToPage(std::shared_ptr<ImageBlock> image) {
   // paragraph doesn't bump into it.
   const int lineHeight = std::max(8, static_cast<int>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression));
   currentPageNextY_ = static_cast<int16_t>(std::min(yPos + imageHeight + lineHeight, 32767));
+
+  // Image is placed; safe to suspend now if the per-batch budget was hit
+  // when we committed the previous page above.  The currentPage_ carrying
+  // this image persists across the suspend/resume boundary.
+  if (maxPages_ > 0 && pagesCreated_ >= maxPages_) {
+    hitMaxPages_ = true;
+    requestXmlSuspend();
+  }
 }
 
 void Fb2Parser::startNewPage() {

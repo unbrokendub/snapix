@@ -3,6 +3,7 @@
 #include <Epub.h>
 #include <GfxRenderer.h>
 #include <InputManager.h>
+#include <JpegToBmpConverter.h>  // v2.0.63: warmup() pre-allocates JPEGDEC+arena from setup()
 #include <LittleFS.h>  // Must be before SdFat includes to avoid FILE_READ/FILE_WRITE redefinition
 #include <SDCardManager.h>
 #include <SPI.h>
@@ -703,6 +704,32 @@ bool earlyInit() {
   } else {
     LOG_INF(TAG, "LittleFS mounted");
   }
+
+  // v2.0.66: removed `JpegToBmpConverter::warmup()` call here.
+  //
+  // Warmup was added in v2.0.63 to "stabilize fragmentation" by pinning
+  // JPEGDEC (~25 KB) + decode arena (32 KB) at one end of the heap during
+  // setup().  Idea was that big blocks at a stable address would let the
+  // remaining heap stay contiguous for transient allocations.
+  //
+  // In practice it was net-negative: 57 KB permanently pinned starved
+  // the steady-state working budget (parser, glyph cache, resident
+  // pages, render scratch).  ESP32-C3 has ~145 KB usable heap after
+  // Arduino+FreeRTOS init; display framebuffer (48 KB) + fonts +
+  // resident pages take another 70-80 KB; warmup left ~17 KB instead
+  // of the ~75 KB available with lazy alloc.  Cold-rebuild parsing
+  // started failing because its 25-50 KB working set didn't fit, so
+  // BG cache constantly skipped → more Loading screens, not fewer.
+  //
+  // Lazy alloc (the v2.0.62 behaviour) is fine: JPEGDEC is allocated
+  // on first decode, arena sized to max(scratch, BMP) on first decode
+  // (v2.0.59 logic).  The arena's stable address is naturally enforced
+  // because nothing else allocates 25-30 KB blocks transiently.
+  //
+  // The warmup() function is kept in JpegToBmpConverter for now (no
+  // call site) — useful if we ever need to pre-warm in a different
+  // architectural context.  Marked unused but not deleted.
+  // JpegToBmpConverter::warmup();  // intentionally not called
 
   return true;
 }

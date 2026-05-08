@@ -66,6 +66,14 @@ class Bitmap {
   // also call parseHeaders.
   BmpReaderError parseAndLoadAll();
 
+  // Borrowed-buffer mode: parse a BMP from an externally-owned byte buffer
+  // WITHOUT touching the FsFile.  Caller retains ownership of `data` and
+  // must keep it alive for the lifetime of this Bitmap.  Used by
+  // ImageRenderCache hits — the cache holds the buffer, and this Bitmap
+  // points into it for one render.  Skips both the SD allocation and
+  // the file read entirely.
+  BmpReaderError parseFromBorrowedBuffer(const uint8_t* data, size_t length);
+
  private:
   static uint16_t readLE16(FsFile& f);
   static uint32_t readLE32(FsFile& f);
@@ -93,4 +101,9 @@ class Bitmap {
   // pointer for the destructor to free.
   uint8_t* preloadedRows_ = nullptr;
   uint8_t* preloadedFileStart_ = nullptr;
+
+  // True when preloadedRows_/preloadedFileStart_ point at memory we own
+  // (default — destructor will free).  False when we've borrowed bytes
+  // from an external owner (ImageRenderCache); destructor must NOT free.
+  bool preloadedOwned_ = true;
 };

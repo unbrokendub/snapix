@@ -21,11 +21,14 @@ Bitmap::~Bitmap() {
   // parseAndLoadAll(), preloadedFileStart_ is the alloc'd block and
   // preloadedRows_ is offset INTO it.  After preloadAllRows(),
   // preloadedFileStart_ stays nullptr and preloadedRows_ owns its own
-  // buffer.
-  if (preloadedFileStart_) {
-    delete[] preloadedFileStart_;
-  } else if (preloadedRows_) {
-    delete[] preloadedRows_;
+  // buffer.  After parseFromBorrowedBuffer (ImageRenderCache hit),
+  // both point at externally-owned memory — `preloadedOwned_` says don't free.
+  if (preloadedOwned_) {
+    if (preloadedFileStart_) {
+      delete[] preloadedFileStart_;
+    } else if (preloadedRows_) {
+      delete[] preloadedRows_;
+    }
   }
   preloadedRows_ = nullptr;
   preloadedFileStart_ = nullptr;
@@ -34,14 +37,18 @@ Bitmap::~Bitmap() {
 BmpReaderError Bitmap::parseAndLoadAll() {
   if (!file) return BmpReaderError::FileInvalid;
   // Defensive: free any prior allocation so a re-parse starts clean.
-  if (preloadedFileStart_) {
-    delete[] preloadedFileStart_;
-    preloadedFileStart_ = nullptr;
-    preloadedRows_ = nullptr;
-  } else if (preloadedRows_) {
-    delete[] preloadedRows_;
-    preloadedRows_ = nullptr;
+  // Honour preloadedOwned_ — a borrowed buffer's bytes belong to the
+  // caller (ImageRenderCache); we can simply detach without freeing.
+  if (preloadedOwned_) {
+    if (preloadedFileStart_) {
+      delete[] preloadedFileStart_;
+    } else if (preloadedRows_) {
+      delete[] preloadedRows_;
+    }
   }
+  preloadedFileStart_ = nullptr;
+  preloadedRows_ = nullptr;
+  preloadedOwned_ = true;
 
   uint32_t fileSize;
   {
@@ -158,6 +165,90 @@ BmpReaderError Bitmap::parseAndLoadAll() {
   // original allocation pointer so the destructor can free it.
   preloadedFileStart_ = preloadedRows_;
   preloadedRows_ = preloadedRows_ + bfOffBits;
+  return BmpReaderError::Ok;
+}
+
+// Borrowed-buffer parse: same header logic as parseAndLoadAll but consumes a
+// caller-owned byte buffer instead of reading from the FsFile.  The pixel
+// data pointer (`preloadedRows_`) ends up pointing INTO the borrowed buffer;
+// `preloadedOwned_` is set to false so the destructor leaves it alone.
+BmpReaderError Bitmap::parseFromBorrowedBuffer(const uint8_t* data, size_t length) {
+  if (!data || length < 62) return BmpReaderError::FileInvalid;
+
+  // Free any prior owned allocation; release any prior borrow.
+  if (preloadedOwned_) {
+    if (preloadedFileStart_) {
+      delete[] preloadedFileStart_;
+    } else if (preloadedRows_) {
+      delete[] preloadedRows_;
+    }
+  }
+  preloadedFileStart_ = nullptr;
+  preloadedRows_ = nullptr;
+
+  auto leU16 = [](const uint8_t* p) -> uint16_t {
+    return static_cast<uint16_t>(p[0] | (uint16_t(p[1]) << 8));
+  };
+  auto leU32 = [](const uint8_t* p) -> uint32_t {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+  };
+  auto leI32 = [&leU32](const uint8_t* p) -> int32_t { return static_cast<int32_t>(leU32(p)); };
+
+  if (leU16(data + 0) != 0x4D42) return BmpReaderError::NotBMP;
+  bfOffBits = leU32(data + 10);
+  const uint32_t biSize = leU32(data + 14);
+  if (biSize < 40) return BmpReaderError::DIBTooSmall;
+
+  width = leI32(data + 18);
+  const int32_t rawHeight = leI32(data + 22);
+  topDown = rawHeight < 0;
+  height = topDown ? -rawHeight : rawHeight;
+  const uint16_t planes = leU16(data + 26);
+  bpp = leU16(data + 28);
+  const uint32_t comp = leU32(data + 30);
+  const uint32_t colorsUsed = leU32(data + 46);
+  const bool validBpp = bpp == 1 || bpp == 2 || bpp == 8 || bpp == 24 || bpp == 32;
+
+  if (planes != 1) return BmpReaderError::BadPlanes;
+  if (!validBpp) return BmpReaderError::UnsupportedBpp;
+  if (!(comp == 0 || (bpp == 32 && comp == 3))) return BmpReaderError::UnsupportedCompression;
+  if (colorsUsed > 256u) return BmpReaderError::PaletteTooLarge;
+  if (width <= 0 || height <= 0) return BmpReaderError::BadDimensions;
+
+  constexpr int MAX_IMAGE_WIDTH = 2048;
+  constexpr int MAX_IMAGE_HEIGHT = 3072;
+  if (width > MAX_IMAGE_WIDTH || height > MAX_IMAGE_HEIGHT) return BmpReaderError::ImageTooLarge;
+
+  rowBytes = (width * bpp + 31) / 32 * 4;
+  if (bfOffBits + static_cast<uint32_t>(rowBytes) * static_cast<uint32_t>(height) > length) {
+    return BmpReaderError::FileInvalid;
+  }
+
+  for (int i = 0; i < 256; i++) paletteLum[i] = static_cast<uint8_t>(i);
+  if (colorsUsed > 0) {
+    const uint8_t* pal = data + 54;
+    if (54 + colorsUsed * 4 > length) return BmpReaderError::FileInvalid;
+    for (uint32_t i = 0; i < colorsUsed; i++) {
+      const uint8_t* rgb = pal + i * 4;
+      paletteLum[i] = (77u * rgb[2] + 150u * rgb[1] + 29u * rgb[0]) >> 8;
+    }
+  }
+
+  delete atkinsonDitherer;
+  atkinsonDitherer = nullptr;
+  delete fsDitherer;
+  fsDitherer = nullptr;
+
+  // Borrowed pointers — destructor leaves them alone.  preloadedFileStart_
+  // points at the buffer head so existing fast-path code that branches on
+  // it still recognises "we have a slurped file in RAM"; preloadedRows_
+  // is offset to the pixel data.  Cast away const because Bitmap stores
+  // them as non-const for compat with the owned path; we just don't write
+  // through them.
+  preloadedFileStart_ = const_cast<uint8_t*>(data);
+  preloadedRows_ = const_cast<uint8_t*>(data) + bfOffBits;
+  preloadedOwned_ = false;
   return BmpReaderError::Ok;
 }
 

@@ -31,6 +31,51 @@ Snapix is a drop-in replacement for Papyrix with the same features, same SD-card
 
 ¹ SD-card paths changed from `/.papyrix/` to `/.snapix/`, so your first boot will see a clean-install experience. Your books in `/Books/` are untouched.
 
+> [!IMPORTANT]
+> ## ⚠️ Cache moved to internal flash (v2.0.60+)
+>
+> Starting with **v2.0.60**, the OTA-update partition was dropped and the
+> freed space was given to LittleFS, expanding it from **3.4 MB → 9.6 MB**.
+> The book cache (paginated page layouts, decoded image BMPs, TOC, anchors,
+> meta) now lives on the **internal SPI flash** instead of the SD card.
+> Reading progress and bookmarks stay on SD next to your books.
+>
+> **Why:** the SD card and the e-paper display share an SPI bus, so every
+> cache read serialized with display refresh.  That bus contention caused
+> random ~100-300 ms stalls and the rare SDFat "cache directory vanished"
+> crash under memory pressure.  LittleFS lives on a separate flash bus,
+> so cache reads no longer fight with the display — page-load went from
+> ~12-19 ms (SD with bus contention) to ~5-10 ms (LittleFS).
+>
+> **Trade-offs:**
+>
+> | | Before (v2.0.59) | After (v2.0.60+) |
+> |---|---|---|
+> | Page-load latency | 12-19 ms | 5-10 ms |
+> | Cache survives SD swap | yes | no — rebuilt on first open |
+> | Cache survives Settings → "Clear device storage" | optional | wiped |
+> | OTA firmware updates | supported | **not supported** — USB flash only |
+>
+> **Flash endurance.** The W25Q128 NOR chip in the X4 is rated for ~100 000
+> erase/write cycles per sector.  With LittleFS wear-leveling across the
+> ~2 460 sectors of the 9.6 MB cache partition, the theoretical write
+> budget is ~250 million sector-writes (≈ **1 TB lifetime**).  Realistic
+> with LittleFS metadata overhead and ~70-80% leveling efficiency:
+> **≈ 700 GB**.
+>
+> Typical reading generates **1-2 MB** of cache writes per session
+> (one or two cold page-cache rebuilds + a few new image decodes + meta
+> updates).  Even at heavy usage of 5 sessions/day × 1.5 MB ≈ 2.7 GB/year,
+> the flash budget covers **~250 years**.  Battery, buttons, and SD
+> connector will all fail long before the flash wears out.
+>
+> **One-time migration.**  First boot of v2.0.60+ forces a `LittleFS.format()`
+> because the partition table changed (the freed OTA-slot region got
+> absorbed into LittleFS).  Your books, progress, and bookmarks on the SD
+> card are untouched.  The orphaned `/.snapix/cache/` directory on SD can
+> be wiped via **Settings → Cleanup → Clear book cache** (it's already
+> unused after v2.0.60) or deleted manually.
+
 ## Features
 
 ### Reading & Format Support
@@ -88,9 +133,18 @@ Or with [papyrix-flasher](https://github.com/bigbag/papyrix-flasher) (upstream's
 papyrix-flasher flash snapix-*-full.bin
 ```
 
-### OTA update (already running Snapix or Papyrix)
+### OTA / SD update (Papyrix and Snapix < v2.0.60 only)
 
-Copy `snapix-*-firmware.bin` to the `/update/` folder on your SD card as `firmware.bin`. The device will flash on the next boot.
+Older builds supported a "drop `firmware.bin` into `/update/` on the SD
+card and reboot" update path.  **v2.0.60+ removes this** — the OTA app
+slot was repurposed to expand LittleFS for the cache (see the migration
+notice above), so SD-card-triggered reflash is no longer possible.
+Future updates require a USB cable and `esptool` / `papyrix-flasher` per
+the steps above.
+
+If you're upgrading from a pre-v2.0.60 build still running OTA-style
+update: drop `snapix-2.0.60-firmware.bin` into `/update/firmware.bin`
+once.  After it boots into v2.0.60, all subsequent updates need USB.
 
 ### If the device won't boot after flash
 
@@ -164,26 +218,51 @@ git push origin v1.0.1
 
 It builds release firmware and publishes a GitHub Release with `snapix-*-full.bin` (one-shot flashable), `snapix-*-firmware.bin` (OTA), `snapix-*-bootloader.bin`, `snapix-*-partitions.bin`.
 
-## Data caching
+## Data caching (v2.0.60+ split layout)
 
-On first open, each book is cached under `/.snapix/<type>_<hash>/` on the SD card. Subsequent opens use the cache. Structure:
+After v2.0.60 the cache splits across two storage tiers — **user data
+on SD** (persistent, survives reflash and clear-device-storage), **book
+cache on internal flash** (rebuilt on factory reset / first boot of new
+firmware).
+
+**SD card** — `/.snapix/`:
 
 ```
 .snapix/
-├── epub_12471232/            # EPUB cache
-│   ├── progress.bin          # reading position
-│   ├── bookmarks.bin         # (up to 20 per book)
-│   ├── book.bin              # metadata, spine, TOC
-│   ├── sections/<N>.bin      # paginated chapter data
-│   └── images/<hash>.bmp     # converted inline images
-│
-├── fb2_55667788/             # FB2 cache (similar layout)
-├── txt_98765432/             # TXT cache
-├── md_12345678/              # Markdown cache
-└── html_12345678/            # HTML cache
+├── settings.bin                # global settings
+├── state.bin                   # last-opened book, etc.
+├── wifi.bin                    # WiFi credentials
+├── progress/
+│   └── <book_id>.bin           # reading position per book
+└── bookmarks/
+    ├── <book_id>.bin           # bookmarks per book (up to 20)
+    └── <book_id>.txt           # human-readable bookmark export
 ```
 
-Clear via **Settings → Cleanup**, or delete `.snapix/` manually. See [docs/file-formats.md](docs/file-formats.md) for binary layouts.
+**Internal flash (LittleFS)** — root paths:
+
+```
+/cache/<book_id>/               # book cache (paginated layouts + meta)
+├── meta.bin                    # title, author, TOC items, binary index
+├── pages_<spine_hash>.bin      # serialized Page objects per section
+├── pages_<spine_hash>.bin.anchors  # TOC anchor → page-number mapping
+└── .cover.failed               # marker if cover generation gave up
+
+/img/<book_id>/                 # decoded image BMPs (1bpp, dithered)
+└── <id>.bmp                    # one per <image l:href> in source
+
+/font/                          # user-installed fonts (.epdfont)
+```
+
+`<book_id>` = `<type>_<hash>` where `<type>` is one of `fb2`, `epub`,
+`txt`, `md`, `html`, `xtc` and `<hash>` is a deterministic 32-bit hash
+of the source file path.  Same encoding the pre-v2.0.60 SD layout used.
+
+**Clearing.**  **Settings → Cleanup → Clear book cache** wipes both the
+LittleFS `/cache/` + `/img/` trees AND any orphaned SD `/.snapix/cache/`
+left over from pre-v2.0.60 builds.  **Clear device storage** runs a full
+`LittleFS.format()` which also nukes installed fonts.  See
+[docs/file-formats.md](docs/file-formats.md) for binary layouts.
 
 ## Credits
 

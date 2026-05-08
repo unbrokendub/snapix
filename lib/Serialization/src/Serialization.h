@@ -1,17 +1,22 @@
 #pragma once
 #include <Logging.h>
-#include <SdFat.h>
 
 #include <iostream>
 
+// v2.0.60: file-based overloads were FsFile-specific (SdFat).  PageCache
+// migrating to LittleFS needs Arduino-File-based versions too.  Solution:
+// template the file overloads on FileT — both FsFile (SdFat) and File
+// (Arduino FS) have compatible read/write/seekCur signatures, so a single
+// templated implementation serves both.  std::ostream/istream stay as
+// non-template overloads (they don't share an interface with file types).
 namespace serialization {
 template <typename T>
 static void writePod(std::ostream& os, const T& value) {
   os.write(reinterpret_cast<const char*>(&value), sizeof(T));
 }
 
-template <typename T>
-static void writePod(FsFile& file, const T& value) {
+template <typename FileT, typename T>
+static void writePod(FileT& file, const T& value) {
   file.write(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
 }
 
@@ -20,13 +25,13 @@ static void readPod(std::istream& is, T& value) {
   is.read(reinterpret_cast<char*>(&value), sizeof(T));
 }
 
-template <typename T>
-static void readPod(FsFile& file, T& value) {
+template <typename FileT, typename T>
+static void readPod(FileT& file, T& value) {
   file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T));
 }
 
-template <typename T>
-[[nodiscard]] static bool readPodChecked(FsFile& file, T& value) {
+template <typename FileT, typename T>
+[[nodiscard]] static bool readPodChecked(FileT& file, T& value) {
   return file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T)) == sizeof(T);
 }
 
@@ -36,7 +41,8 @@ static void writeString(std::ostream& os, const std::string& s) {
   os.write(s.data(), len);
 }
 
-static void writeString(FsFile& file, const std::string& s) {
+template <typename FileT>
+static void writeString(FileT& file, const std::string& s) {
   const uint32_t len = s.size();
   writePod(file, len);
   file.write(reinterpret_cast<const uint8_t*>(s.data()), len);
@@ -59,9 +65,10 @@ static void writeString(FsFile& file, const std::string& s) {
   return is.good();
 }
 
-[[nodiscard]] static bool readString(FsFile& file, std::string& s) {
+template <typename FileT>
+[[nodiscard]] static bool readString(FileT& file, std::string& s) {
   uint32_t len;
-  if (file.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != sizeof(len)) {
+  if (file.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != static_cast<int>(sizeof(len))) {
     s.clear();
     return false;
   }
@@ -78,19 +85,24 @@ static void writeString(FsFile& file, const std::string& s) {
   return true;
 }
 
-[[nodiscard]] static bool skipString(FsFile& file) {
+template <typename FileT>
+[[nodiscard]] static bool skipString(FileT& file) {
   uint32_t len;
-  if (file.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != sizeof(len)) {
+  if (file.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != static_cast<int>(sizeof(len))) {
     return false;
   }
   if (len > 65536) {
     return false;
   }
-  return len == 0 || file.seekCur(len);
+  // Both FsFile (SdFat) and Arduino File expose seek(absolute pos) — use
+  // current position + offset for a portable forward-skip.  FsFile also
+  // has seekCur(rel) but Arduino File does not, so this construct is the
+  // common-denominator API.
+  return len == 0 || file.seek(file.position() + len);
 }
 
-template <typename T>
-static void readPodValidated(FsFile& file, T& value, T maxValue) {
+template <typename FileT, typename T>
+static void readPodValidated(FileT& file, T& value, T maxValue) {
   T temp;
   file.read(reinterpret_cast<uint8_t*>(&temp), sizeof(T));
   if (temp < maxValue) {

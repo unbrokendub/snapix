@@ -97,12 +97,19 @@
 #define LITERATA_12_FONT_ID       (-1241594796)
 #define LITERATA_13_FONT_ID       (-1524126485)
 
-// System directory for settings and cache
+// System directory for settings/state/wifi — lives on SD card next to user
+// books.  Persistent across reflash, survives LittleFS format.
 #define SNAPIX_DIR "/.snapix"
-#define SNAPIX_CACHE_DIR SNAPIX_DIR "/cache"
 #define SNAPIX_SETTINGS_FILE SNAPIX_DIR "/settings.bin"
 #define SNAPIX_STATE_FILE SNAPIX_DIR "/state.bin"
 #define SNAPIX_WIFI_FILE SNAPIX_DIR "/wifi.bin"
+
+// Page-cache root — v2.0.60 moved to LittleFS (internal flash).  Image BMPs
+// already lived under /img/ on LittleFS since v2.0.53; the page-cache split
+// off SD eliminates the SPI bus contention between display refresh and
+// page-cache reads.  Path is RELATIVE to LittleFS root, NOT under SNAPIX_DIR
+// (LittleFS is a separate filesystem with its own root).
+#define SNAPIX_CACHE_DIR "/cache"
 
 // Thumbnail dimensions for home screen
 #define THUMB_WIDTH 320

@@ -56,7 +56,19 @@ class ParsedText {
         indentLevel(indentLevel),
         hyphenationEnabled(hyphenationEnabled),
         useGreedyBreaking(useGreedy),
-        isRtl(rtl) {}
+        isRtl(rtl) {
+    // v2.0.64: pre-reserve words to avoid mid-parse vector growth.  Russian
+    // FB2 paragraphs run 50-100 words; without reserve, capacity doubles
+    // 0→1→2→4→8→16→32→64→128 — the 64→128 transition needs ~5 KB
+    // contiguous (WordEntry includes std::string, ~40 B with SSO).  On a
+    // fragmented heap that allocation can fail mid-parse and trigger the
+    // C++ bad_alloc cascade that the runtime can't unwind through expat
+    // (because exception machinery itself OOMs — see Fb2Parser.cpp comment
+    // at the expat handlers).  Reserving 64 upfront covers the typical
+    // paragraph in one allocation; longer paragraphs still grow but from
+    // a stable base.
+    words.reserve(64);
+  }
   ~ParsedText() = default;
 
   void addWord(std::string word, EpdFontFamily::Style fontStyle);

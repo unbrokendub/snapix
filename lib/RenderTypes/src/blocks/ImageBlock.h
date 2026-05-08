@@ -1,6 +1,6 @@
 #pragma once
 
-#include <SdFat.h>
+#include <FS.h>  // v2.0.60: page cache moved to LittleFS — Arduino File type
 
 #include <memory>
 #include <string>
@@ -16,6 +16,29 @@ class ImageBlock final : public Block {
   std::string sourceNodeId;
   std::string sourcePath;
   std::string resolvedPath;
+
+  // Resolved-path cache: ImageBlock::render walks a 5-step fallback chain
+  // (full → high → mid → low → preview), and EACH miss costs ~110-225 ms
+  // on this SD card because the openFileForRead path on a missing file
+  // ends up traversing the FAT directory.  The reader renders each page
+  // up to 5 times per page-turn (1 BW pass + ~4 AA passes), so without
+  // this cache a page with a placeholder image would burn 5 × 4 × 225ms
+  // ≈ 4.5 s on file-existence probes alone.  We resolve once on the
+  // first render() call and reuse the answer for every subsequent pass
+  // within the same page-render cycle.  Page reload (triggered by
+  // pendingBackgroundEpubRefresh_ when a new BMP stage lands)
+  // reconstructs the ImageBlock from disk, so the cache is naturally
+  // invalidated whenever a higher-quality stage becomes available.
+  enum class ResolvedKind : uint8_t {
+    Unresolved = 0,
+    None = 1,         // neither full nor preview exists
+    Full = 2,
+    Preview = 3,
+    // v2.0.48 also had High/Mid/Low values; dropped in v2.0.49 along with
+    // the corresponding BMP stage files (see decodePendingImages).
+  };
+  mutable ResolvedKind resolvedKind_ = ResolvedKind::Unresolved;
+  mutable std::string resolvedRenderPath_;
 
  public:
   // Defensive clamp: dimensions ≤ kMaxDim.  A pre-v2.0.20 bug read top-down BMP
@@ -48,6 +71,6 @@ class ImageBlock final : public Block {
   const std::string& getResolvedPath() const { return resolvedPath; }
 
   void render(GfxRenderer& renderer, int fontId, int x, int y) const;
-  bool serialize(FsFile& file) const;
-  static std::unique_ptr<ImageBlock> deserialize(FsFile& file);
+  bool serialize(File& file) const;
+  static std::unique_ptr<ImageBlock> deserialize(File& file);
 };

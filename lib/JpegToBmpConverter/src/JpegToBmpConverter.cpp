@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <JPEGDEC.h>
 #include <Logging.h>
+#include <esp_heap_caps.h>
 
 #define TAG "JPEG"
 #include <SdFat.h>
@@ -475,8 +476,70 @@ int jpegDraw(JPEGDRAW* pDraw) {
   return 1;
 }
 
-// Allocate all decode-context scratch buffers.  Returns true on success.  On
-// failure, frees whatever was allocated.
+// ---------------------------------------------------------------------------
+// Persistent decode scratch arena.
+//
+// v2.0.56 background: each decode used to allocate 7 separate heap blocks
+// (mcuBand ~6 KB, vertSum 1.5 KB, srcXStart 1.5 KB, errCur/errNext 1.5 KB
+// each, plus tiny outRow/targetGrayRow).  On a 320 KB-RAM ESP32-C3 with the
+// persistent ~25 KB JPEGDEC instance already pinning a hole in the heap,
+// 7 separate allocations carved up whatever was left into ever-smaller
+// fragments.  Once the largest contiguous block dropped below the 8 KB
+// abort-watchdog floor (or `mcuBandSize` itself ~6 KB couldn't allocate
+// contiguously) decodes started failing and never recovered.
+//
+// v2.0.57 fix: ONE contiguous arena big enough for every scratch buffer,
+// allocated lazily on first decode and grown only when a wider image needs
+// more room.  All buffers carve out of this single block so the arena is
+// the only long-lived heap chunk added by JPEG decode (in addition to the
+// shared JPEGDEC).  Memory cost: ~13 KB pinned for a 379-wide source,
+// ~20 KB for a 600-wide source.  In exchange, fragmentation per decode
+// goes from 7 holes → 0 (the arena lives at a stable address forever).
+// ---------------------------------------------------------------------------
+struct DecodeArena {
+  uint8_t* base = nullptr;
+  size_t capacity = 0;
+};
+
+DecodeArena& getSharedArena() {
+  static DecodeArena arena;
+  return arena;
+}
+
+// Round up to 8 bytes for alignment of int32_t / uint32_t / int16_t carve-outs.
+constexpr size_t kAlign = 8;
+inline size_t roundUpAlign(size_t s) { return (s + kAlign - 1) & ~(kAlign - 1); }
+
+// Compute total arena bytes needed for a given decoded/target geometry.
+size_t computeArenaBytes(int decodedW, int targetW, int mcuBandRows) {
+  size_t total = 0;
+  total += roundUpAlign(static_cast<size_t>(decodedW) * static_cast<size_t>(mcuBandRows));  // mcuBand
+  total += roundUpAlign(static_cast<size_t>(decodedW) * sizeof(uint32_t));                  // vertSum
+  total += roundUpAlign(static_cast<size_t>(targetW));                                      // targetGrayRow
+  total += roundUpAlign(static_cast<size_t>((targetW + 31) / 32 * 4));                      // outRow
+  total += roundUpAlign(static_cast<size_t>(targetW + 2) * sizeof(int16_t));                // errCur
+  total += roundUpAlign(static_cast<size_t>(targetW + 2) * sizeof(int16_t));                // errNext
+  total += roundUpAlign(static_cast<size_t>(targetW + 1) * sizeof(int));                    // srcXStart
+  return total;
+}
+
+// v2.0.59: predict the size of the resulting BMP file (1bpp BMP header +
+// pixel data).  The arena gets sized to also hold this so ImageBlock::render
+// can later slurp the BMP back into the SAME memory without paying a fresh
+// 26-60 KB heap allocation that routinely OOMs on a fragmented heap.
+size_t expectedBmpFileSize(int targetW, int targetH) {
+  // BMP1bpp layout: 14 (file header) + 40 (DIB header) + 8 (2-entry palette) +
+  // rowStride * targetH where rowStride is targetW bits padded to multiples
+  // of 4 bytes.  Matches writeBmpHeader1bit + processBand row write.
+  const size_t headerBytes = 62;
+  const size_t rowStride = static_cast<size_t>((targetW + 31) / 32) * 4;
+  return headerBytes + rowStride * static_cast<size_t>(targetH);
+}
+
+// Allocate all decode-context scratch buffers from the persistent arena.
+// Returns true on success.  Failure means even a single contiguous arena of
+// the required size cannot be allocated — caller should bail and let the
+// async-jobs retry counter mark the binary as `.failed` after kMaxRetries.
 bool allocateContext(DecodeCtx& ctx, int decodedW, int decodedH, int targetW, int targetH,
                      int mcuBandRows) {
   ctx.decodedW = decodedW;
@@ -485,40 +548,92 @@ bool allocateContext(DecodeCtx& ctx, int decodedW, int decodedH, int targetW, in
   ctx.targetH = targetH;
   ctx.bytesPerRow = (targetW + 31) / 32 * 4;
 
-  // MCU band: decodedW × mcuBandRows bytes.  Worst case ~534 × 16 = 8.5 KB.
+  // v2.0.59: arena must fit BOTH decode-scratch AND the resulting BMP file
+  // (so render-side BMP slurp re-uses the arena).  Size it for the larger
+  // of the two.  If we can't grow to that "preferred" size, fall back to
+  // the strictly-required scratch size so decode still succeeds — render
+  // will then have to fresh-alloc its BMP buffer (and may placeholder if
+  // the heap is fragmented).
+  const size_t scratchBytes = computeArenaBytes(decodedW, targetW, mcuBandRows);
+  const size_t bmpBytes = expectedBmpFileSize(targetW, targetH);
+  const size_t preferred = std::max(scratchBytes, bmpBytes);
+
+  DecodeArena& arena = getSharedArena();
+
+  // Try to grow to `preferred` if the existing arena is smaller.  Allocate
+  // the bigger buffer BEFORE freeing the old one — otherwise an interleaving
+  // alloc could grab the hole and we'd lose both the old arena AND fail the
+  // bigger alloc.  (At this point we briefly need ~old + new bytes
+  // simultaneously — fine on a 320 KB-RAM ESP32-C3.)
+  if (arena.capacity < preferred) {
+    uint8_t* newBase = new (std::nothrow) uint8_t[preferred];
+    if (newBase) {
+      delete[] arena.base;
+      arena.base = newBase;
+      arena.capacity = preferred;
+      LOG_INF(TAG,
+              "JPEG decode arena (re)allocated: %u bytes (decW=%d tgtW=%d, scratch=%u, bmp=%u)",
+              static_cast<unsigned>(preferred), decodedW, targetW,
+              static_cast<unsigned>(scratchBytes), static_cast<unsigned>(bmpBytes));
+    } else if (arena.capacity < scratchBytes) {
+      // Couldn't grow to preferred; fall back to scratch-only size so decode
+      // still works.  BMP slurp will need a separate alloc later (and may
+      // OOM, leaving a placeholder until heap settles).
+      newBase = new (std::nothrow) uint8_t[scratchBytes];
+      if (!newBase) {
+        LOG_ERR(TAG,
+                "JPEG decode arena grow failed (cap=%u, scratch=%u, bmp=%u, free=%u largest=%u)",
+                static_cast<unsigned>(arena.capacity), static_cast<unsigned>(scratchBytes),
+                static_cast<unsigned>(bmpBytes),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+        return false;
+      }
+      delete[] arena.base;
+      arena.base = newBase;
+      arena.capacity = scratchBytes;
+      LOG_INF(TAG,
+              "JPEG decode arena: scratch-only %u bytes (preferred %u didn't fit, free=%u largest=%u)",
+              static_cast<unsigned>(scratchBytes), static_cast<unsigned>(preferred),
+              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    }
+    // else: existing arena already covers scratch (just not BMP).  Keep it.
+  }
+
+  // Carve buffers out of the arena.  Order matches computeArenaBytes() above.
+  uint8_t* p = arena.base;
+  ctx.mcuBand = p;
+  p += roundUpAlign(static_cast<size_t>(decodedW) * static_cast<size_t>(mcuBandRows));
+
+  ctx.vertSum = reinterpret_cast<uint32_t*>(p);
+  p += roundUpAlign(static_cast<size_t>(decodedW) * sizeof(uint32_t));
+
+  ctx.targetGrayRow = p;
+  p += roundUpAlign(static_cast<size_t>(targetW));
+
+  ctx.outRow = p;
+  p += roundUpAlign(static_cast<size_t>(ctx.bytesPerRow));
+
+  ctx.errCur = reinterpret_cast<int16_t*>(p);
+  p += roundUpAlign(static_cast<size_t>(targetW + 2) * sizeof(int16_t));
+
+  ctx.errNext = reinterpret_cast<int16_t*>(p);
+  p += roundUpAlign(static_cast<size_t>(targetW + 2) * sizeof(int16_t));
+
+  ctx.srcXStart = reinterpret_cast<int*>(p);
+  p += roundUpAlign(static_cast<size_t>(targetW + 1) * sizeof(int));
+
+  // Per-decode initialization.  The arena is reused, so previous-decode
+  // residue must be cleared from buffers the algorithm reads before writing.
   const size_t mcuBandSize = static_cast<size_t>(decodedW) * static_cast<size_t>(mcuBandRows);
-  ctx.mcuBand = new (std::nothrow) uint8_t[mcuBandSize];
-  if (!ctx.mcuBand) return false;
   memset(ctx.mcuBand, 0, mcuBandSize);
-
-  ctx.vertSum = new (std::nothrow) uint32_t[decodedW];
-  if (!ctx.vertSum) return false;
   memset(ctx.vertSum, 0, sizeof(uint32_t) * decodedW);
-  ctx.vertSumCount = 0;
-  ctx.currentTargetY = -1;
-  ctx.mcuBandY = -1;
-  ctx.mcuBandHeight = 0;
-
-  ctx.targetGrayRow = new (std::nothrow) uint8_t[targetW];
-  if (!ctx.targetGrayRow) return false;
-
-  ctx.outRow = new (std::nothrow) uint8_t[ctx.bytesPerRow];
-  if (!ctx.outRow) return false;
   memset(ctx.outRow, 0, ctx.bytesPerRow);
-
-  // Floyd-Steinberg error rows.  Pad ±1 on each side so the spill-over math
-  // stays in-bounds at the edges.
-  ctx.errCur = new (std::nothrow) int16_t[targetW + 2];
-  if (!ctx.errCur) return false;
   memset(ctx.errCur, 0, sizeof(int16_t) * (targetW + 2));
-
-  ctx.errNext = new (std::nothrow) int16_t[targetW + 2];
-  if (!ctx.errNext) return false;
   memset(ctx.errNext, 0, sizeof(int16_t) * (targetW + 2));
 
   // Precompute horizontal source-X column boundaries.
-  ctx.srcXStart = new (std::nothrow) int[targetW + 1];
-  if (!ctx.srcXStart) return false;
   for (int outX = 0; outX <= targetW; ++outX) {
     // 16.16 fixed-point: srcX = outX * decodedW * 65536 / targetW; floor by >>16.
     const int64_t v = (static_cast<int64_t>(outX) * static_cast<int64_t>(decodedW) * 65536LL) /
@@ -529,17 +644,18 @@ bool allocateContext(DecodeCtx& ctx, int decodedW, int decodedH, int targetW, in
   ctx.srcXStart[0] = 0;
   ctx.srcXStart[targetW] = decodedW;
 
+  ctx.vertSumCount = 0;
+  ctx.currentTargetY = -1;
+  ctx.mcuBandY = -1;
+  ctx.mcuBandHeight = 0;
+
   return true;
 }
 
+// Arena-backed: scratch pointers all alias into the persistent arena, so we
+// only clear the DecodeCtx fields (no `delete[]`).  The arena itself stays
+// pinned for the rest of the session — see DecodeArena comment above.
 void freeContext(DecodeCtx& ctx) {
-  delete[] ctx.mcuBand;
-  delete[] ctx.vertSum;
-  delete[] ctx.targetGrayRow;
-  delete[] ctx.outRow;
-  delete[] ctx.errCur;
-  delete[] ctx.errNext;
-  delete[] ctx.srcXStart;
   ctx.mcuBand = nullptr;
   ctx.vertSum = nullptr;
   ctx.targetGrayRow = nullptr;
@@ -554,38 +670,42 @@ void freeContext(DecodeCtx& ctx) {
 // open / scale / decode / dither pipeline; they only differ in target box
 // dimensions.
 // ---------------------------------------------------------------------------
-bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int maxW, int maxH,
-                const std::function<bool()>& shouldAbort) {
-  if (!jpegFile) return false;
-
-  {
-    snapix::spi::SharedBusLock lk;
-    if (!lk || !jpegFile.seek(0)) return false;
+// Persistent JPEGDEC instance — allocated on first decode and reused for the
+// rest of the session.  `sizeof(JPEGDEC)` is ~25 KB on ESP32-C3 (the bulk is
+// internal Huffman tables, MCU buffer, and dither workspace embedded in the
+// struct).  v2.0.x re-allocated this on every decode, which churned the heap
+// hard enough that fragmentation eventually dropped the largest free block
+// below the BG worker's `isHeapCritical` threshold (10 KB) and started
+// aborting JPEG decodes mid-flight.  v2.0.54 holds onto the instance so the
+// 25 KB chunk lives at a stable address — heap fluctuations during decode
+// are now bounded by just the scratch buffers (~5-10 KB).
+JPEGDEC* getSharedJpegDec() {
+  static JPEGDEC* shared = nullptr;
+  if (!shared) {
+    shared = new (std::nothrow) JPEGDEC();
+    if (!shared) {
+      LOG_ERR(TAG, "JPEGDEC: OOM allocating shared workspace (~25 KB)");
+    }
   }
+  return shared;
+}
 
-  const int32_t fileSize = static_cast<int32_t>(jpegFile.size());
-  if (fileSize <= 0) return false;
+// Generic stream-source decoder, callable with any JPEGDEC pump (FsFile-backed
+// JpegPumpCtx OR Base64JpegPump).  Caller passes the raw JPEGDEC callback ABI
+// — pfnRead/pfnSeek/pfnClose + a void* handle that those callbacks understand.
+// `iSize` is the upper-bound JPEG byte length (used by JPEGDEC for seek
+// validation; small overshoot is harmless).  Used by the file-based wrapper
+// `decodeImpl` AND the public stream entry point `jpegStreamToBmp`.
+bool decodeImplCallbacks(JPEG_READ_CALLBACK pfnRead, JPEG_SEEK_CALLBACK pfnSeek,
+                         JPEG_CLOSE_CALLBACK pfnClose, void* fHandle, int32_t iSize,
+                         Print& bmpOut, int maxW, int maxH,
+                         const std::function<bool()>& shouldAbort) {
+  if (iSize <= 0) return false;
 
-  std::unique_ptr<uint8_t[]> pumpBuf(new (std::nothrow) uint8_t[JpegPumpCtx::kBufferSize]);
-  if (!pumpBuf) {
-    LOG_ERR(TAG, "JPEG OOM allocating %u-byte pump buffer",
-            static_cast<unsigned>(JpegPumpCtx::kBufferSize));
-    return false;
-  }
+  JPEGDEC* jpeg = getSharedJpegDec();
+  if (!jpeg) return false;  // OOM logged in getSharedJpegDec
 
-  JpegPumpCtx pump = {.file = &jpegFile,
-                      .buffer = pumpBuf.get(),
-                      .bufferPos = 0,
-                      .bufferFilled = 0,
-                      .streamPos = 0};
-
-  std::unique_ptr<JPEGDEC> jpeg(new (std::nothrow) JPEGDEC());
-  if (!jpeg) {
-    LOG_ERR(TAG, "JPEG OOM allocating JPEGDEC workspace");
-    return false;
-  }
-
-  if (jpeg->open(&pump, fileSize, jpegClose, jpegRead, jpegSeek, jpegDraw) == 0) {
+  if (jpeg->open(fHandle, iSize, pfnClose, pfnRead, pfnSeek, jpegDraw) == 0) {
     LOG_ERR(TAG, "JPEGDEC open failed: err=%d", jpeg->getLastError());
     return false;
   }
@@ -614,24 +734,14 @@ bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int maxW, int maxH,
     return false;
   }
 
-  // Pick the largest hardware scale that still leaves us ≥ the target box.
-  // If the source already fits in the box, scale=0 (no hardware scale).
+  // Compute the actual (aspect-preserving) target dims FIRST.  These — not
+  // the maxW × maxH bounding box — are what the HW scale chooser needs to
+  // honour: a 653×466 source aspect-fit into a 226×349 box produces 226×161
+  // (width-bound), so HW /2 (decoded 326×233) is sufficient even though
+  // 233 < 349.  Choosing HW scale against the box would wrongly force /1
+  // and turn a ~3 s decode into a ~12 s decode.
   int effMaxW = maxW > 0 ? maxW : srcW;
   int effMaxH = maxH > 0 ? maxH : srcH;
-  const ScaleResult scale = chooseHardwareScale(srcW, srcH, effMaxW, effMaxH);
-  const int decodedW = scale.decodedW;
-  const int decodedH = scale.decodedH;
-  if (decodedW <= 0 || decodedH <= 0) {
-    LOG_ERR(TAG, "JPEG decoded dimensions degenerate %dx%d", decodedW, decodedH);
-    jpeg->close();
-    return false;
-  }
-
-  // Compute target dims: aspect-preserving, capped at maxW/maxH.  We mirror
-  // FB2::scaledFit() to the byte (using src dims, not decoded dims) so the
-  // BMP comes out at exactly the dimensions ImageBlock placed in its layout
-  // — drawBitmap then renders 1:1 with no scaling.  Truncation matches
-  // scaledFit's `(int)(srcW * scale)` cast.
   int targetW;
   int targetH;
   if (srcW <= effMaxW && srcH <= effMaxH) {
@@ -646,10 +756,22 @@ bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int maxW, int maxH,
   }
   if (targetW < 1) targetW = 1;
   if (targetH < 1) targetH = 1;
-  // We only ever software-downscale: clamp target to the hardware-scaled
-  // decoded dimensions so the area-average step never has to upscale.  In
-  // practice this only fires when (decodedW < effMaxW), which means the
-  // source already fit through hardware scaling alone.
+
+  // Pick the largest hardware scale that still leaves decoded ≥ actual
+  // target.  This is the only valid lower bound — the software downscale
+  // step that follows can ONLY downscale, so decoded must exceed target.
+  const ScaleResult scale = chooseHardwareScale(srcW, srcH, targetW, targetH);
+  const int decodedW = scale.decodedW;
+  const int decodedH = scale.decodedH;
+  if (decodedW <= 0 || decodedH <= 0) {
+    LOG_ERR(TAG, "JPEG decoded dimensions degenerate %dx%d", decodedW, decodedH);
+    jpeg->close();
+    return false;
+  }
+
+  // Defence-in-depth: if rounding pushed targetW/H above decodedW/H (can
+  // happen at the lowest HW scale on small sources), clamp.  The
+  // area-average step downscales only.
   if (targetW > decodedW) targetW = decodedW;
   if (targetH > decodedH) targetH = decodedH;
 
@@ -736,11 +858,96 @@ bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int maxW, int maxH,
   return true;
 }
 
+// FsFile-backed adapter: sets up a JpegPumpCtx around the file and forwards
+// to decodeImplCallbacks.  Keeps the existing file-based public entry points
+// working unchanged.
+bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int maxW, int maxH,
+                const std::function<bool()>& shouldAbort) {
+  if (!jpegFile) return false;
+
+  {
+    snapix::spi::SharedBusLock lk;
+    if (!lk || !jpegFile.seek(0)) return false;
+  }
+
+  const int32_t fileSize = static_cast<int32_t>(jpegFile.size());
+  if (fileSize <= 0) return false;
+
+  std::unique_ptr<uint8_t[]> pumpBuf(new (std::nothrow) uint8_t[JpegPumpCtx::kBufferSize]);
+  if (!pumpBuf) {
+    LOG_ERR(TAG, "JPEG OOM allocating %u-byte pump buffer",
+            static_cast<unsigned>(JpegPumpCtx::kBufferSize));
+    return false;
+  }
+
+  JpegPumpCtx pump = {.file = &jpegFile,
+                      .buffer = pumpBuf.get(),
+                      .bufferPos = 0,
+                      .bufferFilled = 0,
+                      .streamPos = 0};
+
+  return decodeImplCallbacks(jpegRead, jpegSeek, jpegClose, &pump, fileSize, bmpOut, maxW, maxH,
+                             shouldAbort);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
 // Public API.
 // ---------------------------------------------------------------------------
+
+// v2.0.59: lend the persistent decode arena to non-decoder callers (e.g.
+// ImageBlock::render slurping a BMP file from LittleFS).  See header
+// comment for ownership / threading caveats.
+uint8_t* JpegToBmpConverter::borrowDecodeArena(size_t needed) {
+  DecodeArena& arena = getSharedArena();
+  if (arena.base == nullptr || arena.capacity < needed) return nullptr;
+  return arena.base;
+}
+
+size_t JpegToBmpConverter::decodeArenaCapacity() {
+  return getSharedArena().capacity;
+}
+
+// v2.0.63: pre-allocate JPEGDEC + arena from setup() to keep them at one end
+// of the heap.  See header comment for fragmentation rationale.
+void JpegToBmpConverter::warmup(size_t arenaBytes) {
+  // Force JPEGDEC instance (~25 KB).  getSharedJpegDec() lazily allocates
+  // on first call; subsequent calls return the same pointer.
+  JPEGDEC* jpeg = getSharedJpegDec();
+  if (!jpeg) {
+    LOG_ERR(TAG, "JPEG warmup: JPEGDEC instance allocation failed");
+    return;
+  }
+  LOG_INF(TAG, "JPEG warmup: JPEGDEC instance ready (free=%u largest=%u)",
+          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+
+  if (arenaBytes == 0) return;
+
+  // Force arena to the requested initial size.  Subsequent decodes may grow
+  // it if a wider image needs more, but typical book images fit in 32 KB.
+  DecodeArena& arena = getSharedArena();
+  if (arena.capacity >= arenaBytes) {
+    return;  // Already at least this size — nothing to do.
+  }
+
+  uint8_t* newBase = new (std::nothrow) uint8_t[arenaBytes];
+  if (!newBase) {
+    LOG_ERR(TAG, "JPEG warmup: arena %u-byte alloc failed (free=%u largest=%u)",
+            static_cast<unsigned>(arenaBytes),
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    return;
+  }
+  delete[] arena.base;
+  arena.base = newBase;
+  arena.capacity = arenaBytes;
+  LOG_INF(TAG, "JPEG warmup: arena %u bytes ready (free=%u largest=%u)",
+          static_cast<unsigned>(arenaBytes),
+          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
 
 // Stub kept solely so the static declaration in JpegToBmpConverter.h still
 // resolves at link time.  This signature dates back to the picojpeg era and
@@ -795,6 +1002,21 @@ bool JpegToBmpConverter::jpegFileToBmpStreamQuick(FsFile& jpegFile, Print& bmpOu
   return decodeImpl(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, shouldAbort);
 }
 
+// Generic stream-source entry point — caller supplies JPEGDEC's own callback
+// ABI plus an opaque handle.  Backbone of v2.0.50's "no pending JPEG file"
+// pipeline: Fb2::decodeImageDirect feeds a Base64JpegPump in here, JPEGDEC
+// pulls bytes through the pump (which decodes base64 from FB2 source
+// inline), and the BMP is written straight to the destination.  No
+// intermediate JPEG file ever lands on SD.
+bool JpegToBmpConverter::jpegStreamToBmp(JPEG_READ_CALLBACK pfnRead, JPEG_SEEK_CALLBACK pfnSeek,
+                                          JPEG_CLOSE_CALLBACK pfnClose, void* fHandle,
+                                          int32_t fileSize, Print& bmpOut, int targetMaxWidth,
+                                          int targetMaxHeight,
+                                          const std::function<bool()>& shouldAbort) {
+  return decodeImplCallbacks(pfnRead, pfnSeek, pfnClose, fHandle, fileSize, bmpOut, targetMaxWidth,
+                             targetMaxHeight, shouldAbort);
+}
+
 // ---------------------------------------------------------------------------
 // peekDimensions: returns SOURCE JPEG dims (not post-downscale dims).  The
 // FB2 image-cache logic in `Fb2::cacheImage` calls scaledFit() on top of
@@ -845,6 +1067,40 @@ bool JpegToBmpConverter::peekDimensions(FsFile& jpegFile, int& outWidth, int& ou
 // pipeline as the full decode but with a tiny target box.  Output is ~64 ×
 // proportional × 1bpp ≈ 0.5 KB and takes <1 s.
 // ---------------------------------------------------------------------------
-bool JpegToBmpConverter::jpegFileToBmpStreamPreview(FsFile& jpegFile, Print& bmpOut) {
-  return decodeImpl(jpegFile, bmpOut, kPreviewTargetSize, kPreviewTargetSize, nullptr);
+bool JpegToBmpConverter::jpegFileToBmpStreamPreview(FsFile& jpegFile, Print& bmpOut,
+                                                    const std::function<bool()>& shouldAbort) {
+  return decodeImpl(jpegFile, bmpOut, kPreviewTargetSize, kPreviewTargetSize, shouldAbort);
+}
+
+// ---------------------------------------------------------------------------
+// Progressive-stage decoder: scales the (target_w × target_h) box by
+// numerator/denominator and runs the standard decodeImpl pipeline.  This is
+// the workhorse for the FB2 BG worker's 5-stage preview chain.
+// ---------------------------------------------------------------------------
+bool JpegToBmpConverter::jpegFileToBmpStreamFraction(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
+                                                     int targetMaxHeight, int numerator, int denominator,
+                                                     const std::function<bool()>& shouldAbort) {
+  if (denominator <= 0) denominator = 1;
+  if (numerator <= 0) numerator = 1;
+  const int scaledW = targetMaxWidth > 0 ? std::max(1, targetMaxWidth * numerator / denominator) : 0;
+  const int scaledH = targetMaxHeight > 0 ? std::max(1, targetMaxHeight * numerator / denominator) : 0;
+  return decodeImpl(jpegFile, bmpOut, scaledW, scaledH, shouldAbort);
+}
+
+bool JpegToBmpConverter::jpegFileToBmpStreamLow(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
+                                                int targetMaxHeight,
+                                                const std::function<bool()>& shouldAbort) {
+  return jpegFileToBmpStreamFraction(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, 1, 4, shouldAbort);
+}
+
+bool JpegToBmpConverter::jpegFileToBmpStreamMid(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
+                                                int targetMaxHeight,
+                                                const std::function<bool()>& shouldAbort) {
+  return jpegFileToBmpStreamFraction(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, 1, 2, shouldAbort);
+}
+
+bool JpegToBmpConverter::jpegFileToBmpStreamHigh(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
+                                                 int targetMaxHeight,
+                                                 const std::function<bool()>& shouldAbort) {
+  return jpegFileToBmpStreamFraction(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, 3, 4, shouldAbort);
 }

@@ -115,7 +115,7 @@ void TextBlock::warmGlyphs(const GfxRenderer& renderer, const int fontId) const 
   }
 }
 
-bool TextBlock::serialize(FsFile& file) const {
+bool TextBlock::serialize(File& file) const {
   // Word count
   serialization::writePod(file, static_cast<uint16_t>(wordData.size()));
 
@@ -137,7 +137,7 @@ bool TextBlock::serialize(FsFile& file) const {
   return true;
 }
 
-std::unique_ptr<TextBlock> TextBlock::deserialize(FsFile& file) {
+std::unique_ptr<TextBlock> TextBlock::deserialize(File& file) {
   uint16_t wc;
   BLOCK_STYLE style;
 

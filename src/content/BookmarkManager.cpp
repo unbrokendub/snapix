@@ -7,18 +7,35 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../config.h"
 #include "../core/Core.h"
 
 #define TAG "BOOKMARK"
 
 namespace snapix {
 
+namespace {
+// v2.0.61: bookmarks live on SD under /.snapix/bookmarks/<book_id>.bin
+// (was /<cacheDir>/bookmarks.bin, but cacheDir moved to LittleFS in v2.0.60
+// while user data stays on SD).  Same book_id extraction as ProgressManager.
+void buildBookmarkPath(char* out, size_t outSize, const char* cacheDir, const char* ext) {
+  const char* slash = std::strrchr(cacheDir, '/');
+  const char* bookId = slash ? slash + 1 : cacheDir;
+  snprintf(out, outSize, "%s/bookmarks/%s.%s", SNAPIX_DIR, bookId, ext);
+}
+}  // namespace
+
 bool BookmarkManager::save(Core& core, const char* cacheDir, ContentType type, const Bookmark* bookmarks, int count) {
   if (!cacheDir || cacheDir[0] == '\0') return false;
   if (count < 0 || count > MAX_BOOKMARKS) return false;
 
+  // Make sure the SD bookmarks directory exists.
+  char bmDir[280];
+  snprintf(bmDir, sizeof(bmDir), "%s/bookmarks", SNAPIX_DIR);
+  core.storage.mkdir(bmDir);
+
   char path[280];
-  snprintf(path, sizeof(path), "%s/bookmarks.bin", cacheDir);
+  buildBookmarkPath(path, sizeof(path), cacheDir, "bin");
 
   FsFile file;
   auto result = core.storage.openWrite(path, file);
@@ -35,7 +52,7 @@ bool BookmarkManager::save(Core& core, const char* cacheDir, ContentType type, c
   file.close();
   LOG_DBG(TAG, "Saved %d bookmarks", count);
 
-  snprintf(path, sizeof(path), "%s/bookmarks.txt", cacheDir);
+  buildBookmarkPath(path, sizeof(path), cacheDir, "txt");
   result = core.storage.openWrite(path, file);
   if (!result.ok()) {
     LOG_ERR(TAG, "Failed to export bookmarks.txt");
@@ -66,7 +83,7 @@ int BookmarkManager::load(Core& core, const char* cacheDir, Bookmark* bookmarks,
   if (!cacheDir || cacheDir[0] == '\0') return 0;
 
   char path[280];
-  snprintf(path, sizeof(path), "%s/bookmarks.bin", cacheDir);
+  buildBookmarkPath(path, sizeof(path), cacheDir, "bin");
 
   FsFile file;
   auto result = core.storage.openRead(path, file);

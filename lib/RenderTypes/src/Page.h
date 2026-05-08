@@ -1,5 +1,5 @@
 #pragma once
-#include <SdFat.h>
+#include <FS.h>  // v2.0.60: Arduino LittleFS File type — page cache moved off SD
 
 #include <algorithm>
 #include <climits>
@@ -24,7 +24,7 @@ class PageElement {
   virtual ~PageElement() = default;
   virtual PageElementTag getTag() const = 0;
   virtual void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool black = true) = 0;
-  virtual bool serialize(FsFile& file) = 0;
+  virtual bool serialize(File& file) = 0;
 };
 
 // a line from a block element
@@ -37,8 +37,8 @@ class PageLine final : public PageElement {
   PageElementTag getTag() const override { return TAG_PageLine; }
   const TextBlock& getTextBlock() const { return *block; }
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool black = true) override;
-  bool serialize(FsFile& file) override;
-  static std::unique_ptr<PageLine> deserialize(FsFile& file);
+  bool serialize(File& file) override;
+  static std::unique_ptr<PageLine> deserialize(File& file);
 };
 
 // an image on a page
@@ -52,8 +52,8 @@ class PageImage final : public PageElement {
   const ImageBlock& getImageBlock() const { return *block; }
   const std::shared_ptr<ImageBlock>& getImageBlockShared() const { return block; }
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool black = true) override;
-  bool serialize(FsFile& file) override;
-  static std::unique_ptr<PageImage> deserialize(FsFile& file);
+  bool serialize(File& file) override;
+  static std::unique_ptr<PageImage> deserialize(File& file);
 };
 
 class Page {
@@ -108,8 +108,8 @@ class Page {
   std::vector<std::unique_ptr<PageElement>> elements;
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool black = true) const;
   void warmGlyphs(const GfxRenderer& renderer, int fontId) const;
-  bool serialize(FsFile& file) const;
-  static std::unique_ptr<Page> deserialize(FsFile& file);
+  bool serialize(File& file) const;
+  static std::unique_ptr<Page> deserialize(File& file);
 
   bool hasImages() const {
     updateImageMetadataCache();

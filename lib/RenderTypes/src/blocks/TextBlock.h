@@ -1,6 +1,6 @@
 #pragma once
 #include <EpdFontFamily.h>
-#include <SdFat.h>
+#include <FS.h>  // v2.0.60: page cache moved to LittleFS — Arduino File type
 
 #include <cstring>
 #include <memory>
@@ -75,6 +75,6 @@ class TextBlock final : public Block {
   /// Renders BOLD/BOLD_ITALIC using REGULAR/ITALIC with multi-pass draw.
   static uint8_t fakeBold;
   BlockType getType() override { return TEXT_BLOCK; }
-  bool serialize(FsFile& file) const;
-  static std::unique_ptr<TextBlock> deserialize(FsFile& file);
+  bool serialize(File& file) const;
+  static std::unique_ptr<TextBlock> deserialize(File& file);
 };
