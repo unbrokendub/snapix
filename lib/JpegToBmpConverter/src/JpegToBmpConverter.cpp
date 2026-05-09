@@ -10,6 +10,7 @@
 #include <SharedSpiLock.h>
 
 #include <algorithm>
+#include <cmath>  // v2.0.68: std::sqrt for proportional target downscale
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -756,6 +757,40 @@ bool decodeImplCallbacks(JPEG_READ_CALLBACK pfnRead, JPEG_SEEK_CALLBACK pfnSeek,
   }
   if (targetW < 1) targetW = 1;
   if (targetH < 1) targetH = 1;
+
+  // v2.0.68: cap target so the resulting 1bpp BMP doesn't exceed an arena
+  // budget the heap can actually carry alongside other long-lived pinned
+  // allocations (JPEGDEC ~25 KB + resident pages ~30 KB + glyph cache + ...).
+  //
+  // Background: v2.0.59 sized the arena to max(decode_scratch, BMP_size) so
+  // the render-side BMP slurp could re-use the same memory.  For small
+  // images that's a single ~12-26 KB pinned chunk, fine.  For large images
+  // (e.g. 653×884 source → 452×611 target → 36 KB BMP) the arena alone
+  // grabs the largest contiguous block, leaving the runtime with `largest=
+  // 7668` permanently — every subsequent decode aborts at the heap-critical
+  // check, BG cache stops, and the user sees placeholders forever.
+  //
+  // The cap is a quality/visibility trade-off: shrink the displayed image
+  // so the system stays responsive.  24 KB BMP ≈ 350×450 pixels at 1bpp,
+  // which still occupies a meaningful fraction of an X4 portrait page and
+  // is plenty for inline FB2 illustrations.  Sources that already fit
+  // under the cap pass through untouched.
+  constexpr size_t kMaxBmpBytes = 24 * 1024;
+  {
+    const size_t projectedBmp = expectedBmpFileSize(targetW, targetH);
+    if (projectedBmp > kMaxBmpBytes) {
+      const double shrink = std::sqrt(static_cast<double>(kMaxBmpBytes) /
+                                     static_cast<double>(projectedBmp));
+      const int newW = std::max(1, static_cast<int>(targetW * shrink));
+      const int newH = std::max(1, static_cast<int>(targetH * shrink));
+      LOG_INF(TAG,
+              "JPEG target capped %dx%d → %dx%d (projected BMP %u B exceeds %u B arena budget)",
+              targetW, targetH, newW, newH, static_cast<unsigned>(projectedBmp),
+              static_cast<unsigned>(kMaxBmpBytes));
+      targetW = newW;
+      targetH = newH;
+    }
+  }
 
   // Pick the largest hardware scale that still leaves decoded ≥ actual
   // target.  This is the only valid lower bound — the software downscale
