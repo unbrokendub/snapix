@@ -63,4 +63,16 @@ bool isHeapCritical(const HeapState& heap) { return heap.freeBytes < 28 * 1024 |
 
 bool isHeapTight(const HeapState& heap) { return heap.freeBytes < 40 * 1024 || heap.largestBlock < 20 * 1024; }
 
+// v2.0.67: gentler gate for hot extend.  A hot-extend allocation pattern
+// is small (~5-10 KB transient: parser cursor advance + Page->serialize
+// scratch + LittleFS write buffer).  Holding to the strict 28K/10K gate
+// stops BG cache work in mid-session reading where heap is "fragmented
+// but workable" — typical state after a few image decodes.  The lower
+// gate matches the cold-rebuild pre-flight floor (PageCache::extend
+// uses 25K largest / 50K free) so we're never running hot extend in
+// territory where cold rebuild would crash if it happened to fire.
+bool isHeapCriticalForHotExtend(const HeapState& heap) {
+  return heap.freeBytes < 15 * 1024 || heap.largestBlock < 6 * 1024;
+}
+
 }  // namespace snapix::reader

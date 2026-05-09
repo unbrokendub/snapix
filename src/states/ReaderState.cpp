@@ -1744,6 +1744,28 @@ void ReaderState::renderLoadedPage(Core& core, const std::shared_ptr<Page>& page
   if (!pageGlyphsWarm) {
     const uint32_t glyphWarmMs = reader::perfMsNow();
     page->warmGlyphs(renderer_, fontId);
+    // v2.0.67: also warm status-bar font glyphs for the book title.  The
+    // status bar uses theme.statusFontId (typically different from the
+    // reader fontId, so it has its OWN glyph cache).  On a cold cache —
+    // first render after entering reader, when streaming-font caches were
+    // just cleared — the title's Cyrillic/CJK codepoints all miss and
+    // each one triggers a font-file read, which is what makes initial
+    // reader-render-bw spike to 720 ms-8 s on long-Russian-titled books.
+    // Pre-warming is cheap (single batched call) and folds into the
+    // glyph-warm phase that's already on the perf budget.
+    if (core.settings.statusBar != Settings::StatusNone) {
+      const char* title = core.content.metadata().title;
+      if (title && *title) {
+        renderer_.warmTextGlyphs(theme.statusFontId, title);
+      }
+      // If chapter-mode is on AND we have a cached chapter title from a
+      // previous renderStatusBar call, warm it too.  Don't recompute via
+      // findCurrentTocEntry here — that's a TOC lookup we don't want to
+      // pay twice; renderStatusBar itself caches and reuses across renders.
+      if (core.settings.statusBar == Settings::StatusChapter && cachedChapterTitle_[0] != '\0') {
+        renderer_.warmTextGlyphs(theme.statusFontId, cachedChapterTitle_);
+      }
+    }
     readerPerfLog("reader-glyph-warm", glyphWarmMs, nullptr);
   }
 

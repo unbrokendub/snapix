@@ -31,8 +31,13 @@ class PageCache {
   static constexpr uint16_t DEFAULT_CACHE_CHUNK = 5;
   // Extend cache when within this many pages of the end
   static constexpr uint16_t EXTEND_THRESHOLD = 3;
-  // Resident in-memory cache of deserialized pages for snappier turns
-  static constexpr uint8_t RESIDENT_PAGE_LIMIT = 4;
+  // Resident in-memory cache of deserialized pages for snappier turns.
+  // v2.0.67: lowered 4 → 3.  Each resident page pins 5-15 KB depending
+  // on element count; with 4 slots × ~10 KB = ~40 KB always-pinned heap
+  // that fragments the rest.  3 slots covers the common access pattern
+  // (current page + one ahead + one behind) and frees ~10 KB for the
+  // cache extender / image decoder to work in.
+  static constexpr uint8_t RESIDENT_PAGE_LIMIT = 3;
 
  private:
   struct ResidentPage {

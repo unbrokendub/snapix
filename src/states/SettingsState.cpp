@@ -526,7 +526,20 @@ void SettingsState::handleConfirm(Core& core) {
           if (hadOldSdCache) {
             core.storage.rmdir(oldSdCacheDir.c_str());
           }
-          const bool hadCache = hadPageCache || hadImageCache || hadOldSdCache;
+          // v2.0.67: also wipe SD `/cache/` — covers/thumbs accidentally
+          // land there because CoverHelpers + content-class cover code
+          // still uses SdMan with LittleFS-style paths (see ARCH note in
+          // Fb2.cpp::generateCoverBmp).  Until the full CoverHelpers →
+          // LittleFS migration ships in v2.0.68, sweep them here so
+          // "Clear book cache" does what its label says.  This is a
+          // best-effort recursive rmdir; missing dir is OK.
+          const bool hadSdCacheRoot = core.storage.exists("/cache").ok() &&
+                                      *core.storage.exists("/cache");
+          if (hadSdCacheRoot) {
+            core.storage.rmdir("/cache");
+          }
+          const bool hadCache =
+              hadPageCache || hadImageCache || hadOldSdCache || hadSdCacheRoot;
 
           const char* msg = !hadCache ? "No cache to clear"
                             : ok      ? "Cache cleared"

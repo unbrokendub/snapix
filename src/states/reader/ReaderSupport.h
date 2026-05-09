@@ -47,5 +47,12 @@ std::string contentCachePath(const char* cacheDir, int fontId);
 HeapState readHeapState();
 bool isHeapCritical(const HeapState& heap);
 bool isHeapTight(const HeapState& heap);
+// v2.0.67: hot extend uses an existing parser session and just appends
+// pages — its working set is ~5-10 KB transient.  Cold rebuild has its
+// own pre-flight check inside PageCache::extend (~25 KB largest /
+// 50 KB free).  The "is the heap so tight that even a hot extend will
+// OOM" gate can be much looser than isHeapCritical.  Use this in
+// background-cache workers that are about to do a hot extend.
+bool isHeapCriticalForHotExtend(const HeapState& heap);
 
 }  // namespace snapix::reader

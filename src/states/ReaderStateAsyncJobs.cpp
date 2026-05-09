@@ -85,9 +85,17 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
     // Final heap check on the worker thread: the plan was made on the main
     // thread, but heap may have changed since.  Allocating a new
     // ContentParser here when heap is critical risks corrupting SdFat.
+    //
+    // v2.0.67: switched from isHeapCritical (28K free / 10K largest) to
+    // isHeapCriticalForHotExtend (15K free / 6K largest).  The strict
+    // gate stopped ALL background cache work in mid-session reading
+    // where heap is fragmented but workable.  Hot extend's transient
+    // working set is ~5-10 KB; the looser gate matches that.  Cold
+    // rebuild has its own stricter pre-flight inside PageCache::extend
+    // (25 KB largest / 50 KB free) so it's still gated independently.
     {
       const auto workerHeap = reader::readHeapState();
-      if (reader::isHeapCritical(workerHeap)) {
+      if (reader::isHeapCriticalForHotExtend(workerHeap)) {
         LOG_INF(TAG, "[CACHE] worker aborted: heap critical (free=%u largest=%u)",
                 static_cast<unsigned>(workerHeap.freeBytes), static_cast<unsigned>(workerHeap.largestBlock));
         return;
