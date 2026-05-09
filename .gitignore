@@ -14,7 +14,11 @@ data/*
 crosspoint-reader/*
 *.o
 scripts/fontconvert_bin
+scripts/__pycache__/
+__pycache__/
+*.pyc
 test/build/*
+test/fixtures/
 tools/fontconvert-bin/build/
 tools/fontconvert-bin/snapix-fontconvert-bin
 tools/monitor/build/
