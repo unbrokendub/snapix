@@ -549,57 +549,37 @@ bool allocateContext(DecodeCtx& ctx, int decodedW, int decodedH, int targetW, in
   ctx.targetH = targetH;
   ctx.bytesPerRow = (targetW + 31) / 32 * 4;
 
-  // v2.0.59: arena must fit BOTH decode-scratch AND the resulting BMP file
-  // (so render-side BMP slurp re-uses the arena).  Size it for the larger
-  // of the two.  If we can't grow to that "preferred" size, fall back to
-  // the strictly-required scratch size so decode still succeeds — render
-  // will then have to fresh-alloc its BMP buffer (and may placeholder if
-  // the heap is fragmented).
+  // v2.0.70 arena scope: scratch buffers ONLY.  Pre-v2.0.70 we also sized
+  // for the resulting BMP file (so ImageBlock::render could slurp the BMP
+  // back into the same memory) — that pinned 24-36 KB permanently and was
+  // the root cause of the v2.0.67-68 fragmentation lockups.  ImageBlock now
+  // streams BMPs straight off LittleFS row-by-row via the v2.0.70 streaming
+  // Bitmap constructor, so the arena no longer needs to hold them.  Net win:
+  // arena drops from ~24 KB to ~13 KB pinned.
   const size_t scratchBytes = computeArenaBytes(decodedW, targetW, mcuBandRows);
-  const size_t bmpBytes = expectedBmpFileSize(targetW, targetH);
-  const size_t preferred = std::max(scratchBytes, bmpBytes);
 
   DecodeArena& arena = getSharedArena();
 
-  // Try to grow to `preferred` if the existing arena is smaller.  Allocate
+  // Try to grow to scratch size if the existing arena is smaller.  Allocate
   // the bigger buffer BEFORE freeing the old one — otherwise an interleaving
   // alloc could grab the hole and we'd lose both the old arena AND fail the
   // bigger alloc.  (At this point we briefly need ~old + new bytes
   // simultaneously — fine on a 320 KB-RAM ESP32-C3.)
-  if (arena.capacity < preferred) {
-    uint8_t* newBase = new (std::nothrow) uint8_t[preferred];
-    if (newBase) {
-      delete[] arena.base;
-      arena.base = newBase;
-      arena.capacity = preferred;
-      LOG_INF(TAG,
-              "JPEG decode arena (re)allocated: %u bytes (decW=%d tgtW=%d, scratch=%u, bmp=%u)",
-              static_cast<unsigned>(preferred), decodedW, targetW,
-              static_cast<unsigned>(scratchBytes), static_cast<unsigned>(bmpBytes));
-    } else if (arena.capacity < scratchBytes) {
-      // Couldn't grow to preferred; fall back to scratch-only size so decode
-      // still works.  BMP slurp will need a separate alloc later (and may
-      // OOM, leaving a placeholder until heap settles).
-      newBase = new (std::nothrow) uint8_t[scratchBytes];
-      if (!newBase) {
-        LOG_ERR(TAG,
-                "JPEG decode arena grow failed (cap=%u, scratch=%u, bmp=%u, free=%u largest=%u)",
-                static_cast<unsigned>(arena.capacity), static_cast<unsigned>(scratchBytes),
-                static_cast<unsigned>(bmpBytes),
-                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
-                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
-        return false;
-      }
-      delete[] arena.base;
-      arena.base = newBase;
-      arena.capacity = scratchBytes;
-      LOG_INF(TAG,
-              "JPEG decode arena: scratch-only %u bytes (preferred %u didn't fit, free=%u largest=%u)",
-              static_cast<unsigned>(scratchBytes), static_cast<unsigned>(preferred),
+  if (arena.capacity < scratchBytes) {
+    uint8_t* newBase = new (std::nothrow) uint8_t[scratchBytes];
+    if (!newBase) {
+      LOG_ERR(TAG,
+              "JPEG decode arena grow failed (cap=%u, scratch=%u, free=%u largest=%u)",
+              static_cast<unsigned>(arena.capacity), static_cast<unsigned>(scratchBytes),
               static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
               static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+      return false;
     }
-    // else: existing arena already covers scratch (just not BMP).  Keep it.
+    delete[] arena.base;
+    arena.base = newBase;
+    arena.capacity = scratchBytes;
+    LOG_INF(TAG, "JPEG decode arena (re)allocated: %u bytes (decW=%d tgtW=%d)",
+            static_cast<unsigned>(scratchBytes), decodedW, targetW);
   }
 
   // Carve buffers out of the arena.  Order matches computeArenaBytes() above.
@@ -932,8 +912,11 @@ bool decodeImpl(FsFile& jpegFile, Print& bmpOut, int maxW, int maxH,
 // ---------------------------------------------------------------------------
 
 // v2.0.59: lend the persistent decode arena to non-decoder callers (e.g.
-// ImageBlock::render slurping a BMP file from LittleFS).  See header
-// comment for ownership / threading caveats.
+// ImageBlock::render slurping a BMP file from LittleFS).  Now that v2.0.70
+// streams BMPs row-by-row in the renderer, this is dead in-tree but kept
+// public for any out-of-tree caller that still wants opportunistic borrow.
+// Will return nullptr for typical BMP-sized requests since the arena is no
+// longer sized to fit them.
 uint8_t* JpegToBmpConverter::borrowDecodeArena(size_t needed) {
   DecodeArena& arena = getSharedArena();
   if (arena.base == nullptr || arena.capacity < needed) return nullptr;

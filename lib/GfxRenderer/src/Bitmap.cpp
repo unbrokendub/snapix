@@ -14,6 +14,41 @@
 constexpr bool USE_ATKINSON = true;  // Use Atkinson dithering instead of Floyd-Steinberg
 // ============================================================================
 
+namespace {
+// Dual-backend file IO.  Exactly one of sd / fs is non-null at runtime; the
+// helpers branch once at the call site instead of templating Bitmap.  See
+// header for the rationale (LittleFS streaming added in v2.0.70).
+inline bool bmpValid(const FsFile* sd, const File* fs) {
+  if (sd) return static_cast<bool>(*sd);
+  if (fs) return static_cast<bool>(*const_cast<File*>(fs));
+  return false;
+}
+inline bool bmpSeek(FsFile* sd, File* fs, uint32_t pos) {
+  if (sd) return sd->seek(pos);
+  if (fs) return fs->seek(pos);
+  return false;
+}
+inline int bmpRead(FsFile* sd, File* fs, uint8_t* buf, size_t n) {
+  if (sd) return sd->read(buf, n);
+  if (fs) return static_cast<int>(fs->read(buf, n));
+  return -1;
+}
+inline uint32_t bmpSize(FsFile* sd, File* fs) {
+  if (sd) return sd->size();
+  if (fs) return fs->size();
+  return 0;
+}
+// Whole-file slurps want the SharedSpiLock when the source is SD (shared bus
+// with display), but LittleFS lives on a separate SPI bus so the lock would
+// just be stalling the foreground.  Returns true on success.
+struct OptionalBusLock {
+  bool need;
+  snapix::spi::SharedBusLock lk;
+  explicit OptionalBusLock(bool need_) : need(need_), lk() {}
+  explicit operator bool() const { return !need || static_cast<bool>(lk); }
+};
+}  // namespace
+
 Bitmap::~Bitmap() {
   delete atkinsonDitherer;
   delete fsDitherer;
@@ -35,7 +70,7 @@ Bitmap::~Bitmap() {
 }
 
 BmpReaderError Bitmap::parseAndLoadAll() {
-  if (!file) return BmpReaderError::FileInvalid;
+  if (!bmpValid(sdFile_, arduinoFile_)) return BmpReaderError::FileInvalid;
   // Defensive: free any prior allocation so a re-parse starts clean.
   // Honour preloadedOwned_ — a borrowed buffer's bytes belong to the
   // caller (ImageRenderCache); we can simply detach without freeing.
@@ -50,11 +85,14 @@ BmpReaderError Bitmap::parseAndLoadAll() {
   preloadedRows_ = nullptr;
   preloadedOwned_ = true;
 
+  // SharedBusLock is only needed when the source is SD (shared bus with the
+  // display).  LittleFS lives on the internal-flash SPI bus.
+  const bool needLock = (sdFile_ != nullptr);
   uint32_t fileSize;
   {
-    snapix::spi::SharedBusLock lk;
-    if (!lk || !file.seek(0)) return BmpReaderError::SeekStartFailed;
-    fileSize = file.size();
+    OptionalBusLock lk(needLock);
+    if (!lk || !bmpSeek(sdFile_, arduinoFile_, 0)) return BmpReaderError::SeekStartFailed;
+    fileSize = bmpSize(sdFile_, arduinoFile_);
   }
   if (fileSize < 62) return BmpReaderError::FileInvalid;
 
@@ -67,17 +105,18 @@ BmpReaderError Bitmap::parseAndLoadAll() {
   preloadedRows_ = new (std::nothrow) uint8_t[fileSize];
   if (!preloadedRows_) return BmpReaderError::OomRowBuffer;
 
-  // ONE big SharedBusLock-protected read of the entire file.  Pays
-  // SDFat's 100-300 ms post-write-recovery latency exactly once instead
-  // of 6+ times across parseHeaders + preloadAllRows + readRow paths.
+  // ONE big slurp of the entire file.  On SD this pays SDFat's 100-300 ms
+  // post-write-recovery latency exactly once instead of 6+ times across
+  // parseHeaders + preloadAllRows + readRow paths.  On LittleFS the gain
+  // is smaller but still positive.
   {
-    snapix::spi::SharedBusLock lk;
-    if (!lk || !file.seek(0)) {
+    OptionalBusLock lk(needLock);
+    if (!lk || !bmpSeek(sdFile_, arduinoFile_, 0)) {
       delete[] preloadedRows_;
       preloadedRows_ = nullptr;
       return BmpReaderError::FileInvalid;
     }
-    if (file.read(preloadedRows_, fileSize) != static_cast<int>(fileSize)) {
+    if (bmpRead(sdFile_, arduinoFile_, preloadedRows_, fileSize) != static_cast<int>(fileSize)) {
       delete[] preloadedRows_;
       preloadedRows_ = nullptr;
       return BmpReaderError::FileInvalid;
@@ -255,6 +294,15 @@ BmpReaderError Bitmap::parseFromBorrowedBuffer(const uint8_t* data, size_t lengt
 bool Bitmap::preloadAllRows() {
   if (preloadedRows_) return true;  // already done
   if (rowBytes <= 0 || height <= 0) return false;
+  // v2.0.70 streaming-render policy: when the source is LittleFS, do NOT
+  // slurp.  Internal flash is fast (~5-10 ms total per 30 KB BMP) and reads
+  // never contend with the display SPI bus, so streaming row-by-row in
+  // drawBitmap costs almost nothing in latency while saving a large
+  // contiguous heap allocation that routinely OOMed on a fragmented heap.
+  // Returning false here makes drawBitmap fall through to its readRow()
+  // streaming path (which works for upscale and 1:1, the only scales the
+  // v2.0.68 BMP cap can produce — see ImageBlock pipeline notes).
+  if (arduinoFile_) return false;
   // Heap allocation up front: 50 KB-ish for a 500×400 2-bit BMP.  std::nothrow
   // because the BG cache worker can fragment the heap below this threshold,
   // and falling back to row-by-row file.read is correct just slower.
@@ -267,12 +315,12 @@ bool Bitmap::preloadAllRows() {
   // 5+ second drawBitmap renders for a 50 KB image (~366 small reads × 16 ms).
   // One big read pays the same penalty *once* instead of per row.
   snapix::spi::SharedBusLock lk;
-  if (!lk || !file.seek(bfOffBits)) {
+  if (!lk || !sdFile_->seek(bfOffBits)) {
     delete[] preloadedRows_;
     preloadedRows_ = nullptr;
     return false;
   }
-  if (file.read(preloadedRows_, total) != static_cast<int>(total)) {
+  if (sdFile_->read(preloadedRows_, total) != static_cast<int>(total)) {
     delete[] preloadedRows_;
     preloadedRows_ = nullptr;
     return false;
@@ -283,29 +331,6 @@ bool Bitmap::preloadAllRows() {
 const uint8_t* Bitmap::preloadedRow(int rowIndex) const {
   if (!preloadedRows_ || rowIndex < 0 || rowIndex >= height) return nullptr;
   return preloadedRows_ + static_cast<size_t>(rowIndex) * static_cast<size_t>(rowBytes);
-}
-
-uint16_t Bitmap::readLE16(FsFile& f) {
-  const int c0 = f.read();
-  const int c1 = f.read();
-  const auto b0 = static_cast<uint8_t>(c0 < 0 ? 0 : c0);
-  const auto b1 = static_cast<uint8_t>(c1 < 0 ? 0 : c1);
-  return static_cast<uint16_t>(b0) | (static_cast<uint16_t>(b1) << 8);
-}
-
-uint32_t Bitmap::readLE32(FsFile& f) {
-  const int c0 = f.read();
-  const int c1 = f.read();
-  const int c2 = f.read();
-  const int c3 = f.read();
-
-  const auto b0 = static_cast<uint8_t>(c0 < 0 ? 0 : c0);
-  const auto b1 = static_cast<uint8_t>(c1 < 0 ? 0 : c1);
-  const auto b2 = static_cast<uint8_t>(c2 < 0 ? 0 : c2);
-  const auto b3 = static_cast<uint8_t>(c3 < 0 ? 0 : c3);
-
-  return static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) | (static_cast<uint32_t>(b2) << 16) |
-         (static_cast<uint32_t>(b3) << 24);
 }
 
 const char* Bitmap::errorToString(BmpReaderError err) {
@@ -347,8 +372,8 @@ const char* Bitmap::errorToString(BmpReaderError err) {
 }
 
 BmpReaderError Bitmap::parseHeaders() {
-  if (!file) return BmpReaderError::FileInvalid;
-  if (!file.seek(0)) return BmpReaderError::SeekStartFailed;
+  if (!bmpValid(sdFile_, arduinoFile_)) return BmpReaderError::FileInvalid;
+  if (!bmpSeek(sdFile_, arduinoFile_, 0)) return BmpReaderError::SeekStartFailed;
 
   // Bulk-read the entire 54-byte fixed header (BMP file header + DIB
   // BITMAPINFOHEADER) in ONE file.read.  Replaces ~10 individual
@@ -359,7 +384,7 @@ BmpReaderError Bitmap::parseHeaders() {
   // double-parse in ImageBlock::render (probe + actual), the original
   // path was 60+ small reads = 1.2 s of pure file-system overhead.
   uint8_t hdr[54];
-  if (file.read(hdr, sizeof(hdr)) != static_cast<int>(sizeof(hdr))) {
+  if (bmpRead(sdFile_, arduinoFile_, hdr, sizeof(hdr)) != static_cast<int>(sizeof(hdr))) {
     return BmpReaderError::FileInvalid;
   }
 
@@ -414,7 +439,7 @@ BmpReaderError Bitmap::parseHeaders() {
     // Bulk-read the entire palette in one go (4 bytes/entry, BGRA).
     uint8_t paletteBuf[256 * 4];
     const int paletteBytes = static_cast<int>(colorsUsed * 4);
-    if (file.read(paletteBuf, paletteBytes) != paletteBytes) {
+    if (bmpRead(sdFile_, arduinoFile_, paletteBuf, paletteBytes) != paletteBytes) {
       return BmpReaderError::FileInvalid;
     }
     for (uint32_t i = 0; i < colorsUsed; i++) {
@@ -423,9 +448,10 @@ BmpReaderError Bitmap::parseHeaders() {
     }
   }
 
-  if (!file.seek(bfOffBits)) {
+  if (!bmpSeek(sdFile_, arduinoFile_, bfOffBits)) {
     return BmpReaderError::SeekPixelDataFailed;
   }
+  nextStreamRowY_ = 0;  // cursor is at row 0
 
   // Clean up existing ditherers (safe if nullptr)
   delete atkinsonDitherer;
@@ -449,7 +475,23 @@ BmpReaderError Bitmap::parseHeaders() {
 // packed 2bpp output, 0 = black, 1 = dark gray, 2 = light gray, 3 = white
 BmpReaderError Bitmap::readRow(uint8_t* data, uint8_t* rowBuffer, int rowY) const {
   // Note: rowBuffer should be pre-allocated by the caller to size 'rowBytes'
-  if (file.read(rowBuffer, rowBytes) != rowBytes) return BmpReaderError::ShortReadRow;
+  //
+  // v2.0.70: drawBitmap may request rows non-sequentially when downscaling
+  // (srcY skips by >1).  Pre-2.0.70 the streaming path silently corrupted the
+  // image because readRow always pulled the *next* sequential row from the
+  // file cursor, ignoring the requested rowY.  Now, if the caller asks for a
+  // row that isn't where the cursor would land, we seek explicitly.  In the
+  // common monotonic-by-1 case (upscale or 1:1) the seek is skipped.
+  if (rowY >= 0 && rowY != nextStreamRowY_) {
+    if (!bmpSeek(sdFile_, arduinoFile_,
+                 bfOffBits + static_cast<uint32_t>(rowY) * static_cast<uint32_t>(rowBytes))) {
+      return BmpReaderError::SeekPixelDataFailed;
+    }
+  }
+  if (bmpRead(sdFile_, arduinoFile_, rowBuffer, rowBytes) != rowBytes) {
+    return BmpReaderError::ShortReadRow;
+  }
+  nextStreamRowY_ = (rowY >= 0 ? rowY : nextStreamRowY_) + 1;
 
   prevRowY += 1;
 
@@ -568,9 +610,10 @@ BmpReaderError Bitmap::readRow(uint8_t* data, uint8_t* rowBuffer, int rowY) cons
 }
 
 BmpReaderError Bitmap::rewindToData() const {
-  if (!file.seek(bfOffBits)) {
+  if (!bmpSeek(sdFile_, arduinoFile_, bfOffBits)) {
     return BmpReaderError::SeekPixelDataFailed;
   }
+  nextStreamRowY_ = 0;  // cursor is at row 0
 
   // Reset dithering state when rewinding
   prevRowY = -1;

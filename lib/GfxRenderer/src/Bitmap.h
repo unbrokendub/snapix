@@ -1,6 +1,7 @@
 #pragma once
 
-#include <SdFat.h>
+#include <FS.h>      // Arduino File (LittleFS)
+#include <SdFat.h>   // FsFile (SD)
 
 #include <cstdint>
 
@@ -32,7 +33,15 @@ class Bitmap {
  public:
   static const char* errorToString(BmpReaderError err);
 
-  explicit Bitmap(FsFile& file, bool dithering = false) : file(file), dithering(dithering) {}
+  // SD/SDFat-backed file (cover thumbnails, EPUB pre-cached BMPs, etc.).  Reads
+  // go through the SharedSpiLock, since the SD bus is shared with the e-paper
+  // display.
+  explicit Bitmap(FsFile& file, bool dithering = false) : sdFile_(&file), dithering(dithering) {}
+  // Arduino LittleFS-backed file (FB2 inline-image BMPs since v2.0.53).  Reads
+  // go straight to the internal-flash SPI bus — no SharedSpiLock needed, no
+  // SD post-write recovery latency to amortise.  v2.0.70 streaming render
+  // path uses this constructor so per-render heap pinning drops by ~12-15 KB.
+  explicit Bitmap(File& file, bool dithering = false) : arduinoFile_(&file), dithering(dithering) {}
   ~Bitmap();
   BmpReaderError parseHeaders();
   BmpReaderError readRow(uint8_t* data, uint8_t* rowBuffer, int rowY) const;
@@ -75,10 +84,11 @@ class Bitmap {
   BmpReaderError parseFromBorrowedBuffer(const uint8_t* data, size_t length);
 
  private:
-  static uint16_t readLE16(FsFile& f);
-  static uint32_t readLE32(FsFile& f);
-
-  FsFile& file;
+  // Backing file: exactly one of sdFile_ / arduinoFile_ is non-null after
+  // construction; parseFromBorrowedBuffer-only callers may construct via
+  // FsFile and then never touch the file (the borrowed bytes are independent).
+  FsFile* sdFile_ = nullptr;
+  File* arduinoFile_ = nullptr;
   bool dithering = false;
   int width = 0;
   int height = 0;
@@ -90,6 +100,11 @@ class Bitmap {
 
   // Dithering state (mutable for const methods)
   mutable int prevRowY = -1;  // Track row progression for noise dithering
+  // Tracks the BMP row that the file cursor currently points at.  Used by
+  // readRow to detect non-sequential row requests (downscale srcY skips)
+  // and seek to the correct offset before reading.  Reset by parseHeaders
+  // and rewindToData.  Mutable because readRow is const.
+  mutable int nextStreamRowY_ = 0;
   mutable AtkinsonDitherer* atkinsonDitherer = nullptr;
   mutable FloydSteinbergDitherer* fsDitherer = nullptr;
 

@@ -4,10 +4,8 @@
 
 #include <Bitmap.h>
 #include <GfxRenderer.h>
-#include <JpegToBmpConverter.h>  // v2.0.59: borrow persistent decode arena for BMP slurp
 #include <Logging.h>
 #include <Serialization.h>
-#include <esp_heap_caps.h>
 
 #include <memory>
 
@@ -95,9 +93,19 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
   }
 
   if (resolvedKind_ != ResolvedKind::None) {
-    // Slurp the BMP from internal flash.  ~5-10 ms for typical 30 KB BMP,
-    // stable timing (no SD post-write recovery cliff).  Buffer is owned by
-    // this render call only — passed by borrow into parseFromBorrowedBuffer.
+    // v2.0.70 streaming render: open the BMP and let Bitmap stream rows
+    // straight off LittleFS via the new Arduino-File constructor.  No more
+    // 30 KB BMP slurp into the JPEG decode arena (or fresh heap) — drawBitmap
+    // pulls one row at a time through Bitmap::readRow, which is fast on the
+    // internal-flash bus (~75 µs per row * ~400 rows = ~30 ms total) and
+    // never contends with the display SPI.
+    //
+    // The pre-v2.0.70 path slurped the whole BMP either into the persistent
+    // JPEG arena (sized to fit max(scratch, BMP) via expectedBmpFileSize) or
+    // into a transient `new uint8_t[fileSize]` allocation that routinely
+    // OOMed on a fragmented heap.  Both costs are now zero for the render
+    // step, freeing the arena to shrink to scratch-only (~13 KB) and
+    // freeing ~10-15 KB of permanently-pinned RAM.
     File flashFile = LittleFS.open(resolvedRenderPath_.c_str(), "r");
     if (!flashFile) {
       LOG_ERR(TAG, "render: LittleFS.open(\"%s\") failed (exists=%u)", resolvedRenderPath_.c_str(),
@@ -109,54 +117,17 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
                 resolvedRenderPath_.c_str());
         flashFile.close();
       } else {
-        // v2.0.59: try the persistent JPEG decode arena first.  It's sized
-        // at decode-time to fit max(decode-scratch, BMP-file-size), so the
-        // BMP that just got written there fits in the arena without a fresh
-        // 26-60 KB heap allocation.  On a fragmented heap (typical mid-
-        // session) `new uint8_t[fileSize]` would OOM even with plenty of
-        // total free heap — see the v2.0.58 i_018 trace where MaxAlloc was
-        // 25.5 KB while we needed 26.5 KB.  Arena lives at a stable address
-        // from first-decode onward, so it bypasses fragmentation entirely.
-        uint8_t* arenaPtr = JpegToBmpConverter::borrowDecodeArena(fileSize);
-        std::unique_ptr<uint8_t[]> ownedBytes;
-        uint8_t* bmpBytes = arenaPtr;
-        if (!bmpBytes) {
-          // Arena unavailable (no decode happened yet, or BMP > arena).
-          // Try a fresh heap allocation.
-          ownedBytes.reset(new (std::nothrow) uint8_t[fileSize]);
-          if (!ownedBytes) {
-            LOG_ERR(TAG,
-                    "render: heap OOM allocating %u-byte BMP buffer (arena cap=%u, free=%u largest=%u)",
-                    static_cast<unsigned>(fileSize),
-                    static_cast<unsigned>(JpegToBmpConverter::decodeArenaCapacity()),
-                    static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
-                    static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
-            flashFile.close();
-          } else {
-            bmpBytes = ownedBytes.get();
-          }
-        }
-        if (bmpBytes) {
-          const size_t got = flashFile.read(bmpBytes, fileSize);
+        Bitmap stageBitmap(flashFile, true);
+        const BmpReaderError parseRc = stageBitmap.parseHeaders();
+        if (parseRc == BmpReaderError::Ok) {
+          renderer.drawBitmap(stageBitmap, x, y, width, height);
           flashFile.close();
-          if (got != fileSize) {
-            LOG_ERR(TAG, "render: short read got=%u want=%u path=%s", static_cast<unsigned>(got),
-                    static_cast<unsigned>(fileSize), resolvedRenderPath_.c_str());
-          } else {
-            // FsFile reference is unused on the borrowed-buffer path
-            // (Bitmap's file_ member is only consulted by parseAndLoadAll
-            // / readRow, neither of which we call here).
-            FsFile unusedFile;
-            Bitmap stageBitmap(unusedFile, true);
-            const BmpReaderError parseRc = stageBitmap.parseFromBorrowedBuffer(bmpBytes, fileSize);
-            if (parseRc == BmpReaderError::Ok) {
-              renderer.drawBitmap(stageBitmap, x, y, width, height);
-              return;
-            }
-            LOG_ERR(TAG, "render: parseFromBorrowedBuffer failed rc=%u for %s",
-                    static_cast<unsigned>(parseRc), resolvedRenderPath_.c_str());
-          }
+          return;
         }
+        LOG_ERR(TAG, "render: parseHeaders failed rc=%u (%s) for %s",
+                static_cast<unsigned>(parseRc), Bitmap::errorToString(parseRc),
+                resolvedRenderPath_.c_str());
+        flashFile.close();
       }
     }
     // Either the file vanished between resolve and read, or its header is
