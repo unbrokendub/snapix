@@ -111,6 +111,20 @@ class ReaderAsyncJobsController {
   PendingRefreshState& pendingRefresh() { return pendingRefresh_; }
   const PendingRefreshState& pendingRefresh() const { return pendingRefresh_; }
 
+  // v2.0.69: UI-cancel-only abort callback for the JPEG decode path.
+  // Decode is mostly streaming after the arena allocation — extra
+  // allocations during MCU iteration are tiny (LittleFS write buffer
+  // ~256-512 B, no heap allocations in the JPEGDEC inner loop).
+  // Aborting on free<15K mid-decode wastes a successful decode that
+  // would have completed within seconds; the user then sees a stuck
+  // placeholder.  This variant skips heap thresholds so decode runs
+  // to completion unless the user explicitly preempts via button.
+  // Public so ReaderState::runBackgroundCacheJob can swap in the
+  // looser callback for fb2->decodePendingImages() while keeping the
+  // strict abortCallback() (private, used by workerLoop) for parser
+  // and cache-extend work.
+  AbortCallback abortCallbackUiOnly() const;
+
  private:
   enum class JobType : uint8_t {
     None,

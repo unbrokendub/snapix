@@ -256,7 +256,18 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
           }
         }
         if (fb2->hasPendingImages()) {
-          const int decoded = fb2->decodePendingImages(shouldAbort);
+          // v2.0.69: pass UI-only abort callback to JPEG decode.  The
+          // full callback aborts on `free<15K` mid-decode, which fires
+          // routinely after the arena allocation drops free heap below
+          // that threshold — even though decode itself only allocates
+          // tiny LittleFS write buffers from there on.  The result was
+          // a successful decode pattern of "first attempt aborts at
+          // arena alloc, second attempt completes," doubling time-to-
+          // image and often making the user flip past the page before
+          // the image appeared.  UI-only callback lets a started
+          // decode finish unless the user explicitly preempts.
+          const auto decodeAbort = asyncJobs_.abortCallbackUiOnly();
+          const int decoded = fb2->decodePendingImages(decodeAbort);
           if (decoded > 0) {
             LOG_INF(TAG, "[CACHE] decoded %d pending FB2 image(s)", decoded);
             didImageWork = true;

@@ -211,6 +211,12 @@ ReaderAsyncJobsController::AbortCallback ReaderAsyncJobsController::abortCallbac
   };
 }
 
+ReaderAsyncJobsController::AbortCallback ReaderAsyncJobsController::abortCallbackUiOnly() const {
+  return [this]() {
+    return cancelCurrentJob_.load(std::memory_order_acquire) || workerTask_.shouldStop();
+  };
+}
+
 void ReaderAsyncJobsController::workerLoop() {
   while (!workerTask_.shouldStop()) {
     Command cmd;
