@@ -45,6 +45,15 @@ class Bitmap {
   ~Bitmap();
   BmpReaderError parseHeaders();
   BmpReaderError readRow(uint8_t* data, uint8_t* rowBuffer, int rowY) const;
+  // v2.0.71: streaming raw read.  Identical to readRow's file-IO path but
+  // returns the source bytes UNTOUCHED — no palette lookup, no dither, no
+  // 2bpp packing.  drawBitmap uses this for the 1bpp/2bpp source formats
+  // (which it can unpack inline) so the streaming render preserves the same
+  // raw layout that the preloaded fast path delivered.  Without this method,
+  // streaming a 1bpp BMP through readRow returned 2bpp packed bytes that
+  // drawBitmap then mis-decoded as 1bpp — visible as ~2× horizontal stretch
+  // and bottom-row truncation.
+  BmpReaderError readRawRow(uint8_t* rowBuffer, int rowY) const;
   BmpReaderError rewindToData() const;
   int getWidth() const { return width; }
   int getHeight() const { return height; }

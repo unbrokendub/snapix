@@ -472,6 +472,24 @@ BmpReaderError Bitmap::parseHeaders() {
   return BmpReaderError::Ok;
 }
 
+// v2.0.71: raw row read for the streaming fast-bpp path (1bpp / 2bpp sources
+// that drawBitmap unpacks inline).  Same seek-when-non-monotonic logic as
+// readRow but skips all conversion / dither work — caller gets the BMP's
+// own packed bytes.  See header comment for the bug this fixes.
+BmpReaderError Bitmap::readRawRow(uint8_t* rowBuffer, int rowY) const {
+  if (rowY >= 0 && rowY != nextStreamRowY_) {
+    if (!bmpSeek(sdFile_, arduinoFile_,
+                 bfOffBits + static_cast<uint32_t>(rowY) * static_cast<uint32_t>(rowBytes))) {
+      return BmpReaderError::SeekPixelDataFailed;
+    }
+  }
+  if (bmpRead(sdFile_, arduinoFile_, rowBuffer, rowBytes) != rowBytes) {
+    return BmpReaderError::ShortReadRow;
+  }
+  nextStreamRowY_ = (rowY >= 0 ? rowY : nextStreamRowY_) + 1;
+  return BmpReaderError::Ok;
+}
+
 // packed 2bpp output, 0 = black, 1 = dark gray, 2 = light gray, 3 = white
 BmpReaderError Bitmap::readRow(uint8_t* data, uint8_t* rowBuffer, int rowY) const {
   // Note: rowBuffer should be pre-allocated by the caller to size 'rowBytes'

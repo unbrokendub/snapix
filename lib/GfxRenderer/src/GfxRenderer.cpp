@@ -588,15 +588,36 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
     int srcY = isScaled ? static_cast<int>((static_cast<uint32_t>(destY) * invScale_fp) >> 16) : destY;
     if (srcY >= srcHeight) srcY = srcHeight - 1;
 
-    // Source row pointer — either the preloaded buffer (fast path) or the
-    // streaming row buffer that Bitmap::readRow fills from SD.
+    // Source row pointer — three possibilities:
+    //   1. preloaded fast-bpp:    `srcRow` = preloadedRow() = raw srcBpp bytes
+    //   2. streaming fast-bpp:    `srcRow` = bitmapRowBytes_ via readRawRow()
+    //                             = raw srcBpp bytes (v2.0.71 — without this
+    //                             1bpp streaming was decoded as 2bpp packed,
+    //                             producing 2× horizontal stretch).
+    //   3. streaming slow-bpp:    `row` = bitmapOutputRow_ via readRow()
+    //                             = 2bpp packed output (8/24/32 sources only).
+    // The inner unpack loop below branches on `useRawUnpack` to pick the
+    // matching decoder.  When we land on case 3 the loop reads `row` as
+    // 2bpp packed regardless of srcBpp.
     const uint8_t* srcRow = nullptr;
+    const bool useRawUnpack = fastBitmapBpp;  // raw bytes either way (preloaded or readRawRow)
     if (preloaded && fastBitmapBpp) {
       srcRow = bitmap.preloadedRow(srcY);
     } else if (srcY != lastSrcY) {
-      if (bitmap.readRow(bitmapOutputRow_, bitmapRowBytes_, srcY) != BmpReaderError::Ok) {
-        LOG_ERR(TAG, "Failed to read row %d from bitmap", srcY);
-        return;
+      if (fastBitmapBpp) {
+        // Case 2: streaming, but caller will inline-unpack — get raw bytes.
+        if (bitmap.readRawRow(bitmapRowBytes_, srcY) != BmpReaderError::Ok) {
+          LOG_ERR(TAG, "Failed to read raw row %d from bitmap", srcY);
+          return;
+        }
+        srcRow = bitmapRowBytes_;
+      } else {
+        // Case 3: streaming with palette / dither pipeline.  readRow writes
+        // 2bpp packed output into bitmapOutputRow_.
+        if (bitmap.readRow(bitmapOutputRow_, bitmapRowBytes_, srcY) != BmpReaderError::Ok) {
+          LOG_ERR(TAG, "Failed to read row %d from bitmap", srcY);
+          return;
+        }
       }
       lastSrcY = srcY;
     }
@@ -614,9 +635,11 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       // (1 = white, 0 = black per writeBmpHeader1bit's palette); legacy
       // 2-bit BMPs pack 4 pixels per byte, MSB-first.  Either way we
       // collapse to a 0..3 "val" the rest of the loop already
-      // understands.
+      // understands.  When useRawUnpack is false (`row` came from
+      // readRow's palette/dither pipeline) the source layout is
+      // already 2bpp packed regardless of srcBpp — branch accordingly.
       uint8_t val;
-      if (srcBpp == 1) {
+      if (useRawUnpack && srcBpp == 1) {
         val = (row[bmpX >> 3] & (0x80 >> (bmpX & 7))) ? 3 : 0;
       } else {
         val = (row[bmpX >> 2] >> (6 - ((bmpX & 3) << 1))) & 0x3;
