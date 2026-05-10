@@ -152,6 +152,8 @@ uint8_t quantize1bit(int gray, int x, int y) { return gray < 128 ? 0 : 1; }
 
 // BMP scaling implementation
 #include <Logging.h>
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.72)
+#include <LittleFS.h>    // v2.0.72 thumbnail target
 #include <SdFat.h>
 
 #define TAG "BITMAP"
@@ -298,49 +300,56 @@ class RawAtkinson1BitDitherer {
   int16_t* errorRow2;
 };
 
-bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxWidth, int targetMaxHeight) {
-  FsFile srcFile;
-  if (!SdMan.openFileForRead("BMP", srcPath, srcFile)) {
-    LOG_ERR(TAG, "Failed to open source: %s", srcPath);
+// v2.0.72: extracted core from bmpTo1BitBmpScaled so the same code path runs
+// for SD inputs (legacy SdMan-based callers) and LittleFS inputs (cover/thumb
+// pipeline since v2.0.60+).  Both FsFile and Arduino File implement the same
+// read(buf, n) / seek(pos) / position() / close() surface, so a small template
+// is enough — but seekCur is FsFile-only, so the impl uses absolute seeks.
+template <typename SrcF, typename DstF>
+static bool bmpTo1BitBmpScaledImpl(SrcF& srcFile, DstF& dstFile, int targetMaxWidth, int targetMaxHeight) {
+  // Bulk-read the first 30 bytes (BMP file header + DIB up to bpp).  Avoids
+  // the readLE16/readLE32 helpers (FsFile-typed) and lets us parse out of a
+  // RAM buffer with no further file ops.
+  uint8_t hdr[30];
+  if (static_cast<size_t>(srcFile.read(hdr, sizeof(hdr))) != sizeof(hdr)) {
+    LOG_ERR(TAG, "Failed to read BMP header");
     return false;
   }
 
-  // Parse BMP header
-  if (readLE16(srcFile) != 0x4D42) {
+  auto leU32 = [](const uint8_t* p) -> uint32_t {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+  };
+  auto leI32 = [&](const uint8_t* p) -> int32_t { return static_cast<int32_t>(leU32(p)); };
+  auto leU16 = [](const uint8_t* p) -> uint16_t {
+    return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+  };
+
+  if (leU16(hdr + 0) != 0x4D42) {
     LOG_ERR(TAG, "Not a BMP file");
-    srcFile.close();
     return false;
   }
-
-  srcFile.seekCur(8);  // Skip file size and reserved
-  const uint32_t pixelOffset = readLE32(srcFile);
-
-  const uint32_t dibSize = readLE32(srcFile);
+  const uint32_t pixelOffset = leU32(hdr + 10);
+  const uint32_t dibSize = leU32(hdr + 14);
   if (dibSize < 40) {
     LOG_ERR(TAG, "Unsupported DIB header");
-    srcFile.close();
     return false;
   }
-
-  const int srcWidth = static_cast<int32_t>(readLE32(srcFile));
-  const int32_t rawHeight = static_cast<int32_t>(readLE32(srcFile));
+  const int srcWidth = leI32(hdr + 18);
+  const int32_t rawHeight = leI32(hdr + 22);
 
   // Negative height = top-down BMP (rows stored top to bottom)
   // Positive height = bottom-up BMP (rows stored bottom to top)
   // We only support top-down BMPs since that's what our cover.bmp generator produces
   if (rawHeight >= 0) {
     LOG_ERR(TAG, "Bottom-up BMP not supported, expected top-down");
-    srcFile.close();
     return false;
   }
   const int srcHeight = -rawHeight;
-
-  srcFile.seekCur(2);  // Skip planes
-  const uint16_t bpp = readLE16(srcFile);
+  const uint16_t bpp = leU16(hdr + 28);
 
   if (bpp != 1 && bpp != 2) {
     LOG_ERR(TAG, "Expected 1 or 2-bit BMP, got %d-bit", bpp);
-    srcFile.close();
     return false;
   }
 
@@ -382,17 +391,6 @@ bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxW
     LOG_ERR(TAG, "Failed to allocate buffers");
     free(srcRows);
     free(outRow);
-    srcFile.close();
-    return false;
-  }
-
-  // Open destination file
-  FsFile dstFile;
-  if (!SdMan.openFileForWrite("BMP", dstPath, dstFile)) {
-    LOG_ERR(TAG, "Failed to open destination: %s", dstPath);
-    free(srcRows);
-    free(outRow);
-    srcFile.close();
     return false;
   }
 
@@ -406,8 +404,6 @@ bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxW
     LOG_ERR(TAG, "Failed to seek to pixel data");
     free(srcRows);
     free(outRow);
-    srcFile.close();
-    dstFile.close();
     return false;
   }
 
@@ -428,20 +424,20 @@ bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxW
       // Skip rows we've already read past (shouldn't happen with sequential access)
       if (srcY <= lastSrcRowRead) continue;
 
-      // Skip any rows between last read and needed row
+      // Skip any rows between last read and needed row.  v2.0.72: absolute
+      // seek (not seekCur) so the impl works for both FsFile and Arduino File.
       while (lastSrcRowRead < srcY - 1) {
-        srcFile.seekCur(srcRowBytes);
+        srcFile.seek(srcFile.position() + srcRowBytes);
         lastSrcRowRead++;
       }
 
       // Read this row into the appropriate buffer slot
       const int bufferSlot = srcY - srcYStart;
-      if (srcFile.read(srcRows + bufferSlot * srcRowBytes, srcRowBytes) != srcRowBytes) {
+      if (static_cast<size_t>(srcFile.read(srcRows + bufferSlot * srcRowBytes, srcRowBytes)) !=
+          static_cast<size_t>(srcRowBytes)) {
         LOG_ERR(TAG, "Failed to read row %d", srcY);
         free(srcRows);
         free(outRow);
-        srcFile.close();
-        dstFile.close();
         return false;
       }
       lastSrcRowRead = srcY;
@@ -498,9 +494,52 @@ bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxW
 
   free(srcRows);
   free(outRow);
+  return true;
+}
+
+// Public wrappers — open the right file types and delegate to the templated
+// impl above.  v2.0.71 and earlier exposed only the SD-backed variant
+// (bmpTo1BitBmpScaled); the LittleFS-backed sibling was added in v2.0.72 to
+// fix the cover/thumb pipeline that had been silently writing to SD via SdMan
+// even though the path lived in /cache/ (LittleFS root).
+bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxWidth, int targetMaxHeight) {
+  FsFile srcFile;
+  if (!SdMan.openFileForRead("BMP", srcPath, srcFile)) {
+    LOG_ERR(TAG, "Failed to open source: %s", srcPath);
+    return false;
+  }
+  FsFile dstFile;
+  if (!SdMan.openFileForWrite("BMP", dstPath, dstFile)) {
+    LOG_ERR(TAG, "Failed to open destination: %s", dstPath);
+    srcFile.close();
+    return false;
+  }
+  const bool ok = bmpTo1BitBmpScaledImpl(srcFile, dstFile, targetMaxWidth, targetMaxHeight);
   srcFile.close();
   dstFile.close();
+  if (ok) {
+    LOG_INF(TAG, "Successfully created thumbnail (sd): %s", dstPath);
+  }
+  return ok;
+}
 
-  LOG_INF(TAG, "Successfully created thumbnail: %s", dstPath);
-  return true;
+bool bmpTo1BitBmpScaledFs(const char* srcPath, const char* dstPath, int targetMaxWidth, int targetMaxHeight) {
+  File srcFile = LittleFS.open(srcPath, "r");
+  if (!srcFile) {
+    LOG_ERR(TAG, "Failed to open LittleFS source: %s", srcPath);
+    return false;
+  }
+  File dstFile = LittleFS.open(dstPath, "w");
+  if (!dstFile) {
+    LOG_ERR(TAG, "Failed to open LittleFS destination: %s", dstPath);
+    srcFile.close();
+    return false;
+  }
+  const bool ok = bmpTo1BitBmpScaledImpl(srcFile, dstFile, targetMaxWidth, targetMaxHeight);
+  srcFile.close();
+  dstFile.close();
+  if (ok) {
+    LOG_INF(TAG, "Successfully created thumbnail (flash): %s", dstPath);
+  }
+  return ok;
 }

@@ -267,6 +267,20 @@ void SleepState::renderCoverSleepScreen(Core& core) const {
     return renderDefaultSleepScreen(core);
   }
 
+  // v2.0.72: Fb2 covers live on LittleFS (streaming Bitmap(File&) — no
+  // ~30 KB heap slurp during sleep flow), Xtc/Epub/Txt/MD/HTML on SD.
+  // Try LittleFS first, fall back to SD.
+  File flashFile = LittleFS.open(coverBmpPath.c_str(), "r");
+  if (flashFile) {
+    Bitmap bitmap(flashFile);
+    if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+      renderBitmapSleepScreen(bitmap);
+      flashFile.close();
+      return;
+    }
+    flashFile.close();
+  }
+
   FsFile file;
   if (SdMan.openFileForRead("SLP", coverBmpPath, file)) {
     Bitmap bitmap(file);

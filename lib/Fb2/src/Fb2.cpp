@@ -759,14 +759,17 @@ std::string Fb2::findCoverImage() const {
 
 bool Fb2::generateCoverBmp(bool use1BitDithering) const {
   const auto coverPath = getCoverBmpPath();
-  // v2.0.61: failure marker lives on LittleFS alongside the cache (it's
-  // metadata about whether cover generation should retry, not user data).
-  // Cover BMP itself stays on SD via getCoverBmpPath() — that's a separate
-  // concern (covers are part of the home-screen thumbnail flow).
+  // v2.0.72: cover BMP and failure marker BOTH on LittleFS (cachePath is
+  // /cache/fb2_<hash>).  Pre-v2.0.72 the cover.exists check ran against SD,
+  // which always returned false for the LittleFS-rooted path, so the cover
+  // got re-generated on every entry — and the regenerated file ALSO landed
+  // on SD via SdMan in the converter.  Now both checks use LittleFS and the
+  // generated BMP lands on LittleFS via outputOnLittleFs=true in
+  // CoverHelpers::convertImageToBmp.
   const auto failedMarkerPath = cachePath + "/.cover.failed";
 
   // Already generated
-  if (SdMan.exists(coverPath.c_str())) {
+  if (LittleFS.exists(coverPath.c_str())) {
     return true;
   }
 
@@ -1525,21 +1528,20 @@ bool Fb2::generateThumbBmp() const {
   const auto thumbPath = getThumbBmpPath();
   const auto failedMarkerPath = cachePath + "/.thumb.failed";
 
-  if (SdMan.exists(thumbPath.c_str())) {
+  // v2.0.72: thumb.bmp + failure marker on LittleFS.  Same migration
+  // rationale as generateCoverBmp above.
+  if (LittleFS.exists(thumbPath.c_str())) {
     return true;
   }
 
   // Previously failed, don't retry
-  if (SdMan.exists(failedMarkerPath.c_str())) {
+  if (LittleFS.exists(failedMarkerPath.c_str())) {
     return false;
   }
 
-  if (!SdMan.exists(getCoverBmpPath().c_str()) && !generateCoverBmp(true)) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("FB2", failedMarkerPath, marker)) {
-      marker.close();
-    }
+  if (!LittleFS.exists(getCoverBmpPath().c_str()) && !generateCoverBmp(true)) {
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
     return false;
   }
 
@@ -1547,11 +1549,8 @@ bool Fb2::generateThumbBmp() const {
 
   const bool success = CoverHelpers::generateThumbFromCover(getCoverBmpPath(), thumbPath, "FB2");
   if (!success) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("FB2", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
   }
   return success;
 }

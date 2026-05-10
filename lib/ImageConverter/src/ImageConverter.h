@@ -11,6 +11,14 @@ struct ImageConvertConfig {
   int maxHeight = 750;
   bool oneBit = false;
   bool quickMode = false;  // Fast preview: simple threshold instead of dithering
+  // v2.0.72: write the output BMP to LittleFS (internal flash) instead of SD.
+  // Cover/thumb generation hits this path because their target paths are
+  // semantically LittleFS-rooted (/cache/<book_id>/cover.bmp).  Pre-2.0.72
+  // the writes went to SD via SdMan even when the path looked like LittleFS,
+  // which silently bloated SD storage and broke the "Clear Caches" cleanup
+  // that only walks LittleFS.  Input is always SD (source images live in
+  // /Books/...).
+  bool outputOnLittleFs = false;
   const char* logTag = "IMG";
   std::function<bool()> shouldAbort = nullptr;
 };

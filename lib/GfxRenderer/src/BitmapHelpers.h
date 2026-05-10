@@ -18,7 +18,12 @@ uint8_t rgbToGray(uint8_t r, uint8_t g, uint8_t b);
 // Scale down a BMP file to create a 1-bit thumbnail.
 // Uses 2x2 pixel averaging for clean downscaling with Atkinson dithering.
 // Returns true on success, false on failure.
+//
+// SD-backed (legacy) — both src and dst opened via SdMan / FsFile.
 bool bmpTo1BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxWidth, int targetMaxHeight);
+// LittleFS-backed (v2.0.72) — both src and dst opened via LittleFS / Arduino File.
+// Used by the cover/thumb pipeline since v2.0.60+ moved cache to internal flash.
+bool bmpTo1BitBmpScaledFs(const char* srcPath, const char* dstPath, int targetMaxWidth, int targetMaxHeight);
 
 // 1-bit Atkinson dithering - better quality than noise dithering for thumbnails
 // Error distribution pattern (same as 2-bit but quantizes to 2 levels):

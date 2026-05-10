@@ -1,6 +1,8 @@
 #include "HomeState.h"
 
 #include <Arduino.h>
+#include <FS.h>          // Arduino base File (v2.0.72 cover/thumb dispatch)
+#include <LittleFS.h>
 #include <Bitmap.h>
 #include <CoverHelpers.h>
 #include <EInkDisplay.h>
@@ -63,10 +65,13 @@ void HomeState::loadLastBook(Core& core) {
     const auto& meta = core.content.metadata();
     view_.setBook(meta.title, meta.author, core.buf.path);
 
-    // Check for existing thumbnail or cover (no async generation - ReaderState handles that)
+    // Check for existing thumbnail or cover (no async generation - ReaderState handles that).
+    // v2.0.72: thumbs may live on LittleFS (Fb2 since v2.0.60+) or SD (Xtc/Epub/Txt/MD/HTML).
+    // Probe both filesystems so we pick up either case.
     if (core.settings.showImages) {
       coverBmpPath_ = core.content.getThumbnailPath();
-      if (!coverBmpPath_.empty() && SdMan.exists(coverBmpPath_.c_str())) {
+      if (!coverBmpPath_.empty() &&
+          (LittleFS.exists(coverBmpPath_.c_str()) || SdMan.exists(coverBmpPath_.c_str()))) {
         hasCoverImage_ = true;
         LOG_DBG(TAG, "Using cached thumbnail: %s", coverBmpPath_.c_str());
       }
@@ -87,10 +92,12 @@ void HomeState::loadLastBook(Core& core) {
       strncpy(core.buf.path, savedPath, sizeof(core.buf.path) - 1);
       core.buf.path[sizeof(core.buf.path) - 1] = '\0';
 
-      // Check for existing thumbnail or cover (no async generation - ReaderState handles that)
+      // v2.0.72: see comment above — probe both LittleFS (FB2 caches) and SD
+      // (Xtc/Epub/Txt/MD/HTML caches).
       if (core.settings.showImages) {
         coverBmpPath_ = core.content.getThumbnailPath();
-        if (!coverBmpPath_.empty() && SdMan.exists(coverBmpPath_.c_str())) {
+        if (!coverBmpPath_.empty() &&
+            (LittleFS.exists(coverBmpPath_.c_str()) || SdMan.exists(coverBmpPath_.c_str()))) {
           hasCoverImage_ = true;
           LOG_DBG(TAG, "Using cached thumbnail: %s", coverBmpPath_.c_str());
         }
@@ -241,26 +248,46 @@ void HomeState::render(Core& core) {
 }
 
 void HomeState::renderCoverToCard() {
+  // v2.0.72: dispatch on filesystem.  Fb2 thumbnails live on LittleFS (uses
+  // streaming Bitmap(File&) constructor — no transient ~30 KB heap slurp).
+  // Xtc/Epub/Txt/MD/HTML thumbnails live on SD (legacy path with SdMan +
+  // Bitmap(FsFile&) + parseAndLoadAll's slurp under SharedSpiLock).  Probing
+  // LittleFS first matches what the home-screen path-resolution loop does,
+  // so we hit the same FS the existence check found.
+  const auto card = ui::CardDimensions::calculate(renderer_.getScreenWidth(), renderer_.getScreenHeight());
+  const auto coverArea = card.getCoverArea();
+
+  File flashFile = LittleFS.open(coverBmpPath_.c_str(), "r");
+  if (flashFile) {
+    Bitmap bitmap(flashFile);
+    if (bitmap.parseHeaders() != BmpReaderError::Ok) {
+      flashFile.close();
+      coverLoadFailed_ = true;
+      LOG_ERR(TAG, "Failed to parse cover BMP (flash): %s", coverBmpPath_.c_str());
+      return;
+    }
+    auto rect = CoverHelpers::calculateCenteredRect(bitmap.getWidth(), bitmap.getHeight(), coverArea.x, coverArea.y,
+                                                    coverArea.width, coverArea.height);
+    renderer_.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
+    flashFile.close();
+    return;
+  }
+
   FsFile file;
   if (!SdMan.openFileForRead("HOME", coverBmpPath_, file)) {
     coverLoadFailed_ = true;
     LOG_ERR(TAG, "Failed to open cover BMP: %s", coverBmpPath_.c_str());
     return;
   }
-
   Bitmap bitmap(file);
   if (bitmap.parseHeaders() != BmpReaderError::Ok) {
     file.close();
     coverLoadFailed_ = true;
-    LOG_ERR(TAG, "Failed to parse cover BMP: %s", coverBmpPath_.c_str());
+    LOG_ERR(TAG, "Failed to parse cover BMP (sd): %s", coverBmpPath_.c_str());
     return;
   }
-
-  const auto card = ui::CardDimensions::calculate(renderer_.getScreenWidth(), renderer_.getScreenHeight());
-  const auto coverArea = card.getCoverArea();
   auto rect = CoverHelpers::calculateCenteredRect(bitmap.getWidth(), bitmap.getHeight(), coverArea.x, coverArea.y,
                                                   coverArea.width, coverArea.height);
-
   renderer_.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
   file.close();
 }

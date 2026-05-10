@@ -526,13 +526,13 @@ void SettingsState::handleConfirm(Core& core) {
           if (hadOldSdCache) {
             core.storage.rmdir(oldSdCacheDir.c_str());
           }
-          // v2.0.67: also wipe SD `/cache/` — covers/thumbs accidentally
-          // land there because CoverHelpers + content-class cover code
-          // still uses SdMan with LittleFS-style paths (see ARCH note in
-          // Fb2.cpp::generateCoverBmp).  Until the full CoverHelpers →
-          // LittleFS migration ships in v2.0.68, sweep them here so
-          // "Clear book cache" does what its label says.  This is a
-          // best-effort recursive rmdir; missing dir is OK.
+          // SD `/cache/` cleanup: Xtc/Epub/Txt/MD/HTML still keep their
+          // cache trees on SD (their setupCacheDir uses SdMan.mkdir, not
+          // LittleFS).  Fb2 was migrated in v2.0.60+ and v2.0.72 fixed the
+          // covers/thumbs that were also routing to SD via SdMan despite
+          // being LittleFS-rooted — so post-v2.0.72 the SD tree only holds
+          // the legacy types' caches.  Wipe regardless: best-effort recursive
+          // rmdir; missing dir is OK.
           const bool hadSdCacheRoot = core.storage.exists("/cache").ok() &&
                                       *core.storage.exists("/cache");
           if (hadSdCacheRoot) {

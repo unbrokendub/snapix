@@ -1,5 +1,7 @@
 #include "ImageConverter.h"
 
+#include <FS.h>          // Arduino base File (LittleFS output path, v2.0.72)
+#include <LittleFS.h>    // v2.0.72: cover/thumb BMPs land on internal flash
 #include <FsHelpers.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
@@ -110,23 +112,43 @@ bool ImageConverterFactory::convertToBmp(const std::string& inputPath, const std
     return false;
   }
 
-  FsFile outputFile;
-  if (!SdMan.openFileForWrite(config.logTag, outputPath, outputFile)) {
+  // v2.0.72: dispatch on outputOnLittleFs.  Both FsFile (SDFat) and File
+  // (Arduino LittleFS) implement Print, so the converter doesn't care which
+  // one we hand it.  LittleFS lives on a separate SPI bus from SD/display,
+  // so the SharedBusLock above only matters for the SD input read.
+  bool success = false;
+  if (config.outputOnLittleFs) {
+    File outputFile = LittleFS.open(outputPath.c_str(), "w");
+    if (!outputFile) {
+      inputFile.close();
+      LOG_ERR(config.logTag, "Failed to create LittleFS output file: %s", outputPath.c_str());
+      return false;
+    }
+    success = converter->convert(inputFile, outputFile, config);
     inputFile.close();
-    LOG_ERR(config.logTag, "Failed to create output file: %s", outputPath.c_str());
-    return false;
-  }
-
-  const bool success = converter->convert(inputFile, outputFile, config);
-
-  inputFile.close();
-  outputFile.close();
-
-  if (success) {
-    LOG_INF(config.logTag, "Converted %s to BMP: %s", converter->formatName(), outputPath.c_str());
+    outputFile.close();
+    if (!success) {
+      LOG_ERR(config.logTag, "Failed to convert %s to BMP", converter->formatName());
+      LittleFS.remove(outputPath.c_str());
+    } else {
+      LOG_INF(config.logTag, "Converted %s to BMP (flash): %s", converter->formatName(), outputPath.c_str());
+    }
   } else {
-    LOG_ERR(config.logTag, "Failed to convert %s to BMP", converter->formatName());
-    SdMan.remove(outputPath.c_str());
+    FsFile outputFile;
+    if (!SdMan.openFileForWrite(config.logTag, outputPath, outputFile)) {
+      inputFile.close();
+      LOG_ERR(config.logTag, "Failed to create SD output file: %s", outputPath.c_str());
+      return false;
+    }
+    success = converter->convert(inputFile, outputFile, config);
+    inputFile.close();
+    outputFile.close();
+    if (!success) {
+      LOG_ERR(config.logTag, "Failed to convert %s to BMP", converter->formatName());
+      SdMan.remove(outputPath.c_str());
+    } else {
+      LOG_INF(config.logTag, "Converted %s to BMP (sd): %s", converter->formatName(), outputPath.c_str());
+    }
   }
 
   return success;
