@@ -1,6 +1,8 @@
 #include "EpubChapterParser.h"
 
 #include <Arduino.h>
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
+#include <LittleFS.h>
 #include <Epub/parsers/ChapterHtmlSlimParser.h>
 #include <GfxRenderer.h>
 #include <Html5Normalizer.h>
@@ -30,8 +32,9 @@ inline std::string epubPreparedNormalizedPath(const std::string& epubCachePath, 
 inline std::string epubPreparedWorkPath(const std::string& basePath) { return basePath + ".work"; }
 
 bool isReadableNonEmptyFile(const std::string& path) {
-  FsFile file;
-  if (!SdMan.openFileForRead("EPUB", path, file)) {
+  // v2.0.73: chapter HTML caches live on LittleFS now.
+  File file = LittleFS.open(path.c_str(), "r");
+  if (!file) {
     return false;
   }
   const bool ok = file.size() > 0;
@@ -40,8 +43,8 @@ bool isReadableNonEmptyFile(const std::string& path) {
 }
 
 bool looksLikePreparedHtmlFile(const std::string& path) {
-  FsFile file;
-  if (!SdMan.openFileForRead("EPUB", path, file)) {
+  File file = LittleFS.open(path.c_str(), "r");
+  if (!file) {
     return false;
   }
 
@@ -79,22 +82,23 @@ bool looksLikePreparedHtmlFile(const std::string& path) {
 }
 
 bool evictPreparedHtmlFile(const std::string& path, const char* label, const char* reason) {
-  if (path.empty() || !SdMan.exists(path.c_str())) {
+  // v2.0.73: chapter HTML caches live on LittleFS now.
+  if (path.empty() || !LittleFS.exists(path.c_str())) {
     return true;
   }
 
   const char* why = reason ? reason : "unknown";
-  if (SdMan.remove(path.c_str())) {
+  if (LittleFS.remove(path.c_str())) {
     LOG_INF(TAG, "[CONTENT][EPUB] dropped stale %s cache reason=%s path=%s", label, why, path.c_str());
     return true;
   }
 
   const std::string quarantinePath = path + ".stale";
-  if (SdMan.exists(quarantinePath.c_str())) {
-    SdMan.remove(quarantinePath.c_str());
+  if (LittleFS.exists(quarantinePath.c_str())) {
+    LittleFS.remove(quarantinePath.c_str());
   }
 
-  if (SdMan.rename(path.c_str(), quarantinePath.c_str())) {
+  if (LittleFS.rename(path.c_str(), quarantinePath.c_str())) {
     LOG_INF(TAG, "[CONTENT][EPUB] quarantined stale %s cache reason=%s path=%s quarantine=%s", label, why,
             path.c_str(), quarantinePath.c_str());
     return true;
@@ -189,7 +193,7 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
     parseHtmlPath_ = normalizedPath_;
     LOG_INF(TAG, "[CONTENT][EPUB] prepare normalized cache hit spine=%d", spineIndex_);
     return true;
-  } else if (SdMan.exists(normalizedPath_.c_str())) {
+  } else if (LittleFS.exists(normalizedPath_.c_str())) {
     LOG_INF(TAG, "[CONTENT][EPUB] prepare drop invalid normalized cache spine=%d path=%s", spineIndex_,
             normalizedPath_.c_str());
     if (!evictPreparedHtmlFile(normalizedPath_, "normalized", "prepare-invalid-normalized")) {
@@ -200,7 +204,7 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
     }
   }
 
-  if (SdMan.exists(sourceHtmlPath_.c_str()) && !looksLikePreparedHtmlFile(sourceHtmlPath_)) {
+  if (LittleFS.exists(sourceHtmlPath_.c_str()) && !looksLikePreparedHtmlFile(sourceHtmlPath_)) {
     LOG_INF(TAG, "[CONTENT][EPUB] prepare drop invalid source cache spine=%d path=%s", spineIndex_,
             sourceHtmlPath_.c_str());
     if (!evictPreparedHtmlFile(sourceHtmlPath_, "source", "prepare-invalid-source")) {
@@ -221,12 +225,12 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
         delay(50);
       }
 
-      if (SdMan.exists(sourceHtmlPath_.c_str())) {
-        SdMan.remove(sourceHtmlPath_.c_str());
+      if (LittleFS.exists(sourceHtmlPath_.c_str())) {
+        LittleFS.remove(sourceHtmlPath_.c_str());
       }
 
-      FsFile sourceHtml;
-      if (!SdMan.openFileForWrite("EPUB", sourceHtmlPath_, sourceHtml)) {
+      File sourceHtml = LittleFS.open(sourceHtmlPath_.c_str(), "w");
+      if (!sourceHtml) {
         continue;
       }
 
@@ -237,8 +241,8 @@ bool EpubChapterParser::prepareChapterHtml(const AbortCallback& shouldAbort) {
                                                 shouldAbortPrepare);
       sourceHtml.close();
 
-      if (!success && SdMan.exists(sourceHtmlPath_.c_str())) {
-        SdMan.remove(sourceHtmlPath_.c_str());
+      if (!success && LittleFS.exists(sourceHtmlPath_.c_str())) {
+        LittleFS.remove(sourceHtmlPath_.c_str());
       }
     }
 

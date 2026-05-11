@@ -1,5 +1,7 @@
 #include "ChapterHtmlSlimParser.h"
 
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
+#include <LittleFS.h>
 #include <Bitmap.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -112,6 +114,45 @@ TagFlags classifyTag(const char* name) {
     default:
       return TAG_None;
   }
+}
+
+// v2.0.73: dual-FS dispatch for the source HTML file.  EPUB chapters live on
+// LittleFS (extracted to /cache/epub_<hash>/chapters/<n>.{src,norm}.html);
+// plain-HTML books read straight off SD.  setup() probes LittleFS first,
+// falls back to SD; every read/seek/size/available/close call goes through
+// these helpers so the rest of the parser doesn't have to care.  SD reads
+// take SharedBusLock because the SD bus is shared with the display;
+// LittleFS lives on its own bus.
+size_t ChapterHtmlSlimParser::srcRead(uint8_t* buf, size_t n) {
+  if (useFlashSrc_) return flashFile_.read(buf, n);
+  snapix::spi::SharedBusLock busLock;
+  const int got = sdFile_.read(buf, n);
+  return got < 0 ? 0 : static_cast<size_t>(got);
+}
+bool ChapterHtmlSlimParser::srcSeek(uint32_t pos) {
+  if (useFlashSrc_) return flashFile_.seek(pos);
+  return sdFile_.seek(pos);
+}
+size_t ChapterHtmlSlimParser::srcSize() {
+  if (useFlashSrc_) return flashFile_.size();
+  return sdFile_.size();
+}
+size_t ChapterHtmlSlimParser::srcAvailable() {
+  if (useFlashSrc_) return flashFile_.available();
+  return sdFile_.available();
+}
+bool ChapterHtmlSlimParser::srcIsOpen() {
+  if (useFlashSrc_) return static_cast<bool>(flashFile_);
+  return static_cast<bool>(sdFile_);
+}
+void ChapterHtmlSlimParser::srcClose() {
+  if (useFlashSrc_) {
+    flashFile_.close();
+  } else {
+    sdFile_.close();
+  }
+  // Don't reset useFlashSrc_ — resume() needs it to know which FS the
+  // file came from when reopening at saved position.
 }
 
 bool ChapterHtmlSlimParser::asciiContainsInsensitive(const char* haystack, const char* needle) {
@@ -1025,8 +1066,8 @@ void ChapterHtmlSlimParser::cleanupParser() {
     XML_ParserFree(xmlParser_);
     xmlParser_ = nullptr;
   }
-  if (file_) {
-    file_.close();
+  if (srcIsOpen()) {
+    srcClose();
   }
   currentPage.reset();
   currentTextBlock.reset();
@@ -1070,13 +1111,26 @@ bool ChapterHtmlSlimParser::initParser() {
   }
 
   {
-    snapix::spi::SharedBusLock busLock;
-    if (!SdMan.openFileForRead("EHP", filepath, file_)) {
-      XML_ParserFree(xmlParser_);
-      xmlParser_ = nullptr;
-      return false;
+    // v2.0.73: probe LittleFS first (EPUB chapter HTML cache).  If not
+    // present, fall back to SD (plain-HTML book source).
+    if (LittleFS.exists(filepath.c_str())) {
+      flashFile_ = LittleFS.open(filepath.c_str(), "r");
+      if (!flashFile_) {
+        XML_ParserFree(xmlParser_);
+        xmlParser_ = nullptr;
+        return false;
+      }
+      useFlashSrc_ = true;
+    } else {
+      snapix::spi::SharedBusLock busLock;
+      if (!SdMan.openFileForRead("EHP", filepath, sdFile_)) {
+        XML_ParserFree(xmlParser_);
+        xmlParser_ = nullptr;
+        return false;
+      }
+      useFlashSrc_ = false;
     }
-    totalSize_ = file_.size();
+    totalSize_ = srcSize();
   }
   bytesRead_ = 0;
   lastProgress_ = -1;
@@ -1111,7 +1165,7 @@ bool ChapterHtmlSlimParser::parseLoop() {
         }
         stopRequested_ = true;
         suspended_ = true;
-        file_.close();
+        srcClose();
         return true;
       }
       vTaskDelay(1);  // Yield to prevent watchdog reset
@@ -1126,13 +1180,11 @@ bool ChapterHtmlSlimParser::parseLoop() {
       return false;
     }
 
-    int readResult;
-    {
-      snapix::spi::SharedBusLock busLock;
-      readResult = file_.read(static_cast<uint8_t*>(buf), kReadChunkSize);
-    }
+    // v2.0.73: srcRead handles the SharedBusLock internally for SD; LittleFS
+    // is on a separate bus and doesn't need the lock.
+    const size_t readResult = srcRead(static_cast<uint8_t*>(buf), kReadChunkSize);
 
-    if (readResult <= 0) {
+    if (readResult == 0) {
       LOG_ERR(TAG, "File read error");
       cleanupParser();
       return false;
@@ -1155,7 +1207,7 @@ bool ChapterHtmlSlimParser::parseLoop() {
       }
     }
 
-    done = file_.available() == 0;
+    done = srcAvailable() == 0;
 
     const auto status = XML_ParseBuffer(xmlParser_, static_cast<int>(len), done);
     if (status == XML_STATUS_ERROR) {
@@ -1169,7 +1221,7 @@ bool ChapterHtmlSlimParser::parseLoop() {
     // Parser state is preserved for resume. Close file to free handle.
     if (status == XML_STATUS_SUSPENDED) {
       suspended_ = true;
-      file_.close();
+      srcClose();
       return true;
     }
 
@@ -1202,7 +1254,7 @@ bool ChapterHtmlSlimParser::parseLoop() {
       // Batch limit hit while flushing final content — stay suspended
       suspended_ = true;
       xmlDone_ = true;
-      file_.close();
+      srcClose();
       return true;
     }
     if (currentPage) {
@@ -1257,15 +1309,27 @@ bool ChapterHtmlSlimParser::resumeParsing() {
     return true;
   }
 
-  // Reopen file at saved position (closed on suspend to free file handle)
+  // Reopen file at saved position (closed on suspend to free file handle).
+  // v2.0.73: dispatch on filesystem same way setup() did originally.
   {
-    snapix::spi::SharedBusLock busLock;
-    if (!SdMan.openFileForRead("EHP", filepath, file_)) {
-      LOG_ERR(TAG, "Failed to reopen file for resume");
-      cleanupParser();
-      return false;
+    if (LittleFS.exists(filepath.c_str())) {
+      flashFile_ = LittleFS.open(filepath.c_str(), "r");
+      if (!flashFile_) {
+        LOG_ERR(TAG, "Failed to reopen LittleFS file for resume");
+        cleanupParser();
+        return false;
+      }
+      useFlashSrc_ = true;
+    } else {
+      snapix::spi::SharedBusLock busLock;
+      if (!SdMan.openFileForRead("EHP", filepath, sdFile_)) {
+        LOG_ERR(TAG, "Failed to reopen SD file for resume");
+        cleanupParser();
+        return false;
+      }
+      useFlashSrc_ = false;
     }
-    file_.seek(bytesRead_);
+    srcSeek(bytesRead_);
   }
 
   // Reset per-extend state
@@ -1279,7 +1343,7 @@ bool ChapterHtmlSlimParser::resumeParsing() {
 
   if (!placePendingImage()) {
     suspended_ = true;
-    file_.close();
+    srcClose();
     return true;
   }
 
@@ -1291,7 +1355,7 @@ bool ChapterHtmlSlimParser::resumeParsing() {
     if (stopRequested_) {
       // Remaining words filled another batch — stay suspended
       suspended_ = true;
-      file_.close();
+      srcClose();
       return true;
     }
   }
@@ -1322,20 +1386,20 @@ bool ChapterHtmlSlimParser::resumeParsing() {
   // Close file to free handle (same as the suspend path inside parseLoop).
   if (status == XML_STATUS_SUSPENDED) {
     suspended_ = true;
-    file_.close();
+    srcClose();
     return true;
   }
 
   // If the file was already fully read before suspension (small file consumed in one
   // parseLoop iteration), the parser has now finished processing all buffered data.
   // Skip parseLoop() — calling XML_GetBuffer on a finalized parser returns NULL.
-  if (file_.available() == 0) {
+  if (srcAvailable() == 0) {
     if (currentTextBlock && !stopRequested_ && !aborted_) {
       makePages();
       if (stopRequested_) {
         suspended_ = true;
         xmlDone_ = true;
-        file_.close();
+        srcClose();
         return true;
       }
       if (currentPage) {
@@ -1457,14 +1521,10 @@ void ChapterHtmlSlimParser::makePages() {
 
 bool ChapterHtmlSlimParser::validateCachedBmp(const std::string& cachedBmpPath, uint16_t& width, uint16_t& height,
                                               std::string& failureReason) {
-  snapix::spi::SharedBusLock busLock;
-  if (!busLock) {
-    failureReason = "shared-bus-lock-unavailable";
-    return false;
-  }
-
-  FsFile bmpFile;
-  if (!SdMan.openFileForRead("EHP", cachedBmpPath, bmpFile)) {
+  // v2.0.73: cached BMPs live on LittleFS now (image cache moved with the
+  // rest of the EPUB cache).  No SharedBusLock needed for LittleFS reads.
+  File bmpFile = LittleFS.open(cachedBmpPath.c_str(), "r");
+  if (!bmpFile) {
     failureReason = "cached-open-failed";
     return false;
   }
@@ -1594,19 +1654,18 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
   std::string cacheFailure;
   std::string tempPath;
 
-  // ── Phase 1: cache check + extraction (holds SPI lock) ─────────────
-  // The lock is released before conversion so that convertToBmp() never
-  // runs at recursive-mutex depth > 1.  Deep nesting (depth 3) triggered
-  // xTaskPriorityDisinherit asserts on single-core ESP32-C3.
+  // ── Phase 1: cache check + extraction ──────────────────────────────
+  // v2.0.73: image cache lives on LittleFS now (separate SPI bus, no
+  // SharedBusLock contention with display).  The readItemFn callback that
+  // extracts from the EPUB ZIP DOES still touch SD — but that callback
+  // owns its own locking internally.
+  auto writeFailedMarker = [&]() {
+    File marker = LittleFS.open(failedMarker.c_str(), "w");
+    if (marker) marker.close();
+  };
   {
-    snapix::spi::SharedBusLock preLock;
-    if (!preLock) {
-      setRetryable("shared-bus-lock-unavailable", ImageFailureClass::AbortRequested);
-      return result;
-    }
-
     // Check if already cached and validate the cached BMP before trusting it.
-    if (SdMan.exists(result.cachedBmpPath.c_str())) {
+    if (LittleFS.exists(result.cachedBmpPath.c_str())) {
       result.cacheHit = true;
       if (validateCachedBmp(result.cachedBmpPath, cachedWidth, cachedHeight, cacheFailure)) {
         consecutiveImageFailures_ = 0;
@@ -1625,38 +1684,34 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
 
       LOG_INF(TAG, "[CONTENT][IMAGE] cache invalid src=%s resolved=%s cached=%s reason=%s action=rebuild", src.c_str(),
               result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), cacheFailure.c_str());
-      SdMan.remove(result.cachedBmpPath.c_str());
-      SdMan.remove(failedMarker.c_str());
+      LittleFS.remove(result.cachedBmpPath.c_str());
+      LittleFS.remove(failedMarker.c_str());
     }
 
-    // Failed markers are only trusted for extraction/format failures. Conversion
+    // Failed markers are only trusted for extraction/format failures.  Conversion
     // can still succeed later in quick mode, so allow supported images to retry.
-    if (SdMan.exists(failedMarker.c_str())) {
+    if (LittleFS.exists(failedMarker.c_str())) {
       if (!ImageConverterFactory::isSupported(src)) {
         consecutiveImageFailures_++;
         setTerminal("failed-marker-unsupported-format", ImageFailureClass::UnsupportedFormat);
         return result;
       }
-      SdMan.remove(failedMarker.c_str());
+      LittleFS.remove(failedMarker.c_str());
     }
 
-    // Check if format is supported
     if (!ImageConverterFactory::isSupported(src)) {
       LOG_DBG(TAG, "Unsupported image format: %s", src.c_str());
-      FsFile marker;
-      if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
-        marker.close();
-      }
+      writeFailedMarker();
       consecutiveImageFailures_++;
       setTerminal("unsupported-format", ImageFailureClass::UnsupportedFormat);
       return result;
     }
 
-    // Extract image to temp file (include hash in name for uniqueness)
+    // Extract image to LittleFS temp file (hash in name for uniqueness).
     const std::string tempExt = FsHelpers::isPngFile(src) ? ".png" : ".jpg";
     tempPath = imageCachePath + "/.tmp_" + std::to_string(srcHash) + tempExt;
-    FsFile tempFile;
-    if (!SdMan.openFileForWrite("EHP", tempPath, tempFile)) {
+    File tempFile = LittleFS.open(tempPath.c_str(), "w");
+    if (!tempFile) {
       LOG_ERR(TAG, "Failed to create temp file for image");
       setRetryable("temp-open-failed", ImageFailureClass::TempOpenFailed);
       return result;
@@ -1667,25 +1722,19 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
       LOG_INF(TAG, "[CONTENT][IMAGE] extract result src=%s resolved=%s result=%s", src.c_str(),
               result.resolvedPath.c_str(), readItemStatusToString(readStatus));
       tempFile.close();
-      SdMan.remove(tempPath.c_str());
+      LittleFS.remove(tempPath.c_str());
       if (readStatus == ReadItemStatus::Aborted) {
         setRetryable("extract-aborted", ImageFailureClass::ExtractAborted);
         return result;
       }
       if (readStatus == ReadItemStatus::NotFound) {
-        FsFile marker;
-        if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
-          marker.close();
-        }
+        writeFailedMarker();
         consecutiveImageFailures_++;
         setTerminal("extract-not-found", ImageFailureClass::ExtractFailed);
         return result;
       }
       if (readStatus == ReadItemStatus::ArchiveError) {
-        FsFile marker;
-        if (SdMan.openFileForWrite("EHP", failedMarker, marker)) {
-          marker.close();
-        }
+        writeFailedMarker();
         consecutiveImageFailures_++;
         setTerminal("extract-archive-error", ImageFailureClass::ExtractFailed);
         return result;
@@ -1695,9 +1744,11 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
       return result;
     }
     tempFile.close();
-  }  // preLock released — SPI bus free for convertToBmp
+  }
 
-  // ── Phase 2: conversion (convertToBmp acquires its own lock) ───────
+  // ── Phase 2: conversion ────────────────────────────────────────────
+  // v2.0.73: target lives on LittleFS (cachedBmpPath is /cache/epub_<hash>/
+  // images/...).  ImageConverter auto-detects via outputOnLittleFs flag.
   const int maxImageHeight = config.viewportHeight;
   const int maxImageWidth = static_cast<int>(config.viewportWidth);
   auto tryConvert = [&](int maxWidth, int maxHeight, bool quickMode) -> bool {
@@ -1707,13 +1758,14 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
     convertConfig.quickMode = quickMode;
     convertConfig.logTag = "EHP";
     convertConfig.shouldAbort = shouldAbortImage;
+    convertConfig.outputOnLittleFs = true;
     return ImageConverterFactory::convertToBmp(tempPath, result.cachedBmpPath, convertConfig);
   };
 
   bool success = tryConvert(maxImageWidth, maxImageHeight, quickImageDecode_);
   if (!success && !shouldAbortImage() && !quickImageDecode_) {
     LOG_INF(TAG, "[CONTENT][IMAGE] retry quick src=%s", result.resolvedPath.c_str());
-    { snapix::spi::SharedBusLock lk; SdMan.remove(result.cachedBmpPath.c_str()); }
+    LittleFS.remove(result.cachedBmpPath.c_str());
     success = tryConvert(maxImageWidth, maxImageHeight, true);
   }
   if (!success && !shouldAbortImage()) {
@@ -1722,15 +1774,14 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
     if (fallbackWidth != maxImageWidth || fallbackHeight != maxImageHeight) {
       LOG_INF(TAG, "[CONTENT][IMAGE] retry reduced src=%s size=%dx%d", result.resolvedPath.c_str(), fallbackWidth,
               fallbackHeight);
-      { snapix::spi::SharedBusLock lk; SdMan.remove(result.cachedBmpPath.c_str()); }
+      LittleFS.remove(result.cachedBmpPath.c_str());
       success = tryConvert(fallbackWidth, fallbackHeight, true);
     }
   }
 
-  // ── Phase 3: post-conversion cleanup (holds SPI lock) ─────────────
+  // ── Phase 3: post-conversion cleanup ───────────────────────────────
   {
-    snapix::spi::SharedBusLock postLock;
-    SdMan.remove(tempPath.c_str());
+    LittleFS.remove(tempPath.c_str());
 
     if (!success) {
       const ImageInterruptReason interrupt = classifyImageInterrupt();
@@ -1740,7 +1791,7 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
           (interrupt != ImageInterruptReason::None) ? interrupt : lastSeenInterrupt;
       LOG_ERR(TAG, "[CONTENT][IMAGE] convert failed: %s interrupt=%s (last=%s)", result.resolvedPath.c_str(),
               interruptToReason(interrupt, "none"), interruptToReason(effectiveInterrupt, "none"));
-      SdMan.remove(result.cachedBmpPath.c_str());
+      LittleFS.remove(result.cachedBmpPath.c_str());
       if (effectiveInterrupt != ImageInterruptReason::None) {
         // Session-blacklist images that timed out or hit OOM during conversion —
         // they're guaranteed to fail again on background cold-extend retries.
@@ -1765,14 +1816,14 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
     if (!validateCachedBmp(result.cachedBmpPath, cachedWidth, cachedHeight, generatedFailure)) {
       LOG_ERR(TAG, "[CONTENT][IMAGE] generated invalid bmp src=%s resolved=%s cached=%s reason=%s", src.c_str(),
               result.resolvedPath.c_str(), result.cachedBmpPath.c_str(), generatedFailure.c_str());
-      SdMan.remove(result.cachedBmpPath.c_str());
+      LittleFS.remove(result.cachedBmpPath.c_str());
       consecutiveImageFailures_++;
       setTerminal("generated-bmp-invalid", ImageFailureClass::GeneratedBmpInvalid);
       return result;
     }
 
-    SdMan.remove(failedMarker.c_str());
-  }  // postLock released
+    LittleFS.remove(failedMarker.c_str());
+  }
 
   consecutiveImageFailures_ = 0;
   result.width = cachedWidth;

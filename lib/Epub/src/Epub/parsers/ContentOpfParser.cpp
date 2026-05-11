@@ -1,5 +1,7 @@
 #include "ContentOpfParser.h"
 
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
+#include <LittleFS.h>
 #include <FsHelpers.h>
 #include <Logging.h>
 #include <Serialization.h>
@@ -77,8 +79,9 @@ ContentOpfParser::~ContentOpfParser() {
   if (tempItemStore) {
     tempItemStore.close();
   }
-  if (SdMan.exists((cachePath + itemCacheFile).c_str())) {
-    SdMan.remove((cachePath + itemCacheFile).c_str());
+  // v2.0.73: cache lives on LittleFS now.
+  if (LittleFS.exists((cachePath + itemCacheFile).c_str())) {
+    LittleFS.remove((cachePath + itemCacheFile).c_str());
   }
 }
 
@@ -159,7 +162,8 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
 
   if (self->state == IN_PACKAGE && (strcmp(name, "manifest") == 0 || strcmp(name, "opf:manifest") == 0)) {
     self->state = IN_MANIFEST;
-    if (!SdMan.openFileForWrite("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
+    self->tempItemStore = LittleFS.open((self->cachePath + itemCacheFile).c_str(), "w");
+    if (!self->tempItemStore) {
       LOG_ERR(TAG, "Couldn't open temp items file for writing. This is probably going to be a fatal error.");
     }
     return;
@@ -167,7 +171,8 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
 
   if (self->state == IN_PACKAGE && (strcmp(name, "spine") == 0 || strcmp(name, "opf:spine") == 0)) {
     self->state = IN_SPINE;
-    if (!SdMan.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
+    self->tempItemStore = LittleFS.open((self->cachePath + itemCacheFile).c_str(), "r");
+    if (!self->tempItemStore) {
       LOG_ERR(TAG, "Couldn't open temp items file for reading. This is probably going to be a fatal error.");
     } else {
       std::string itemId;

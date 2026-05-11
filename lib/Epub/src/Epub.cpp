@@ -1,5 +1,8 @@
 #include "Epub.h"
 
+#include <FS.h>          // Arduino base File (v2.0.73 LittleFS migration)
+#include <LittleFS.h>
+#include <CacheFs.h>
 #include <CoverHelpers.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -153,8 +156,9 @@ bool Epub::parseTocNcxFile() const {
   LOG_INF(TAG, "Parsing toc ncx file: %s", tocNcxItem.c_str());
 
   const auto tmpNcxPath = getCachePath() + "/toc.ncx";
-  FsFile tempNcxFile;
-  if (!SdMan.openFileForWrite("EBP", tmpNcxPath, tempNcxFile)) {
+  // v2.0.73: temp files for TOC parsing live on LittleFS now.
+  File tempNcxFile = LittleFS.open(tmpNcxPath.c_str(), "w");
+  if (!tempNcxFile) {
     return false;
   }
   if (!readItemContentsToStream(tocNcxItem, tempNcxFile, 1024, sharedZipDictBuffer())) {
@@ -162,7 +166,8 @@ bool Epub::parseTocNcxFile() const {
     return false;
   }
   tempNcxFile.close();
-  if (!SdMan.openFileForRead("EBP", tmpNcxPath, tempNcxFile)) {
+  tempNcxFile = LittleFS.open(tmpNcxPath.c_str(), "r");
+  if (!tempNcxFile) {
     return false;
   }
   const auto ncxSize = tempNcxFile.size();
@@ -204,7 +209,7 @@ bool Epub::parseTocNcxFile() const {
 
   free(ncxBuffer);
   tempNcxFile.close();
-  SdMan.remove(tmpNcxPath.c_str());
+  LittleFS.remove(tmpNcxPath.c_str());
 
   LOG_INF(TAG, "Parsed TOC items");
   return true;
@@ -220,8 +225,9 @@ bool Epub::parseTocNavFile() const {
   LOG_INF(TAG, "Parsing toc nav file: %s", tocNavItem.c_str());
 
   const auto tmpNavPath = getCachePath() + "/toc.nav";
-  FsFile tempNavFile;
-  if (!SdMan.openFileForWrite("EBP", tmpNavPath, tempNavFile)) {
+  // v2.0.73: temp files for TOC parsing live on LittleFS now.
+  File tempNavFile = LittleFS.open(tmpNavPath.c_str(), "w");
+  if (!tempNavFile) {
     return false;
   }
   if (!readItemContentsToStream(tocNavItem, tempNavFile, 1024, sharedZipDictBuffer())) {
@@ -229,7 +235,8 @@ bool Epub::parseTocNavFile() const {
     return false;
   }
   tempNavFile.close();
-  if (!SdMan.openFileForRead("EBP", tmpNavPath, tempNavFile)) {
+  tempNavFile = LittleFS.open(tmpNavPath.c_str(), "r");
+  if (!tempNavFile) {
     return false;
   }
   const auto navSize = tempNavFile.size();
@@ -273,7 +280,7 @@ bool Epub::parseTocNavFile() const {
 
   free(navBuffer);
   tempNavFile.close();
-  SdMan.remove(tmpNavPath.c_str());
+  LittleFS.remove(tmpNavPath.c_str());
 
   LOG_INF(TAG, "Parsed TOC nav items");
   return true;
@@ -288,11 +295,11 @@ bool Epub::parseCssFiles() {
   cssParser_.reset(new CssParser());
 
   for (const auto& cssHref : cssFiles_) {
-    // Extract CSS file to temp location
+    // Extract CSS file to temp location.  v2.0.73: temp lives on LittleFS.
     const auto tmpCssPath = getCachePath() + "/.tmp_css.css";
 
-    FsFile tempCssFile;
-    if (!SdMan.openFileForWrite("EBP", tmpCssPath, tempCssFile)) {
+    File tempCssFile = LittleFS.open(tmpCssPath.c_str(), "w");
+    if (!tempCssFile) {
       LOG_ERR(TAG, "Failed to create temp CSS file");
       continue;
     }
@@ -300,18 +307,18 @@ bool Epub::parseCssFiles() {
     if (!readItemContentsToStream(cssHref, tempCssFile, 1024, sharedZipDictBuffer())) {
       LOG_ERR(TAG, "Failed to extract CSS: %s", cssHref.c_str());
       tempCssFile.close();
-      SdMan.remove(tmpCssPath.c_str());
+      LittleFS.remove(tmpCssPath.c_str());
       continue;
     }
     tempCssFile.close();
 
-    // Parse the CSS file
+    // Parse the CSS file (CssParser::parseFile reopens the path; v2.0.73
+    // updated to LittleFS.open internally).
     if (!cssParser_->parseFile(tmpCssPath.c_str())) {
       LOG_ERR(TAG, "Failed to parse CSS: %s", cssHref.c_str());
     }
 
-    // Clean up temp file
-    SdMan.remove(tmpCssPath.c_str());
+    LittleFS.remove(tmpCssPath.c_str());
   }
 
   LOG_INF(TAG, "Parsed CSS files, %d style rules loaded", static_cast<int>(cssParser_->getStyleCount()));
@@ -427,49 +434,35 @@ bool Epub::load(const bool buildIfMissing) {
 }
 
 bool Epub::clearCache() const {
-  if (!SdMan.exists(cachePath.c_str())) {
+  // v2.0.73: cache lives on LittleFS now.
+  if (!LittleFS.exists(cachePath.c_str())) {
     LOG_DBG(TAG, "Cache does not exist, no action needed");
     return true;
   }
-
-  if (!SdMan.removeDir(cachePath.c_str())) {
+  if (!cache_fs::rmTree(cachePath)) {
     LOG_ERR(TAG, "Failed to clear cache");
     return false;
   }
-
   LOG_INF(TAG, "Cache cleared successfully");
   return true;
 }
 
 void Epub::setupCacheDir() const {
-  if (!SdMan.exists(cachePath.c_str())) {
-    if (!SdMan.mkdir(cachePath.c_str())) {
-      LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
-    }
+  // v2.0.73: cache lives on LittleFS now.  ensureFlashDir walks parents,
+  // so we don't need the per-subdir mkdir dance — but the explicit subdirs
+  // (sections/chapters/images) still need to exist as empty leaves before
+  // their respective writers create files inside.
+  if (!cache_fs::ensureFlashDir(cachePath)) {
+    LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
   }
-
-  // Create sections subdirectory for page cache
-  const auto sectionsDir = cachePath + "/sections";
-  if (!SdMan.exists(sectionsDir.c_str())) {
-    if (!SdMan.mkdir(sectionsDir.c_str())) {
-      LOG_ERR(TAG, "Failed to create sections dir: %s", sectionsDir.c_str());
-    }
+  if (!cache_fs::ensureFlashDir(cachePath + "/sections")) {
+    LOG_ERR(TAG, "Failed to create sections dir");
   }
-
-  // Create chapters subdirectory for prepared chapter HTML
-  const auto chaptersDir = cachePath + "/chapters";
-  if (!SdMan.exists(chaptersDir.c_str())) {
-    if (!SdMan.mkdir(chaptersDir.c_str())) {
-      LOG_ERR(TAG, "Failed to create chapters dir: %s", chaptersDir.c_str());
-    }
+  if (!cache_fs::ensureFlashDir(cachePath + "/chapters")) {
+    LOG_ERR(TAG, "Failed to create chapters dir");
   }
-
-  // Create images subdirectory for cached images
-  const auto imagesDir = cachePath + "/images";
-  if (!SdMan.exists(imagesDir.c_str())) {
-    if (!SdMan.mkdir(imagesDir.c_str())) {
-      LOG_ERR(TAG, "Failed to create images dir: %s", imagesDir.c_str());
-    }
+  if (!cache_fs::ensureFlashDir(cachePath + "/images")) {
+    LOG_ERR(TAG, "Failed to create images dir");
   }
 }
 
@@ -511,13 +504,11 @@ std::string Epub::getCoverPreviewBmpPath() const { return cachePath + "/cover_pr
 bool Epub::generateCoverPreviewBmp() const {
   const auto previewPath = getCoverPreviewBmpPath();
 
-  // Already generated, return true
-  if (SdMan.exists(previewPath.c_str())) {
+  // v2.0.73: cover preview lives on LittleFS now.
+  if (LittleFS.exists(previewPath.c_str())) {
     return true;
   }
-
-  // Full cover already exists, no need for preview
-  if (SdMan.exists(getCoverBmpPath().c_str())) {
+  if (LittleFS.exists(getCoverBmpPath().c_str())) {
     return false;
   }
 
@@ -530,12 +521,12 @@ bool Epub::generateCoverPreviewBmp() const {
     ImageConvertConfig config;
     config.quickMode = true;
     config.logTag = "EBP";
+    config.outputOnLittleFs = true;
     if (ImageConverterFactory::convertToBmp(externalCover, previewPath, config)) {
       LOG_INF(TAG, "Generated cover preview from external image");
       return true;
     }
-    // Conversion failed - clean up any partial output
-    SdMan.remove(previewPath.c_str());
+    LittleFS.remove(previewPath.c_str());
   }
 
   // Priority 2: Try common internal cover paths (batch scan - single ZIP pass)
@@ -570,24 +561,24 @@ bool Epub::generateCoverPreviewBmp() const {
     const std::string ext = FsHelpers::isJpegFile(path) ? ".jpg" : ".png";
     const auto coverTempPath = getCachePath() + "/.cover_preview" + ext;
 
-    FsFile coverFile;
-    if (SdMan.openFileForWrite("EBP", coverTempPath, coverFile)) {
+    File coverFile = LittleFS.open(coverTempPath.c_str(), "w");
+    if (coverFile) {
       if (readItemContentsToStream(path, coverFile, 1024)) {
         coverFile.close();
         ImageConvertConfig config;
         config.quickMode = true;
         config.logTag = "EBP";
+        config.outputOnLittleFs = true;
         if (ImageConverterFactory::convertToBmp(coverTempPath, previewPath, config)) {
-          SdMan.remove(coverTempPath.c_str());
+          LittleFS.remove(coverTempPath.c_str());
           return true;
         }
-        // Conversion failed - clean up partial output
-        SdMan.remove(previewPath.c_str());
+        LittleFS.remove(previewPath.c_str());
       } else {
         coverFile.close();
       }
     }
-    SdMan.remove(coverTempPath.c_str());
+    LittleFS.remove(coverTempPath.c_str());
   }
 
   LOG_DBG(TAG, "No cover found for preview");
@@ -614,15 +605,9 @@ bool Epub::generateThumbBmp() const {
   const auto thumbPath = getThumbBmpPath();
   const auto failedMarkerPath = cachePath + "/.thumb.failed";
 
-  // Already generated, return true
-  if (SdMan.exists(thumbPath.c_str())) {
-    return true;
-  }
-
-  // Previously failed, don't retry
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
+  // v2.0.73: thumb + failure marker live on LittleFS now.
+  if (LittleFS.exists(thumbPath.c_str())) return true;
+  if (LittleFS.exists(failedMarkerPath.c_str())) return false;
 
   setupCacheDir();
 
@@ -632,7 +617,7 @@ bool Epub::generateThumbBmp() const {
     LOG_DBG(TAG, "Found external cover: %s", externalCover.c_str());
     // Generate full-size cover BMP first (needed for thumbnail scaling)
     const auto coverPath = getCoverBmpPath();
-    if (!SdMan.exists(coverPath.c_str())) {
+    if (!LittleFS.exists(coverPath.c_str())) {
       if (CoverHelpers::convertImageToBmp(externalCover, coverPath, "EBP", true)) {
         LOG_INF(TAG, "Generated cover BMP from external image");
       }
@@ -649,6 +634,11 @@ bool Epub::generateThumbBmp() const {
     return true;
   }
 
+  auto writeFailureMarker = [&]() {
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
+  };
+
   if (!bookMetadataCache || !bookMetadataCache->isLoaded()) {
     LOG_ERR(TAG, "Cannot generate thumb BMP, cache not loaded");
     return false;
@@ -657,67 +647,50 @@ bool Epub::generateThumbBmp() const {
   const auto coverImageHref = bookMetadataCache->coreMetadata.coverItemHref;
   if (coverImageHref.empty()) {
     LOG_DBG(TAG, "No known cover image for thumbnail");
-    // Create failure marker so we don't retry
-    FsFile marker;
-    if (SdMan.openFileForWrite("EBP", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    writeFailureMarker();
     return false;
   }
 
-  // Check if format is supported
   if (!ImageConverterFactory::isSupported(coverImageHref)) {
     LOG_ERR(TAG, "Unsupported cover image format for thumbnail");
-    // Create failure marker so we don't retry
-    FsFile marker;
-    if (SdMan.openFileForWrite("EBP", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    writeFailureMarker();
     return false;
   }
 
-  // Extract cover image to temp file, then convert to thumbnail
+  // Extract cover image to LittleFS temp file, convert to thumbnail.
   LOG_DBG(TAG, "Generating thumb BMP from cover image");
   const std::string ext = FsHelpers::isJpegFile(coverImageHref) ? ".jpg" : ".png";
   const auto coverTempPath = getCachePath() + "/.cover" + ext;
   const auto thumbTempPath = thumbPath + ".tmp";
 
-  FsFile coverFile;
-  if (!SdMan.openFileForWrite("EBP", coverTempPath, coverFile)) {
+  File coverFile = LittleFS.open(coverTempPath.c_str(), "w");
+  if (!coverFile) {
     return false;
   }
   if (!readItemContentsToStream(coverImageHref, coverFile, 1024)) {
     coverFile.close();
+    LittleFS.remove(coverTempPath.c_str());
     return false;
   }
   coverFile.close();
 
-  // Use 1-bit dithering for JPEG thumbnails (smaller files). PNG thumbnails are
-  // always 2-bit since PngToBmpConverter doesn't support 1-bit output.
   ImageConvertConfig config;
   config.maxWidth = THUMB_WIDTH;
   config.maxHeight = THUMB_HEIGHT;
   config.oneBit = FsHelpers::isJpegFile(coverImageHref);
   config.logTag = "EBP";
+  config.outputOnLittleFs = true;
 
   const bool success = ImageConverterFactory::convertToBmp(coverTempPath, thumbTempPath, config);
-  SdMan.remove(coverTempPath.c_str());
+  LittleFS.remove(coverTempPath.c_str());
 
   if (success) {
-    // Atomic rename: readers see either no file or complete file
-    FsFile tempFile = SdMan.open(thumbTempPath.c_str(), O_RDWR);
-    if (tempFile) {
-      tempFile.rename(thumbPath.c_str());
-      tempFile.close();
-    }
+    // Atomic rename: readers see either no file or complete file.
+    LittleFS.rename(thumbTempPath.c_str(), thumbPath.c_str());
   } else {
     LOG_ERR(TAG, "Failed to generate thumb BMP from cover image");
-    SdMan.remove(thumbTempPath.c_str());
-    // Create failure marker so we don't retry
-    FsFile marker;
-    if (SdMan.openFileForWrite("EBP", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    LittleFS.remove(thumbTempPath.c_str());
+    writeFailureMarker();
   }
   LOG_INF(TAG, "Generated thumb BMP from cover image, success: %s", success ? "yes" : "no");
   return success;
@@ -727,15 +700,9 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
   const auto coverPath = getCoverBmpPath();
   const auto failedMarkerPath = cachePath + "/.cover.failed";
 
-  // Already generated, return true
-  if (SdMan.exists(coverPath.c_str())) {
-    return true;
-  }
-
-  // Previously failed, don't retry
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
+  // v2.0.73: cover BMP + failure marker live on LittleFS now.
+  if (LittleFS.exists(coverPath.c_str())) return true;
+  if (LittleFS.exists(failedMarkerPath.c_str())) return false;
 
   setupCacheDir();
 
@@ -812,25 +779,30 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
     const std::string ext = FsHelpers::isJpegFile(path) ? ".jpg" : ".png";
     const auto coverTempPath = getCachePath() + "/.cover" + ext;
 
-    FsFile coverFile;
-    if (SdMan.openFileForWrite("EBP", coverTempPath, coverFile)) {
+    File coverFile = LittleFS.open(coverTempPath.c_str(), "w");
+    if (coverFile) {
       if (readItemContentsToStream(path, coverFile, 1024)) {
         coverFile.close();
         ImageConvertConfig config;
         config.oneBit = use1BitDithering;
         config.logTag = "EBP";
+        config.outputOnLittleFs = true;
         if (ImageConverterFactory::convertToBmp(coverTempPath, coverPath, config)) {
-          SdMan.remove(coverTempPath.c_str());
+          LittleFS.remove(coverTempPath.c_str());
           return true;
         }
-        // Conversion failed - clean up partial output
-        SdMan.remove(coverPath.c_str());
+        LittleFS.remove(coverPath.c_str());
       } else {
         coverFile.close();
       }
     }
-    SdMan.remove(coverTempPath.c_str());
+    LittleFS.remove(coverTempPath.c_str());
   }
+
+  auto writeFailureMarker = [&]() {
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
+  };
 
   // Priority 2: Internal EPUB cover via OPF metadata
   if (!bookMetadataCache || !bookMetadataCache->isLoaded()) {
@@ -841,36 +813,28 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
   const auto coverImageHref = bookMetadataCache->coreMetadata.coverItemHref;
   if (coverImageHref.empty()) {
     LOG_DBG(TAG, "No known cover image");
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("EBP", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    writeFailureMarker();
     return false;
   }
 
-  // Check if format is supported
   if (!ImageConverterFactory::isSupported(coverImageHref)) {
     LOG_ERR(TAG, "Unsupported cover image format");
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("EBP", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    writeFailureMarker();
     return false;
   }
 
-  // Extract cover image to temp file, then convert
+  // Extract cover image to LittleFS temp, convert.
   LOG_DBG(TAG, "Generating BMP from cover image");
   const std::string ext = FsHelpers::isJpegFile(coverImageHref) ? ".jpg" : ".png";
   const auto coverTempPath = getCachePath() + "/.cover" + ext;
 
-  FsFile coverFile;
-  if (!SdMan.openFileForWrite("EBP", coverTempPath, coverFile)) {
+  File coverFile = LittleFS.open(coverTempPath.c_str(), "w");
+  if (!coverFile) {
     return false;
   }
   if (!readItemContentsToStream(coverImageHref, coverFile, 1024)) {
     coverFile.close();
+    LittleFS.remove(coverTempPath.c_str());
     return false;
   }
   coverFile.close();
@@ -878,18 +842,15 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
   ImageConvertConfig config;
   config.oneBit = use1BitDithering;
   config.logTag = "EBP";
+  config.outputOnLittleFs = true;
 
   const bool success = ImageConverterFactory::convertToBmp(coverTempPath, coverPath, config);
-  SdMan.remove(coverTempPath.c_str());
+  LittleFS.remove(coverTempPath.c_str());
 
   if (!success) {
     LOG_ERR(TAG, "Failed to generate BMP from cover image");
-    SdMan.remove(coverPath.c_str());
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("EBP", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    LittleFS.remove(coverPath.c_str());
+    writeFailureMarker();
   }
   LOG_INF(TAG, "Generated BMP from cover image, success: %s", success ? "yes" : "no");
   return success;

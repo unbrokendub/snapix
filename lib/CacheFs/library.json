@@ -1,0 +1,7 @@
+{
+  "name": "CacheFs",
+  "version": "1.0.0",
+  "description": "Shared LittleFS cache helpers (recursive mkdir, rmTree). Extracted from Fb2 in v2.0.73 when all per-format caches migrated to internal flash.",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

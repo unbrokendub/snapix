@@ -6,6 +6,9 @@
 
 #include "Txt.h"
 
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
+#include <LittleFS.h>    // v2.0.73: cache moved from SD to internal flash
+#include <CacheFs.h>
 #include <CoverHelpers.h>
 #include <FsHelpers.h>
 #include <Logging.h>
@@ -58,32 +61,24 @@ bool Txt::load() {
 }
 
 bool Txt::clearCache() const {
-  if (!SdMan.exists(cachePath.c_str())) {
+  // v2.0.73: cache lives on LittleFS now.
+  if (!LittleFS.exists(cachePath.c_str())) {
     LOG_DBG(TAG, "Cache does not exist, no action needed");
     return true;
   }
-
-  if (!SdMan.removeDir(cachePath.c_str())) {
+  if (!cache_fs::rmTree(cachePath)) {
     LOG_ERR(TAG, "Failed to clear cache");
     return false;
   }
-
   LOG_INF(TAG, "Cache cleared successfully");
   return true;
 }
 
 void Txt::setupCacheDir() const {
-  if (SdMan.exists(cachePath.c_str())) {
-    return;
+  // v2.0.73: cache lives on LittleFS now.  ensureFlashDir walks parents.
+  if (!cache_fs::ensureFlashDir(cachePath)) {
+    LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
   }
-
-  // Create directories recursively
-  for (size_t i = 1; i < cachePath.length(); i++) {
-    if (cachePath[i] == '/') {
-      SdMan.mkdir(cachePath.substr(0, i).c_str());
-    }
-  }
-  SdMan.mkdir(cachePath.c_str());
 }
 
 std::string Txt::getCoverBmpPath() const { return cachePath + "/cover.bmp"; }
@@ -101,39 +96,24 @@ bool Txt::generateCoverBmp(bool use1BitDithering) const {
   const auto coverPath = getCoverBmpPath();
   const auto failedMarkerPath = cachePath + "/.cover.failed";
 
-  // Already generated
-  if (SdMan.exists(coverPath.c_str())) {
-    return true;
-  }
+  // v2.0.73: cover BMP + failure marker live on LittleFS.
+  if (LittleFS.exists(coverPath.c_str())) return true;
+  if (LittleFS.exists(failedMarkerPath.c_str())) return false;
 
-  // Previously failed, don't retry
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
-
-  // Find a cover image
   std::string coverImagePath = findCoverImage();
   if (coverImagePath.empty()) {
     LOG_DBG(TAG, "No cover image found");
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("TXT", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    setupCacheDir();
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
     return false;
   }
 
-  // Setup cache directory
   setupCacheDir();
-
-  // Convert to BMP using shared helper
   const bool success = CoverHelpers::convertImageToBmp(coverImagePath, coverPath, "TXT", use1BitDithering);
   if (!success) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("TXT", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
   }
   return success;
 }
@@ -144,31 +124,20 @@ bool Txt::generateThumbBmp() const {
   const auto thumbPath = getThumbBmpPath();
   const auto failedMarkerPath = cachePath + "/.thumb.failed";
 
-  if (SdMan.exists(thumbPath.c_str())) return true;
+  if (LittleFS.exists(thumbPath.c_str())) return true;
+  if (LittleFS.exists(failedMarkerPath.c_str())) return false;
 
-  // Previously failed, don't retry
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
-
-  if (!SdMan.exists(getCoverBmpPath().c_str()) && !generateCoverBmp(true)) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("TXT", failedMarkerPath, marker)) {
-      marker.close();
-    }
+  if (!LittleFS.exists(getCoverBmpPath().c_str()) && !generateCoverBmp(true)) {
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
     return false;
   }
 
   setupCacheDir();
-
   const bool success = CoverHelpers::generateThumbFromCover(getCoverBmpPath(), thumbPath, "TXT");
   if (!success) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("TXT", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
   }
   return success;
 }

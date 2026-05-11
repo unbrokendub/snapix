@@ -1,5 +1,7 @@
 #include "CssParser.h"
 
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
+#include <LittleFS.h>
 #include <Logging.h>
 #include <SDCardManager.h>
 
@@ -41,8 +43,9 @@ CssParser::CssParser() {}
 CssParser::~CssParser() {}
 
 bool CssParser::parseFile(const char* filepath) {
-  FsFile file;
-  if (!SdMan.openFileForRead("CSS", filepath, file)) {
+  // v2.0.73: caller (Epub::parseCssFiles) extracts CSS to LittleFS temp file.
+  File file = LittleFS.open(filepath, "r");
+  if (!file) {
     LOG_ERR(TAG, "Failed to open %s", filepath);
     return false;
   }

@@ -1,5 +1,7 @@
 #include "XtcCoverHelper.h"
 
+#include <FS.h>          // Arduino base File (v2.0.73 LittleFS migration)
+#include <LittleFS.h>
 #include <FsHelpers.h>
 #include <Logging.h>
 #include <SDCardManager.h>
@@ -56,9 +58,11 @@ bool generateCoverBmpFromParser(XtcParser& parser, const std::string& coverBmpPa
     return false;
   }
 
-  FsFile coverBmp;
-  if (!SdMan.openFileForWrite("XTC", coverBmpPath, coverBmp)) {
-    LOG_ERR(TAG, "Failed to create cover BMP file");
+  // v2.0.73: write to LittleFS instead of SD.  cachePath is a LittleFS path
+  // since the broader v2.0.73 cache migration.
+  File coverBmp = LittleFS.open(coverBmpPath.c_str(), "w");
+  if (!coverBmp) {
+    LOG_ERR(TAG, "Failed to create cover BMP file: %s", coverBmpPath.c_str());
     free(pageBuffer);
     return false;
   }

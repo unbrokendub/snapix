@@ -1,8 +1,9 @@
 #pragma once
 
+#include <FS.h>           // v2.0.73: File (Arduino LittleFS) — chapter cache moved to internal flash
 #include <ParsedText.h>
 #include <RenderConfig.h>
-#include <SdFat.h>  // v2.0.60: FsFile file_ — was previously coming in transitively via TextBlock.h before page-cache moved off SD
+#include <SdFat.h>  // v2.0.60: FsFile sdFile_ kept for HtmlParser (plain HTML source still on SD)
 #include <blocks/ImageBlock.h>
 #include <blocks/TextBlock.h>
 #include <expat.h>
@@ -208,7 +209,22 @@ class ChapterHtmlSlimParser {
   static void XMLCALL defaultHandler(void* userData, const XML_Char* s, int len);
 
   // Suspend/resume state
-  FsFile file_;
+  // v2.0.73: source file may live on LittleFS (EPUB chapter HTML extracted to
+  // /cache/epub_<hash>/chapters/<n>.{src,norm}.html — pre-2.0.73 was on SD)
+  // OR on SD (plain HTML book opened by HtmlParser, source on SD permanently).
+  // Setup probes LittleFS first, falls back to SD; subsequent reads dispatch
+  // through the dual-file helpers below.
+  FsFile sdFile_;
+  File flashFile_;
+  bool useFlashSrc_ = false;
+  // Dispatch helpers — keep call sites readable and let setup() / resume()
+  // route to the correct backend.
+  size_t srcRead(uint8_t* buf, size_t n);
+  bool srcSeek(uint32_t pos);
+  size_t srcSize();
+  size_t srcAvailable();
+  bool srcIsOpen();
+  void srcClose();
   size_t totalSize_ = 0;
   size_t bytesRead_ = 0;
   int lastProgress_ = -1;

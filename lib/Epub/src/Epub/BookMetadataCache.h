@@ -1,6 +1,6 @@
 #pragma once
 
-#include <SDCardManager.h>
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
 
 #include <string>
 #include <unordered_map>
@@ -48,18 +48,20 @@ class BookMetadataCache {
   bool loaded;
   bool buildMode;
 
-  FsFile bookFile;
-  // Temp file handles during build
-  FsFile spineFile;
-  FsFile tocFile;
+  // v2.0.73: switched from FsFile (SD) to File (Arduino LittleFS).  All
+  // EPUB caches moved to internal flash for consistency with Fb2 and to
+  // unblock the "Clear Caches" UI from leaving SD garbage behind.
+  File bookFile;
+  File spineFile;
+  File tocFile;
 
   // Cached spine hrefs for O(1) lookup during TOC pass
   std::unordered_map<std::string, int> spineHrefIndex;
 
-  uint32_t writeSpineEntry(FsFile& file, const SpineEntry& entry) const;
-  uint32_t writeTocEntry(FsFile& file, const TocEntry& entry) const;
-  SpineEntry readSpineEntry(FsFile& file) const;
-  TocEntry readTocEntry(FsFile& file) const;
+  uint32_t writeSpineEntry(File& file, const SpineEntry& entry) const;
+  uint32_t writeTocEntry(File& file, const TocEntry& entry) const;
+  SpineEntry readSpineEntry(File& file) const;
+  TocEntry readTocEntry(File& file) const;
 
  public:
   BookMetadata coreMetadata;

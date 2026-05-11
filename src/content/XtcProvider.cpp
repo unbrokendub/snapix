@@ -1,5 +1,8 @@
 #include "XtcProvider.h"
 
+#include <FS.h>
+#include <LittleFS.h>
+#include <CacheFs.h>
 #include <CoverHelpers.h>
 #include <HardwareSerial.h>
 #include <SDCardManager.h>
@@ -47,7 +50,8 @@ Result<void> XtcProvider::open(const char* path, const char* cacheDir) {
     std::string pathStr(path);
     size_t hash = std::hash<std::string>{}(pathStr);
     snprintf(meta.cachePath, sizeof(meta.cachePath), "%s/xtc_%zu", cacheDir, hash);
-    SdMan.mkdir(meta.cachePath);
+    // v2.0.73: cache lives on LittleFS now.
+    cache_fs::ensureFlashDir(meta.cachePath);
   } else {
     meta.cachePath[0] = '\0';
   }
@@ -95,7 +99,8 @@ std::string XtcProvider::getThumbBmpPath() const { return std::string(meta.cache
 
 bool XtcProvider::generateCoverBmp() {
   const auto coverPath = getCoverBmpPath();
-  if (SdMan.exists(coverPath.c_str())) {
+  // v2.0.73: cover lives on LittleFS now.
+  if (LittleFS.exists(coverPath.c_str())) {
     return true;
   }
   return xtc::generateCoverBmpFromParser(parser, coverPath);
@@ -105,26 +110,20 @@ bool XtcProvider::generateThumbBmp() {
   const auto thumbPath = getThumbBmpPath();
   const auto failedMarkerPath = std::string(meta.cachePath) + "/.thumb.failed";
 
-  if (SdMan.exists(thumbPath.c_str())) return true;
+  // v2.0.73: thumb + failure marker live on LittleFS.
+  if (LittleFS.exists(thumbPath.c_str())) return true;
+  if (LittleFS.exists(failedMarkerPath.c_str())) return false;
 
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
-
-  if (!SdMan.exists(getCoverBmpPath().c_str()) && !generateCoverBmp()) {
-    FsFile marker;
-    if (SdMan.openFileForWrite("XTC", failedMarkerPath, marker)) {
-      marker.close();
-    }
+  if (!LittleFS.exists(getCoverBmpPath().c_str()) && !generateCoverBmp()) {
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
     return false;
   }
 
   const bool success = CoverHelpers::generateThumbFromCover(getCoverBmpPath(), thumbPath, "XTC");
   if (!success) {
-    FsFile marker;
-    if (SdMan.openFileForWrite("XTC", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
   }
   return success;
 }

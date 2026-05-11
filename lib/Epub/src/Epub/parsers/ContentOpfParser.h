@@ -1,4 +1,5 @@
 #pragma once
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
 #include <Print.h>
 
 #include <unordered_map>
@@ -31,7 +32,9 @@ class ContentOpfParser final : public Print {
   XML_Parser parser = nullptr;
   ParserState state = START;
   BookMetadataCache* cache;
-  FsFile tempItemStore;
+  // v2.0.73: temp item store moved from SD to LittleFS along with the rest
+  // of the EPUB cache.
+  File tempItemStore;
   std::unordered_map<std::string, std::string> manifestIndex;  // itemId -> href
   std::string coverItemId;
   std::vector<std::string> cssFiles_;

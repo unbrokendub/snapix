@@ -7,6 +7,9 @@
 
 #include "Xtc.h"
 
+#include <FS.h>
+#include <LittleFS.h>
+#include <CacheFs.h>
 #include <FsHelpers.h>
 #include <Logging.h>
 #include <SDCardManager.h>
@@ -34,32 +37,23 @@ bool Xtc::load() {
 }
 
 bool Xtc::clearCache() const {
-  if (!SdMan.exists(cachePath.c_str())) {
+  // v2.0.73: cache lives on LittleFS now.
+  if (!LittleFS.exists(cachePath.c_str())) {
     LOG_DBG(TAG, "Cache does not exist, no action needed");
     return true;
   }
-
-  if (!SdMan.removeDir(cachePath.c_str())) {
+  if (!cache_fs::rmTree(cachePath)) {
     LOG_ERR(TAG, "Failed to clear cache");
     return false;
   }
-
   LOG_INF(TAG, "Cache cleared successfully");
   return true;
 }
 
 void Xtc::setupCacheDir() const {
-  if (SdMan.exists(cachePath.c_str())) {
-    return;
+  if (!cache_fs::ensureFlashDir(cachePath)) {
+    LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
   }
-
-  // Create directories recursively
-  for (size_t i = 1; i < cachePath.length(); i++) {
-    if (cachePath[i] == '/') {
-      SdMan.mkdir(cachePath.substr(0, i).c_str());
-    }
-  }
-  SdMan.mkdir(cachePath.c_str());
 }
 
 std::string Xtc::getTitle() const {
@@ -108,7 +102,8 @@ const std::vector<xtc::ChapterInfo>& Xtc::getChapters() const {
 std::string Xtc::getCoverBmpPath() const { return cachePath + "/cover.bmp"; }
 
 bool Xtc::generateCoverBmp() const {
-  if (SdMan.exists(getCoverBmpPath().c_str())) {
+  // v2.0.73: cover lives on LittleFS now.
+  if (LittleFS.exists(getCoverBmpPath().c_str())) {
     return true;
   }
 

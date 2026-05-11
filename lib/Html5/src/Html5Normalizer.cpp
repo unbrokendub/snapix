@@ -1,6 +1,8 @@
 #include "Html5Normalizer.h"
 
 #include <Arduino.h>
+#include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
+#include <LittleFS.h>
 #include <SDCardManager.h>
 
 #include <algorithm>
@@ -81,7 +83,11 @@ bool matchesCandidateAt(const char* data, size_t available, const char* pattern)
   return true;
 }
 
-bool mayContainVoidTagCandidate(FsFile& file, const std::function<bool()>& shouldAbort) {
+// Templated so we can call with either Arduino File (LittleFS) or FsFile (SD
+// — used by the plain-HTML HtmlParser path that reads the source file
+// straight off the SD card).
+template <typename FileT>
+bool mayContainVoidTagCandidate(FileT& file, const std::function<bool()>& shouldAbort) {
   static constexpr const char* PATTERNS[] = {"<img",   "</img", "<br",    "</br",  "<hr",    "</hr",
                                              "<input", "</input", "<meta", "</meta", "<link", "</link",
                                              "<area",  "</area", "<base",  "</base", "<col",  "</col",
@@ -96,7 +102,7 @@ bool mayContainVoidTagCandidate(FsFile& file, const std::function<bool()>& shoul
     if (++chunkCounter >= YIELD_CHUNK_INTERVAL) {
       chunkCounter = 0;
       if (shouldAbort && shouldAbort()) {
-        file.seekSet(0);
+        file.seek(0);
         return false;
       }
       delay(1);
@@ -111,7 +117,7 @@ bool mayContainVoidTagCandidate(FsFile& file, const std::function<bool()>& shoul
       const size_t available = total - i;
       for (const char* pattern : PATTERNS) {
         if (matchesCandidateAt(buffer + i, available, pattern)) {
-          file.seekSet(0);
+          file.seek(0);
           return true;
         }
       }
@@ -123,29 +129,71 @@ bool mayContainVoidTagCandidate(FsFile& file, const std::function<bool()>& shoul
     }
   }
 
-  file.seekSet(0);
+  file.seek(0);
   return false;
 }
 
 }  // namespace
 
+// v2.0.73: shared core — does the actual normalization given already-open
+// in/out file handles.  Two thin wrappers below dispatch by whether the
+// input is on LittleFS (EPUB chapter cache) or SD (plain HTML book source).
+// Output is always LittleFS since it lives in the cache directory.
+template <typename InFileT>
+static bool normalizeVoidElementsImpl(InFileT& inFile, File& outFile,
+                                      const std::function<bool()>& shouldAbort);
+
 bool normalizeVoidElements(const std::string& inputPath, const std::string& outputPath,
                            const std::function<bool()>& shouldAbort) {
-  FsFile inFile, outFile;
-
-  if (!SdMan.openFileForRead("H5N", inputPath, inFile)) {
+  // v2.0.73: probe LittleFS first (EPUB chapter cache), fall back to SD
+  // (plain HTML book source).  Output ALWAYS on LittleFS.
+  File outFile = LittleFS.open(outputPath.c_str(), "w");
+  if (!outFile) {
     return false;
   }
 
+  if (LittleFS.exists(inputPath.c_str())) {
+    File inFile = LittleFS.open(inputPath.c_str(), "r");
+    if (!inFile) {
+      outFile.close();
+      LittleFS.remove(outputPath.c_str());
+      return false;
+    }
+    if (!mayContainVoidTagCandidate(inFile, shouldAbort)) {
+      inFile.close();
+      outFile.close();
+      LittleFS.remove(outputPath.c_str());
+      return false;
+    }
+    const bool ok = normalizeVoidElementsImpl(inFile, outFile, shouldAbort);
+    inFile.close();
+    outFile.close();
+    if (!ok) LittleFS.remove(outputPath.c_str());
+    return ok;
+  }
+
+  FsFile inFile;
+  if (!SdMan.openFileForRead("H5N", inputPath, inFile)) {
+    outFile.close();
+    LittleFS.remove(outputPath.c_str());
+    return false;
+  }
   if (!mayContainVoidTagCandidate(inFile, shouldAbort)) {
     inFile.close();
+    outFile.close();
+    LittleFS.remove(outputPath.c_str());
     return false;
   }
+  const bool ok = normalizeVoidElementsImpl(inFile, outFile, shouldAbort);
+  inFile.close();
+  outFile.close();
+  if (!ok) LittleFS.remove(outputPath.c_str());
+  return ok;
+}
 
-  if (!SdMan.openFileForWrite("H5N", outputPath, outFile)) {
-    inFile.close();
-    return false;
-  }
+template <typename InFileT>
+static bool normalizeVoidElementsImpl(InFileT& inFile, File& outFile,
+                                      const std::function<bool()>& shouldAbort) {
 
   State state = State::Normal;
   char tagName[MAX_TAG_NAME_LENGTH + 1] = {0};
@@ -376,18 +424,11 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
 
   if (!flushWrite()) goto error;
 
-  inFile.close();
-  outFile.close();
-  if (!modified) {
-    SdMan.remove(outputPath.c_str());
-    return false;
-  }
-  return true;
+  // v2.0.73: don't close files or remove output here — caller (wrapper)
+  // handles file lifecycle and output cleanup based on our return value.
+  return modified;
 
 error:
-  inFile.close();
-  outFile.close();
-  SdMan.remove(outputPath.c_str());
   return false;
 }
 

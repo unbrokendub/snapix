@@ -1,5 +1,8 @@
 #include "Html.h"
 
+#include <FS.h>
+#include <LittleFS.h>
+#include <CacheFs.h>
 #include <CoverHelpers.h>
 #include <FsHelpers.h>
 #include <Logging.h>
@@ -105,31 +108,23 @@ bool Html::load() {
 }
 
 bool Html::clearCache() const {
-  if (!SdMan.exists(cachePath.c_str())) {
+  // v2.0.73: cache lives on LittleFS now.
+  if (!LittleFS.exists(cachePath.c_str())) {
     LOG_DBG(TAG, "Cache does not exist, no action needed");
     return true;
   }
-
-  if (!SdMan.removeDir(cachePath.c_str())) {
+  if (!cache_fs::rmTree(cachePath)) {
     LOG_ERR(TAG, "Failed to clear cache");
     return false;
   }
-
   LOG_INF(TAG, "Cache cleared successfully");
   return true;
 }
 
 void Html::setupCacheDir() const {
-  if (SdMan.exists(cachePath.c_str())) {
-    return;
+  if (!cache_fs::ensureFlashDir(cachePath)) {
+    LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
   }
-
-  for (size_t i = 1; i < cachePath.length(); i++) {
-    if (cachePath[i] == '/') {
-      SdMan.mkdir(cachePath.substr(0, i).c_str());
-    }
-  }
-  SdMan.mkdir(cachePath.c_str());
 }
 
 std::string Html::getCoverBmpPath() const { return cachePath + "/cover.bmp"; }
@@ -146,32 +141,24 @@ bool Html::generateCoverBmp(bool use1BitDithering) const {
   const auto coverPath = getCoverBmpPath();
   const auto failedMarkerPath = cachePath + "/.cover.failed";
 
-  if (SdMan.exists(coverPath.c_str())) {
-    return true;
-  }
-
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
+  // v2.0.73: cover BMP + failure marker live on LittleFS.
+  if (LittleFS.exists(coverPath.c_str())) return true;
+  if (LittleFS.exists(failedMarkerPath.c_str())) return false;
 
   std::string coverImagePath = findCoverImage();
   if (coverImagePath.empty()) {
     LOG_DBG(TAG, "No cover image found");
-    FsFile marker;
-    if (SdMan.openFileForWrite("HTML", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    setupCacheDir();
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
     return false;
   }
 
   setupCacheDir();
-
   const bool success = CoverHelpers::convertImageToBmp(coverImagePath, coverPath, "HTML", use1BitDithering);
   if (!success) {
-    FsFile marker;
-    if (SdMan.openFileForWrite("HTML", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
   }
   return success;
 }
@@ -182,28 +169,20 @@ bool Html::generateThumbBmp() const {
   const auto thumbPath = getThumbBmpPath();
   const auto failedMarkerPath = cachePath + "/.thumb.failed";
 
-  if (SdMan.exists(thumbPath.c_str())) return true;
+  if (LittleFS.exists(thumbPath.c_str())) return true;
+  if (LittleFS.exists(failedMarkerPath.c_str())) return false;
 
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
-
-  if (!SdMan.exists(getCoverBmpPath().c_str()) && !generateCoverBmp(true)) {
-    FsFile marker;
-    if (SdMan.openFileForWrite("HTML", failedMarkerPath, marker)) {
-      marker.close();
-    }
+  if (!LittleFS.exists(getCoverBmpPath().c_str()) && !generateCoverBmp(true)) {
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
     return false;
   }
 
   setupCacheDir();
-
   const bool success = CoverHelpers::generateThumbFromCover(getCoverBmpPath(), thumbPath, "HTML");
   if (!success) {
-    FsFile marker;
-    if (SdMan.openFileForWrite("HTML", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
+    if (marker) marker.close();
   }
   return success;
 }
