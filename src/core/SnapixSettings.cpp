@@ -5,6 +5,8 @@
 #include <SdFat.h>
 #include <Serialization.h>
 
+#include <string>
+
 #include "../FontManager.h"
 #include "../Theme.h"
 #include "../config.h"
@@ -31,8 +33,14 @@ Result<void> Settings::save(drivers::Storage& storage) const {
   // lazily, no upfront mkdir needed here.
   storage.mkdir(SNAPIX_DIR);
 
+  // v2.0.75: atomic write — `.tmp` + rename so a power loss mid-write
+  // doesn't corrupt the existing settings.  Pre-2.0.75 wrote 27 fields
+  // sequentially to the final path; if power cut between magic+version
+  // and the rest, load() saw wrong magic / wrong version → DELETED the
+  // file (line 93) and dropped the user back to defaults.
+  const std::string tmpPath = std::string(SNAPIX_SETTINGS_FILE) + ".tmp";
   FsFile outputFile;
-  auto result = storage.openWrite(SNAPIX_SETTINGS_FILE, outputFile);
+  auto result = storage.openWrite(tmpPath.c_str(), outputFile);
   if (!result.ok()) {
     return result;
   }
@@ -71,8 +79,16 @@ Result<void> Settings::save(drivers::Storage& storage) const {
   serialization::writePod(outputFile, sleepHoldTime);
   serialization::writePod(outputFile, bionicReading);
   serialization::writePod(outputFile, fakeBold);
+  outputFile.flush();
   outputFile.close();
 
+  // v2.0.75: atomic rename.  SDFat rename overwrites the destination if it
+  // exists.  On failure, leave the .tmp around — old settings survive.
+  if (!storage.rename(tmpPath.c_str(), SNAPIX_SETTINGS_FILE)) {
+    LOG_ERR(TAG, "Settings rename %s -> %s failed; keeping old file", tmpPath.c_str(), SNAPIX_SETTINGS_FILE);
+    storage.remove(tmpPath.c_str());
+    return ErrVoid(Error::SdCardNotFound);
+  }
   LOG_INF(TAG, "Settings saved to file");
   return Ok();
 }

@@ -329,6 +329,15 @@ bool pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOut, int targetMaxWid
       success = false;
       break;
     }
+    // v2.0.75: bail if pngInitCallback set initFailed.  Pre-2.0.75 the loop
+    // continued feeding bytes after init failure, producing a partial BMP
+    // (header maybe written, no pixel data) that downstream code accepted
+    // as a valid file → silent placeholder for the user.
+    if (ctx.initFailed) {
+      LOG_ERR(TAG, "PNG init failed (OOM or bad header) — aborting decode");
+      success = false;
+      break;
+    }
     {
       snapix::spi::SharedBusLock busLock;
       if (!busLock) {

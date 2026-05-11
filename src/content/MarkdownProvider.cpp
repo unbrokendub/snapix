@@ -1,5 +1,6 @@
 #include "MarkdownProvider.h"
 
+#include <Utf8.h>
 #include <cstring>
 
 namespace snapix {
@@ -18,10 +19,8 @@ Result<void> MarkdownProvider::open(const char* path, const char* cacheDir) {
   meta.clear();
   meta.type = ContentType::Markdown;
 
-  const std::string& title = markdown->getTitle();
-  strncpy(meta.title, title.c_str(), sizeof(meta.title) - 1);
-  meta.title[sizeof(meta.title) - 1] = '\0';
-
+  // v2.0.75: utf8SafeCopy for title (avoids splitting Cyrillic/CJK chars).
+  utf8SafeCopy(meta.title, sizeof(meta.title), markdown->getTitle().c_str());
   meta.author[0] = '\0';  // Markdown doesn't have author
 
   const std::string& cachePath = markdown->getCachePath();

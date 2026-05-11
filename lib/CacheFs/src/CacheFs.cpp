@@ -16,10 +16,19 @@ bool ensureFlashDir(const std::string& path) {
   return LittleFS.mkdir(path.c_str());
 }
 
-bool rmTree(const std::string& path) {
-  // Pattern matches the inline lambdas previously in Fb2.cpp::clearCache and
-  // SettingsState.cpp's rmTree — those proved out the iterate-and-delete
-  // approach against the Arduino LittleFS implementation.
+// v2.0.75: bounded recursion depth defends against pathological cache trees
+// (or LittleFS bugs returning entries that point at parent dirs).  Realistic
+// cache layout depth: /cache/<type>_<hash>/sections/N → 4 levels.  20 is
+// generous headroom; deeper recursion silently bails to prevent stack
+// overflow on the foreground task.
+static constexpr int kMaxRmTreeDepth = 20;
+
+static bool rmTreeImpl(const std::string& path, int depth) {
+  if (depth > kMaxRmTreeDepth) {
+    // Don't crash; refuse to recurse further and signal failure so the
+    // caller knows the cleanup was incomplete.
+    return false;
+  }
   if (!LittleFS.exists(path.c_str())) return true;
 
   File dir = LittleFS.open(path.c_str(), "r");
@@ -35,7 +44,7 @@ bool rmTree(const std::string& path) {
     const bool isDir = entry.isDirectory();
     entry.close();
     if (isDir) {
-      if (!rmTree(entryPath)) {
+      if (!rmTreeImpl(entryPath, depth + 1)) {
         dir.close();
         return false;
       }
@@ -46,6 +55,13 @@ bool rmTree(const std::string& path) {
   }
   dir.close();
   return LittleFS.rmdir(path.c_str());
+}
+
+bool rmTree(const std::string& path) {
+  // Pattern matches the inline lambdas previously in Fb2.cpp::clearCache and
+  // SettingsState.cpp's rmTree — those proved out the iterate-and-delete
+  // approach against the Arduino LittleFS implementation.
+  return rmTreeImpl(path, 0);
 }
 
 }  // namespace cache_fs

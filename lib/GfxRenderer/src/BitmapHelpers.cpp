@@ -151,6 +151,7 @@ uint8_t quantize(int gray, int x, int y) {
 uint8_t quantize1bit(int gray, int x, int y) { return gray < 128 ? 0 : 1; }
 
 // BMP scaling implementation
+#include <Arduino.h>     // delay() for periodic yield (v2.0.75)
 #include <Logging.h>
 #include <FS.h>          // Arduino base File (LittleFS, v2.0.72)
 #include <LittleFS.h>    // v2.0.72 thumbnail target
@@ -412,6 +413,14 @@ static bool bmpTo1BitBmpScaledImpl(SrcF& srcFile, DstF& dstFile, int targetMaxWi
 
   // Process output rows
   for (int outY = 0; outY < outHeight; outY++) {
+    // v2.0.75: yield to FreeRTOS every 32 output rows so a large-image
+    // thumbnail conversion (e.g. 1024×1024 → 256×256) can't trip the task
+    // watchdog (5 s on ESP32-C3).  Pre-2.0.75 the nested pixel loops ran
+    // uninterrupted: ~16M ops at ~6 MHz effective per-pixel work = up to
+    // 4-5 s on the largest covers, right at the watchdog threshold.
+    if ((outY & 31) == 0) {
+      delay(1);
+    }
     // Calculate source Y range for this output row using fixed-point
     const int srcYStart = (static_cast<uint32_t>(outY) * scaleY_fp) >> 16;
     int srcYEnd = (static_cast<uint32_t>(outY + 1) * scaleY_fp) >> 16;

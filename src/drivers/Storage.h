@@ -25,6 +25,9 @@ class Storage {
   Result<void> remove(const char* path);
   Result<void> mkdir(const char* path);
   Result<void> rmdir(const char* path);
+  // v2.0.75: atomic-write helper for `.tmp` → final pattern.  SDFat rename
+  // overwrites the destination atomically.
+  bool rename(const char* fromPath, const char* toPath);
 
   // Directory operations
   Result<void> openDir(const char* path, FsFile& out);

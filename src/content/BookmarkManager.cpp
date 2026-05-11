@@ -34,13 +34,19 @@ bool BookmarkManager::save(Core& core, const char* cacheDir, ContentType type, c
   snprintf(bmDir, sizeof(bmDir), "%s/bookmarks", SNAPIX_DIR);
   core.storage.mkdir(bmDir);
 
+  // v2.0.75: atomic write — pre-2.0.75 wrote count byte then payload directly
+  // to the final path; power loss after the count byte but before payload
+  // left a corrupted .bin file → load() rejected it → ALL bookmarks lost on
+  // every crash mid-save.
   char path[280];
   buildBookmarkPath(path, sizeof(path), cacheDir, "bin");
+  char tmpPath[288];
+  snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", path);
 
   FsFile file;
-  auto result = core.storage.openWrite(path, file);
+  auto result = core.storage.openWrite(tmpPath, file);
   if (!result.ok()) {
-    LOG_ERR(TAG, "Failed to save bookmarks to %s", path);
+    LOG_ERR(TAG, "Failed to open tmp bookmarks %s", tmpPath);
     return false;
   }
 
@@ -49,9 +55,26 @@ bool BookmarkManager::save(Core& core, const char* cacheDir, ContentType type, c
   if (count > 0) {
     file.write(reinterpret_cast<const uint8_t*>(bookmarks), static_cast<size_t>(count) * sizeof(Bookmark));
   }
+  file.flush();
+  const uint32_t expectedBytes = sizeof(uint8_t) + static_cast<uint32_t>(count) * sizeof(Bookmark);
+  const uint32_t actualBytes = file.size();
   file.close();
+  if (actualBytes != expectedBytes) {
+    LOG_ERR(TAG, "Short bookmarks write %u/%u; discarding tmp",
+            static_cast<unsigned>(actualBytes), static_cast<unsigned>(expectedBytes));
+    core.storage.remove(tmpPath);
+    return false;
+  }
+  if (!core.storage.rename(tmpPath, path)) {
+    LOG_ERR(TAG, "Failed to rename %s -> %s; keeping old bookmarks", tmpPath, path);
+    core.storage.remove(tmpPath);
+    return false;
+  }
   LOG_DBG(TAG, "Saved %d bookmarks", count);
 
+  // bookmarks.txt is a human-readable export, non-critical.  Direct write
+  // is acceptable — power loss leaves a partial .txt that the user can
+  // delete; the canonical .bin above is intact.
   buildBookmarkPath(path, sizeof(path), cacheDir, "txt");
   result = core.storage.openWrite(path, file);
   if (!result.ok()) {

@@ -42,13 +42,20 @@ bool ProgressManager::save(Core& core, const char* cacheDir, ContentType type, c
   snprintf(progressDir, sizeof(progressDir), "%s/progress", SNAPIX_DIR);
   core.storage.mkdir(progressDir);
 
+  // v2.0.75: atomic write — `.tmp` + close + rename so a power loss mid-
+  // write doesn't corrupt the existing progress file.  Pre-2.0.75 wrote 4
+  // bytes directly to the final path: a 4-byte write split by power loss
+  // left the file with 0-3 bytes, the load() size check rejected it and
+  // the user's reading position reset to page 0 on every crash.
   char progressPath[280];
   buildProgressPath(progressPath, sizeof(progressPath), cacheDir);
+  char tmpPath[288];
+  snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", progressPath);
 
   FsFile file;
-  auto result = core.storage.openWrite(progressPath, file);
+  auto result = core.storage.openWrite(tmpPath, file);
   if (!result.ok()) {
-    LOG_ERR(TAG, "Failed to save progress to %s", progressPath);
+    LOG_ERR(TAG, "Failed to open tmp progress %s", tmpPath);
     return false;
   }
 
@@ -87,7 +94,20 @@ bool ProgressManager::save(Core& core, const char* cacheDir, ContentType type, c
     LOG_DBG(TAG, "Saved text: page %d", progress.sectionPage);
   }
 
+  file.flush();
+  const uint32_t writtenBytes = file.size();
   file.close();
+  if (writtenBytes < 4) {
+    LOG_ERR(TAG, "Short progress write %u/4 bytes; discarding tmp", static_cast<unsigned>(writtenBytes));
+    core.storage.remove(tmpPath);
+    return false;
+  }
+  // SDFat rename: removes destination if it exists, then renames.  Atomic.
+  if (!core.storage.rename(tmpPath, progressPath)) {
+    LOG_ERR(TAG, "Failed to rename %s -> %s; keeping old progress", tmpPath, progressPath);
+    core.storage.remove(tmpPath);
+    return false;
+  }
   return true;
 }
 

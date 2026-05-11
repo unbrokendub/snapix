@@ -71,7 +71,11 @@ inline TextScriptFlags detectTextScripts(const char* text) {
   return flags;
 }
 
-inline void writePhysicalPixel(uint8_t* frameBuffer, const int physX, const int physY, const bool state) {
+// v2.0.75: IRAM_ATTR pins these per-pixel helpers in fast internal RAM.
+// Without it, every page render pays an I-cache miss penalty on cold flash
+// fetch (~80 cycles on RISC-V) for 100k+ pixel calls.  Cost is ~1 KB IRAM
+// (well within budget) for ~1 ms saved per render.
+IRAM_ATTR inline void writePhysicalPixel(uint8_t* frameBuffer, const int physX, const int physY, const bool state) {
   const uint16_t byteIndex = physY * EInkDisplay::DISPLAY_WIDTH_BYTES + (physX >> 3);
   const uint8_t bitMask = static_cast<uint8_t>(1U << (7 - (physX & 7)));
   if (state) {
@@ -81,8 +85,8 @@ inline void writePhysicalPixel(uint8_t* frameBuffer, const int physX, const int 
   }
 }
 
-inline void writeLogicalPixelUnchecked(uint8_t* frameBuffer, const GfxRenderer::Orientation orientation, const int x,
-                                       const int y, const bool state) {
+IRAM_ATTR inline void writeLogicalPixelUnchecked(uint8_t* frameBuffer, const GfxRenderer::Orientation orientation,
+                                                 const int x, const int y, const bool state) {
   switch (orientation) {
     case GfxRenderer::Portrait:
       writePhysicalPixel(frameBuffer, y, EInkDisplay::DISPLAY_HEIGHT - 1 - x, state);
@@ -99,9 +103,9 @@ inline void writeLogicalPixelUnchecked(uint8_t* frameBuffer, const GfxRenderer::
   }
 }
 
-inline void plotPixelOptimized(uint8_t* frameBuffer, const GfxRenderer::Orientation orientation,
-                               const GfxRenderer::RenderMode renderMode, const int x, const int y, const bool state,
-                               const GfxRenderer* renderer) {
+IRAM_ATTR inline void plotPixelOptimized(uint8_t* frameBuffer, const GfxRenderer::Orientation orientation,
+                                         const GfxRenderer::RenderMode renderMode, const int x, const int y,
+                                         const bool state, const GfxRenderer* renderer) {
   // The grayscale AA pipeline is sensitive to exact buffer semantics across the
   // BW/RED controller RAM passes. Keep the original drawPixel path there.
   if (renderMode == GfxRenderer::BW) {

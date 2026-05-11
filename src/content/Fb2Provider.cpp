@@ -1,5 +1,6 @@
 #include "Fb2Provider.h"
 
+#include <Utf8.h>
 #include <cstring>
 
 namespace snapix {
@@ -18,13 +19,9 @@ Result<void> Fb2Provider::open(const char* path, const char* cacheDir) {
   meta.clear();
   meta.type = ContentType::Fb2;
 
-  const std::string& title = fb2->getTitle();
-  strncpy(meta.title, title.c_str(), sizeof(meta.title) - 1);
-  meta.title[sizeof(meta.title) - 1] = '\0';
-
-  const std::string& author = fb2->getAuthor();
-  strncpy(meta.author, author.c_str(), sizeof(meta.author) - 1);
-  meta.author[sizeof(meta.author) - 1] = '\0';
+  // v2.0.75: utf8SafeCopy avoids splitting Cyrillic/CJK chars in title/author.
+  utf8SafeCopy(meta.title, sizeof(meta.title), fb2->getTitle().c_str());
+  utf8SafeCopy(meta.author, sizeof(meta.author), fb2->getAuthor().c_str());
 
   const std::string& cachePath = fb2->getCachePath();
   strncpy(meta.cachePath, cachePath.c_str(), sizeof(meta.cachePath) - 1);

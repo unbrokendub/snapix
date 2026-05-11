@@ -1,5 +1,6 @@
 #include "EpubProvider.h"
 
+#include <Utf8.h>
 #include <cstring>
 
 namespace snapix {
@@ -18,13 +19,11 @@ Result<void> EpubProvider::open(const char* path, const char* cacheDir) {
   meta.clear();
   meta.type = ContentType::Epub;
 
-  const std::string& title = epub->getTitle();
-  strncpy(meta.title, title.c_str(), sizeof(meta.title) - 1);
-  meta.title[sizeof(meta.title) - 1] = '\0';
-
-  const std::string& author = epub->getAuthor();
-  strncpy(meta.author, author.c_str(), sizeof(meta.author) - 1);
-  meta.author[sizeof(meta.author) - 1] = '\0';
+  // v2.0.75: utf8SafeCopy for title/author to avoid splitting Cyrillic/CJK
+  // multi-byte characters mid-sequence (visible as mojibake / replacement
+  // glyphs).  Path fields stay strncpy — paths are ASCII-only.
+  utf8SafeCopy(meta.title, sizeof(meta.title), epub->getTitle().c_str());
+  utf8SafeCopy(meta.author, sizeof(meta.author), epub->getAuthor().c_str());
 
   const std::string& cachePath = epub->getCachePath();
   strncpy(meta.cachePath, cachePath.c_str(), sizeof(meta.cachePath) - 1);

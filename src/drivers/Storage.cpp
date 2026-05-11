@@ -91,6 +91,11 @@ Result<void> Storage::rmdir(const char* path) {
   return Ok();
 }
 
+bool Storage::rename(const char* fromPath, const char* toPath) {
+  if (!mounted_) return false;
+  return SdMan.rename(fromPath, toPath);
+}
+
 Result<void> Storage::openDir(const char* path, FsFile& out) {
   if (!mounted_) {
     return ErrVoid(Error::SdCardNotFound);
