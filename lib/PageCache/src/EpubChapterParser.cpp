@@ -337,7 +337,18 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     return false;
   }
 
-  // Create read callback for extracting images from EPUB
+  // Create read callback for extracting images from EPUB.
+  //
+  // v2.0.77: pass the renderer's frame buffer as uzlib's history dict.
+  // Pre-2.0.77 we passed `nullptr` so uzlib allocated its own 32 KB dict
+  // every image extraction — on a tight heap (~70 KB free after EPUB load
+  // + JPEGDEC instance + decode arena pinned), that allocation dropped
+  // free heap below the 15 KB abort threshold within ~130 ms and the
+  // strict abort callback killed the extract.  Three retries each hit
+  // the same wall → "failed to load page".  The chapter HTML extraction
+  // path at line 240 has done this since v2.0.50; image extraction was
+  // overlooked.  BG worker doesn't render to the display while
+  // extracting, so reusing the frame buffer as scratch is safe.
   auto readItemFn = [this, shouldAbort](const std::string& href, Print& out, size_t chunkSize,
                                         const std::function<bool()>& localAbort)
       -> ChapterHtmlSlimParser::ReadItemStatus {
@@ -347,7 +358,8 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
       }
       return shouldAbort && shouldAbort();
     };
-    switch (epub_->readItemContentsToStreamDetailed(href, out, chunkSize, nullptr, combinedAbort)) {
+    switch (epub_->readItemContentsToStreamDetailed(href, out, chunkSize, renderer_.getFrameBuffer(),
+                                                    combinedAbort)) {
       case Epub::ItemReadResult::Success:
         return ChapterHtmlSlimParser::ReadItemStatus::Success;
       case Epub::ItemReadResult::Aborted:
