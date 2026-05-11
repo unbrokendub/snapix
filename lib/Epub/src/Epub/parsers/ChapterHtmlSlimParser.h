@@ -145,8 +145,17 @@ class ChapterHtmlSlimParser {
   // Image failure rate limiting - skip remaining images after consecutive failures
   uint8_t consecutiveImageFailures_ = 0;
   static constexpr uint8_t MAX_CONSECUTIVE_IMAGE_FAILURES = 3;
-  static constexpr uint32_t MAX_QUICK_IMAGE_PROCESS_TIME_MS = 8000;
-  static constexpr uint32_t MAX_FULL_IMAGE_PROCESS_TIME_MS = 12000;
+  // v2.0.78: bumped from 8 s / 12 s.  On ESP32-C3 with uzlib, deflate of a
+  // 200-400 KB ZIP entry (typical of Calibre-exported EPUBs that deflate
+  // every image regardless of compressibility) takes 15-30 seconds.  The
+  // old 8 s timeout fired on every oversized inline JPEG, blacklisting the
+  // image after one attempt (see resolveAndCacheImage extract-aborted path).
+  // Giving moderately-large images (~200 KB) a real chance to decode is
+  // worth the longer wait; truly oversized images (~400 KB+) still time
+  // out but now get session-blacklisted so the chapter still renders with
+  // a placeholder.
+  static constexpr uint32_t MAX_QUICK_IMAGE_PROCESS_TIME_MS = 15000;
+  static constexpr uint32_t MAX_FULL_IMAGE_PROCESS_TIME_MS = 25000;
 
   // Session-wide blacklist of images that timed out or aborted during conversion.
   // Prevents background cold-extend from repeatedly grinding the same problematic

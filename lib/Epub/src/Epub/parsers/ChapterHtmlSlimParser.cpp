@@ -1724,6 +1724,30 @@ ChapterHtmlSlimParser::CachedImageResult ChapterHtmlSlimParser::cacheImage(const
       tempFile.close();
       LittleFS.remove(tempPath.c_str());
       if (readStatus == ReadItemStatus::Aborted) {
+        // v2.0.78: distinguish user-cancel from automatic Timeout/LowMemory.
+        // Timeout/LowMemory means the image is just too big for this hardware
+        // (typical: a 400 KB ZIP-deflated JPEG in a Calibre-exported EPUB).
+        // Pre-2.0.78 we returned `retryable` for any abort → caller retried
+        // 3x, each attempt re-burned the timeout, page NEVER rendered.  Now
+        // we session-blacklist the image hash AND mark terminal so the
+        // chapter parser proceeds with a placeholder.  StopRequested (user
+        // button preempt) stays retryable: user may navigate back and want
+        // the image rendered properly.  Only the convert phase had this
+        // distinction pre-2.0.78; extract phase treated everything as
+        // retryable.
+        const ImageInterruptReason effectiveInterrupt =
+            (lastSeenInterrupt != ImageInterruptReason::None) ? lastSeenInterrupt
+                                                              : classifyImageInterrupt();
+        if (effectiveInterrupt == ImageInterruptReason::Timeout ||
+            effectiveInterrupt == ImageInterruptReason::LowMemory) {
+          sessionFailedImageHashes().insert(srcHash);
+          LOG_INF(TAG, "[CONTENT][IMAGE] extract blacklisted for session src=%s reason=%s",
+                  result.resolvedPath.c_str(), interruptToReason(effectiveInterrupt, "extract-aborted"));
+          consecutiveImageFailures_++;
+          setTerminal(interruptToReason(effectiveInterrupt, "extract-aborted"),
+                      interruptToFailureClass(effectiveInterrupt, ImageFailureClass::ExtractAborted));
+          return result;
+        }
         setRetryable("extract-aborted", ImageFailureClass::ExtractAborted);
         return result;
       }
