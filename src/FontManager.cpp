@@ -7,6 +7,7 @@
 #include <esp_heap_caps.h>
 
 #include <cstring>
+#include <new>  // std::nothrow
 
 #include "config.h"
 
@@ -115,7 +116,18 @@ FontManager::LoadedFont FontManager::loadSingleFont(const char* path) {
   result.bitmap = loaded.bitmap;
   result.glyphs = loaded.glyphs;
   result.intervals = loaded.intervals;
-  result.font = new EpdFont(result.data);
+  // v2.0.74: nothrow + leak-free OOM path.  Pre-2.0.74 used bare `new` so a
+  // failure threw bad_alloc that propagated up uncaught (font load is not
+  // wrapped in the BG worker's try/catch — runs in foreground).  Crash on
+  // OOM during settings change.  Now: log + leave result.font nullptr;
+  // the loaded.* buffers above (bitmap/glyphs/intervals) are owned by the
+  // EpdFontLoader result and will be freed by its caller's cleanup path.
+  result.font = new (std::nothrow) EpdFont(result.data);
+  if (!result.font) {
+    LOG_ERR("FONT", "OOM allocating EpdFont (size %u)",
+            static_cast<unsigned>(loaded.bitmapSize + loaded.glyphsSize + loaded.intervalsSize));
+    return result;
+  }
 
   // Store sizes for memory profiling
   result.bitmapSize = loaded.bitmapSize;
@@ -396,9 +408,16 @@ bool FontManager::loadExternalFont(const char* filename) {
   char path[80];
   snprintf(path, sizeof(path), "%s/%s", CONFIG_FONTS_DIR, filename);
 
-  // Allocate if needed
+  // Allocate if needed.  v2.0.74: nothrow guard so a failed alloc doesn't
+  // throw bad_alloc into the foreground render path — log + bail instead.
   if (!_externalFont) {
-    _externalFont = new ExternalFont();
+    _externalFont = new (std::nothrow) ExternalFont();
+    if (!_externalFont) {
+      LOG_ERR("FONT", "OOM allocating ExternalFont (free=%u largest=%u)",
+              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+      return false;
+    }
   }
 
   if (!_externalFont->load(path)) {

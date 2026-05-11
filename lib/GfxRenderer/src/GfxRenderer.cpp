@@ -15,6 +15,8 @@
 #define IRAM_ATTR
 #endif
 
+#include <esp_heap_caps.h>
+
 #include <algorithm>
 #include <cassert>
 
@@ -162,6 +164,17 @@ static inline void rotateCoordinates(const GfxRenderer::Orientation orientation,
 void GfxRenderer::begin() {
   frameBuffer = einkDisplay.getFrameBuffer();
   assert(frameBuffer && "GfxRenderer::begin() called before display.begin()");
+  // v2.0.74: pre-allocate the bitmap row buffers (~2.6 KB total) at startup
+  // when the heap is fresh and contiguous.  Pre-2.0.74 these were lazy-
+  // allocated on first drawBitmap call, which happens deep into a reading
+  // session when the heap is fragmented — could fail and cascade into a
+  // black/empty cover or missing inline image.  Pre-allocating costs 2.6 KB
+  // permanently but guarantees images can always render.
+  if (!ensureBitmapRowBuffers()) {
+    LOG_ERR(TAG, "begin: bitmap row buffer pre-alloc failed (free=%u largest=%u)",
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  }
 }
 
 void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
@@ -246,12 +259,22 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     fontIt->second.getTextDimensions(text, &w, &h, style);
   }
 
-  // Insert into flat hash table; clear if full
+  // Insert into flat hash table.  v2.0.74: when the table fills, evict ONE
+  // entry (the natural-slot collision) instead of wiping all 256 hot entries.
+  // Pre-2.0.74 the full-clear pattern was visible as 5-10 ms re-measurement
+  // spikes on text-heavy pages where common stop words ("the", "и", "of")
+  // got re-hashed every time the cache filled — typical EPUB section parse
+  // creates 200+ unique (text, style) keys, hitting the wipe ~1× per page.
+  slot = key % MAX_WIDTH_CACHE_SIZE;
   if (widthCacheCount_ >= MAX_WIDTH_CACHE_SIZE) {
-    clearWidthCache();
+    // Direct overwrite at the natural probe slot.  Drops one hot entry per
+    // insert (1/256 chance of evicting a frequently-used word vs. losing
+    // the entire cache).  Count stays at MAX since we replace 1-for-1.
+    widthCacheKeys_[slot] = key;
+    widthCacheValues_[slot] = static_cast<int16_t>(w);
+    return w;
   }
 
-  slot = key % MAX_WIDTH_CACHE_SIZE;
   for (size_t i = 0; i < MAX_WIDTH_CACHE_SIZE; i++) {
     if (widthCacheKeys_[slot] == 0) {
       widthCacheKeys_[slot] = key;

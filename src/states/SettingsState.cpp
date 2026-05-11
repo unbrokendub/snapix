@@ -1,6 +1,7 @@
 #include "SettingsState.h"
 
 #include <Arduino.h>
+#include <CacheFs.h>
 #include <EInkDisplay.h>
 #include <GfxRenderer.h>
 #include <LittleFS.h>  // Must be before SdFat includes to avoid FILE_READ/FILE_WRITE redefinition
@@ -486,36 +487,16 @@ void SettingsState::handleConfirm(Core& core) {
           // and any other LittleFS content stay untouched.
           ui::centeredMessage(renderer_, THEME, THEME.uiFontId, "Clearing cache...");
 
-          // Local recursive-rmdir lambda: walks dir, deletes files, recurses
-          // into subdirs, finally rmdirs the now-empty directory.
-          std::function<bool(const char*)> rmTree = [&](const char* path) -> bool {
-            if (!LittleFS.exists(path)) return true;
-            File dir = LittleFS.open(path, "r");
-            if (!dir || !dir.isDirectory()) return false;
-            File entry = dir.openNextFile();
-            while (entry) {
-              const std::string entryPath = std::string(path) + "/" + entry.name();
-              const bool isDir = entry.isDirectory();
-              entry.close();
-              if (isDir) {
-                if (!rmTree(entryPath.c_str())) {
-                  dir.close();
-                  return false;
-                }
-              } else {
-                LittleFS.remove(entryPath.c_str());
-              }
-              entry = dir.openNextFile();
-            }
-            dir.close();
-            return LittleFS.rmdir(path);
-          };
+          // v2.0.74: use the shared cache_fs::rmTree from lib/CacheFs (extracted
+          // in v2.0.73).  Same proven impl already used by Fb2/Txt/MD/Html/Xtc/
+          // Epub clearCache, so we don't drift between two near-identical
+          // recursive-delete lambdas.
 
           const bool hadPageCache = LittleFS.exists(SNAPIX_CACHE_DIR);
           const bool hadImageCache = LittleFS.exists("/img");
           bool ok = true;
-          if (hadPageCache) ok = rmTree(SNAPIX_CACHE_DIR) && ok;
-          if (hadImageCache) ok = rmTree("/img") && ok;
+          if (hadPageCache) ok = cache_fs::rmTree(SNAPIX_CACHE_DIR) && ok;
+          if (hadImageCache) ok = cache_fs::rmTree("/img") && ok;
           // v2.0.60 migration: wipe orphaned SD-side cache from <=2.0.59.
           // Cache moved to LittleFS — old SD path /.snapix/cache lingers
           // and wastes card space until cleared.  Bookmarks/progress live

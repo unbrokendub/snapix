@@ -145,6 +145,15 @@ static bool normalizeVoidElementsImpl(InFileT& inFile, File& outFile,
 
 bool normalizeVoidElements(const std::string& inputPath, const std::string& outputPath,
                            const std::function<bool()>& shouldAbort) {
+  // v2.0.74: dropped the mayContainVoidTagCandidate pre-scan.  Pre-2.0.74
+  // we read the entire file once to check for `<img`/`<br`/etc. substrings,
+  // then re-read it through the state machine if the scan was positive.
+  // EPUB chapters almost always have void tags → we paid 2× the read cost.
+  // Now we just run the state machine directly; if it produces no
+  // modifications (modified=false), the wrapper deletes the output file
+  // and the caller falls back to the input.  Net: ~5-10 ms saved per
+  // chapter (~0.5-1 s per typical EPUB on first load).
+  //
   // v2.0.73: probe LittleFS first (EPUB chapter cache), fall back to SD
   // (plain HTML book source).  Output ALWAYS on LittleFS.
   File outFile = LittleFS.open(outputPath.c_str(), "w");
@@ -159,12 +168,6 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
       LittleFS.remove(outputPath.c_str());
       return false;
     }
-    if (!mayContainVoidTagCandidate(inFile, shouldAbort)) {
-      inFile.close();
-      outFile.close();
-      LittleFS.remove(outputPath.c_str());
-      return false;
-    }
     const bool ok = normalizeVoidElementsImpl(inFile, outFile, shouldAbort);
     inFile.close();
     outFile.close();
@@ -174,12 +177,6 @@ bool normalizeVoidElements(const std::string& inputPath, const std::string& outp
 
   FsFile inFile;
   if (!SdMan.openFileForRead("H5N", inputPath, inFile)) {
-    outFile.close();
-    LittleFS.remove(outputPath.c_str());
-    return false;
-  }
-  if (!mayContainVoidTagCandidate(inFile, shouldAbort)) {
-    inFile.close();
     outFile.close();
     LittleFS.remove(outputPath.c_str());
     return false;

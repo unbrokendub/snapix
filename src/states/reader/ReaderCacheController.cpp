@@ -13,6 +13,9 @@
 #include <PlainTextParser.h>
 #include <SDCardManager.h>
 #include <Serialization.h>
+#include <esp_heap_caps.h>
+
+#include <new>
 
 #include <algorithm>
 #include <cstring>
@@ -33,6 +36,33 @@ constexpr size_t kEpubResidentWarmMinFreeBytes = 44 * 1024;
 constexpr size_t kEpubResidentWarmMinLargestBlock = 20 * 1024;
 constexpr size_t kEpubFarSweepMinFreeBytes = 56 * 1024;
 constexpr size_t kEpubFarSweepMinLargestBlock = 24 * 1024;
+
+// v2.0.74: foreground parser/page-cache allocations can throw std::bad_alloc
+// on a fragmented heap (typical mid-session) — and the foreground render path
+// has no surrounding try/catch (only the BG worker's workerLoop does).  An
+// uncaught bad_alloc abort()s the device.  This helper catches the throw,
+// logs heap stats so we can diagnose, and returns nullptr — caller must
+// then bail gracefully (skip render, fall back to placeholder).
+//
+// Two-template-arg form returns unique_ptr<Base> after constructing Derived:
+// avoids the "incomplete type at instantiation point" error when Derived's
+// destructor needs members declared in headers we don't pull into this TU
+// (e.g. ParsedText inside PlainTextParser).  unique_ptr<Base> with a virtual
+// dtor only needs Base's destructor visible here.
+template <typename Base, typename Derived = Base, typename... Args>
+std::unique_ptr<Base> tryNewUnique(const char* what, Args&&... args) {
+  try {
+    return std::unique_ptr<Base>(new Derived(std::forward<Args>(args)...));
+  } catch (const std::bad_alloc&) {
+    LOG_ERR(TAG, "OOM allocating %s (free=%u largest=%u)", what,
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    return nullptr;
+  } catch (...) {
+    LOG_ERR(TAG, "Unhandled exception allocating %s", what);
+    return nullptr;
+  }
+}
 
 bool fb2UsesSectionNavigation(const Fb2Provider* provider) {
   return provider && provider->getFb2() && provider->tocCount() > 0;
@@ -312,11 +342,17 @@ void ReaderCacheController::saveAnchorMap(const ContentParser& parser, const std
   const auto& anchorMap = parser.getAnchorMap();
   if (anchorMap.empty()) return;
 
-  // v2.0.61: anchors file lives on LittleFS alongside the page cache.
-  // It's TOC index data (cache-derivable from a re-parse), not user data.
+  // v2.0.74: write to .tmp then atomic rename so a power loss mid-write
+  // doesn't leave a corrupt .anchors file (which would silently break TOC
+  // navigation on the next load — `loadAnchorMap` returns an empty vector
+  // on parse failure with no diagnostic).  Pre-2.0.74 wrote in place with
+  // no flush + no error checks, so a partial write left a half-corrupt
+  // file persistent until manual cache clear.
   const std::string mapPath = cachePath + ".anchors";
-  File file = LittleFS.open(mapPath.c_str(), "w");
+  const std::string tmpPath = mapPath + ".tmp";
+  File file = LittleFS.open(tmpPath.c_str(), "w");
   if (!file) {
+    LOG_ERR(TAG, "saveAnchorMap: failed to open %s for write", tmpPath.c_str());
     return;
   }
 
@@ -326,7 +362,25 @@ void ReaderCacheController::saveAnchorMap(const ContentParser& parser, const std
     serialization::writeString(file, id);
     serialization::writePod(file, page);
   }
+  file.flush();
+  const size_t writtenBytes = file.size();
   file.close();
+  // Sanity-check we wrote at least the count header (2 bytes).  Anything
+  // smaller indicates the writes silently failed (full disk, FS corruption).
+  if (writtenBytes < sizeof(count)) {
+    LOG_ERR(TAG, "saveAnchorMap: short write %u bytes for %u entries; discarding tmp",
+            static_cast<unsigned>(writtenBytes), static_cast<unsigned>(count));
+    LittleFS.remove(tmpPath.c_str());
+    return;
+  }
+  // Rename overwrites destination atomically on LittleFS.  If rename fails,
+  // leave the old map in place and clean up tmp — we'd rather have a stale
+  // map than silently corrupt the existing one.
+  if (!LittleFS.rename(tmpPath.c_str(), mapPath.c_str())) {
+    LOG_ERR(TAG, "saveAnchorMap: rename %s -> %s failed; keeping old map",
+            tmpPath.c_str(), mapPath.c_str());
+    LittleFS.remove(tmpPath.c_str());
+  }
 }
 
 int ReaderCacheController::loadAnchorPage(const std::string& cachePath, const std::string& anchor) {
@@ -434,7 +488,8 @@ void ReaderCacheController::createOrExtendCacheImpl(ContentParser& parser, const
   }
 
   if (!state.pageCache) {
-    state.pageCache.reset(new PageCache(cachePath));
+    state.pageCache = tryNewUnique<PageCache>("PageCache (extend)", cachePath);
+    if (!state.pageCache) return;
   }
   const uint16_t effectiveBatch = batchSize == 0 ? kDefaultCacheBatchPages : batchSize;
   if (state.pageCache->create(parser, config, effectiveBatch)) {
@@ -452,7 +507,8 @@ void ReaderCacheController::backgroundCacheImpl(ContentParser& parser, const std
   const int safeSectionPage = sectionPageHint < 0 ? 0 : sectionPageHint;
   const bool reuseCurrentCache = state.pageCache && state.pageCache->path() == cachePath;
   if (!state.pageCache || !reuseCurrentCache) {
-    state.pageCache.reset(new PageCache(cachePath));
+    state.pageCache = tryNewUnique<PageCache>("PageCache (bg)", cachePath);
+    if (!state.pageCache) return;
   }
 
   bool loaded = false;
@@ -607,7 +663,10 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
     const bool usePersistentLookahead = (state.lookaheadParser && state.lookaheadParserSpineIndex == spine) || spine == nextSpine;
     if (usePersistentLookahead) {
       if (!state.lookaheadParser || state.lookaheadParserSpineIndex != spine) {
-        state.lookaheadParser.reset(new EpubChapterParser(epub, spine, resources_.renderer(), config, imageCachePath, true));
+        state.lookaheadParser = tryNewUnique<EpubChapterParser>("EpubChapterParser (lookahead)",
+                                                                epub, spine, resources_.renderer(), config,
+                                                                imageCachePath, true);
+        if (!state.lookaheadParser) return didWork;
         state.lookaheadParserSpineIndex = spine;
       }
       parser = state.lookaheadParser.get();
@@ -615,7 +674,10 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
       if (shouldAbort && shouldAbort()) {
         return didWork;
       }
-      auto transientParser = std::make_unique<EpubChapterParser>(epub, spine, resources_.renderer(), config, imageCachePath, true);
+      auto transientParser = tryNewUnique<EpubChapterParser>("EpubChapterParser (transient)",
+                                                             epub, spine, resources_.renderer(), config,
+                                                             imageCachePath, true);
+      if (!transientParser) return didWork;
       if (nextCache.load(config) && nextCache.isPartial()) {
         if (nextCache.extend(*transientParser, kDefaultCacheBatchPages, shouldAbort)) {
           didWork = true;
@@ -852,7 +914,8 @@ void ReaderCacheController::loadCacheFromDisk(Core& core, const Viewport& viewpo
   }
 
   auto& state = resources_.unsafeState();
-  state.pageCache.reset(new PageCache(cachePath));
+  state.pageCache = tryNewUnique<PageCache>("PageCache (load)", cachePath);
+  if (!state.pageCache) return;
   if (!state.pageCache->load(config)) {
     state.pageCache.reset();
   }
@@ -881,8 +944,10 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     if (!state.parser || state.parserSpineIndex != targetSpine) {
       if (!promoteLookaheadParser(targetSpine)) {
         const std::string imageCachePath = core.settings.showImages ? (provider->getEpub()->getCachePath() + "/images") : "";
-        state.parser.reset(new EpubChapterParser(provider->getEpubShared(), targetSpine, resources_.renderer(), config,
-                                                 imageCachePath, false));
+        state.parser = tryNewUnique<ContentParser, EpubChapterParser>("EpubChapterParser (fg)",
+                                                                       provider->getEpubShared(), targetSpine,
+                                                                       resources_.renderer(), config, imageCachePath, false);
+        if (!state.parser) return;
         state.parserSpineIndex = targetSpine;
       }
     }
@@ -890,7 +955,9 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     parser = state.parser.get();
   } else if (type == ContentType::Markdown) {
     if (!state.parser) {
-      state.parser.reset(new MarkdownParser(contentPath_, resources_.renderer(), config));
+      state.parser = tryNewUnique<ContentParser, MarkdownParser>("MarkdownParser", contentPath_,
+                                                                  resources_.renderer(), config);
+      if (!state.parser) return;
       state.parserSpineIndex = 0;
     }
     cachePath = contentCachePath(core.content.cacheDir(), config.fontId);
@@ -903,8 +970,10 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     if (resolveFb2SectionContext(provider, config, position_.currentSpineIndex, &cachePath, &startOffset,
                                  &startingSectionIndex, &endOffset)) {
       if (!state.parser || state.parserSpineIndex != position_.currentSpineIndex) {
-        auto newParser = std::unique_ptr<ContentParser>(new Fb2Parser(contentPath_, resources_.renderer(), config,
-                                                                      startOffset, startingSectionIndex, true, endOffset));
+        auto newParser = tryNewUnique<ContentParser, Fb2Parser>("Fb2Parser (sectioned)", contentPath_,
+                                                                 resources_.renderer(), config, startOffset,
+                                                                 startingSectionIndex, true, endOffset);
+        if (!newParser) return;
         // Hand the parser an Fb2 reference so it can resolve <image> tags
         // through the binary index.  Without this the parser silently skips
         // inline FB2 images.
@@ -916,7 +985,9 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
       }
     } else {
       if (!state.parser) {
-        auto newParser = std::unique_ptr<ContentParser>(new Fb2Parser(contentPath_, resources_.renderer(), config));
+        auto newParser = tryNewUnique<ContentParser, Fb2Parser>("Fb2Parser (whole)", contentPath_,
+                                                                 resources_.renderer(), config);
+        if (!newParser) return;
         if (provider && provider->getFb2()) {
           static_cast<Fb2Parser*>(newParser.get())->setFb2(provider->getFb2());
         }
@@ -928,14 +999,18 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     parser = state.parser.get();
   } else if (type == ContentType::Html) {
     if (!state.parser) {
-      state.parser.reset(new HtmlParser(contentPath_, core.content.cacheDir(), resources_.renderer(), config));
+      state.parser = tryNewUnique<ContentParser, HtmlParser>("HtmlParser", contentPath_, core.content.cacheDir(),
+                                                              resources_.renderer(), config);
+      if (!state.parser) return;
       state.parserSpineIndex = 0;
     }
     cachePath = contentCachePath(core.content.cacheDir(), config.fontId);
     parser = state.parser.get();
   } else if (type == ContentType::Txt) {
     if (!state.parser) {
-      state.parser.reset(new PlainTextParser(contentPath_, resources_.renderer(), config));
+      state.parser = tryNewUnique<ContentParser, PlainTextParser>("PlainTextParser", contentPath_,
+                                                                   resources_.renderer(), config);
+      if (!state.parser) return;
       state.parserSpineIndex = 0;
     }
     cachePath = contentCachePath(core.content.cacheDir(), config.fontId);
