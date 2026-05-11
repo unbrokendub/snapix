@@ -93,6 +93,18 @@ Result<void> Storage::rmdir(const char* path) {
 
 bool Storage::rename(const char* fromPath, const char* toPath) {
   if (!mounted_) return false;
+  // v2.0.76 hotfix: SDFat `rename(from, to)` REFUSES to overwrite an existing
+  // destination — it fails silently and the .tmp file lingers.  v2.0.75
+  // assumed atomic overwrite (LittleFS does this), so every Settings /
+  // Progress / Bookmark save after the first failed → user saw the same
+  // "rename failed; keeping old file" error on every device run.  Remove
+  // the destination first.  Not strictly atomic across the two ops, but
+  // power loss between them leaves the .tmp file intact for manual recovery;
+  // the partial corrupt state (no destination, .tmp present) is detectable
+  // and safer than the alternative of failing to update altogether.
+  if (SdMan.exists(toPath)) {
+    SdMan.remove(toPath);
+  }
   return SdMan.rename(fromPath, toPath);
 }
 

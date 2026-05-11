@@ -11,7 +11,14 @@ struct HeapState {
   size_t largestBlock = 0;
 };
 
-constexpr int kCacheTaskStackSize = 16384;
+// v2.0.76 hotfix: bumped from 16 KB to 20 KB after a device run reported
+// stack high water 15772 bytes during regular FB2 reading — only 612 bytes
+// headroom from overflow.  The growth since the original 16 KB sizing comes
+// from nested try/catch frames (BG workerLoop + v2.0.74 tryNewUnique +
+// JPEG decoder catch) plus deeper recursion in chapter HTML parsing.
+// 4 KB extra DRAM is acceptable; stack overflow on this task is silent
+// memory corruption and a hard-to-reproduce reset.
+constexpr int kCacheTaskStackSize = 20480;
 // 15s gives the JPEG decoder + FB2 parser their MAX work-then-abort cycle a
 // chance to wind down before the nuclear ESP.restart() kicks in.  With the
 // per-MCU abort check (every 4 MCUs) added in the JPEG converter, a normal
