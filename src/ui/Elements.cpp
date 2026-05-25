@@ -717,16 +717,38 @@ void readerStatusBar(const GfxRenderer& r, const Theme& t, int marginLeft, int m
   }
 
   // 2. Page numbers (right side)
-  char pageStr[16];
+  // v2.0.153: bumped from 16 → 32 bytes.  A 5-digit-each "99999/99999" fits
+  // in 12 bytes so 16 was technically sufficient, but it left no headroom for
+  // 6- or 7-digit totals (a 1000-page FB2 with a small font + tight viewport
+  // can paginate above 5 digits) and snprintf would silently truncate without
+  // any visual indication that the number was cut.  32 bytes covers up to
+  // "9999999/9999999" (15 chars) with room to spare and costs nothing on the
+  // stack.
+  //
+  // v2.0.155: dropped the `~` prefix on the total when the metric is still
+  // an estimate.  The reader spends most of the book showing `~` (the global
+  // total only becomes exact once EVERY chapter has been visited at least
+  // once) which made it visual noise that never went away.  Treat the number
+  // as an evolving estimate — it converges as the user reads, and there's
+  // already a tilde-style hint in the "/-" form below when the total is
+  // genuinely unknown.
+  char pageStr[32];
   if (data.totalPages == 0) {
     snprintf(pageStr, sizeof(pageStr), "%d/-", data.currentPage);
-  } else if (data.isPartial) {
-    snprintf(pageStr, sizeof(pageStr), "%d/~%d", data.currentPage, data.totalPages);
   } else {
     snprintf(pageStr, sizeof(pageStr), "%d/%d", data.currentPage, data.totalPages);
   }
   int pageTextWidth = r.getTextWidth(statusFontId, pageStr);
-  r.drawText(statusFontId, screenWidth - marginRight - pageTextWidth, textY, pageStr, t.primaryTextBlack);
+  // Clamp the draw X so the page count is always fully on-screen even if a
+  // wide number combined with a tight viewport would push the left edge into
+  // negative territory (off the left of the panel).  Falls back to drawing
+  // flush with the battery cluster (marginLeft) in the pathological case —
+  // overlap is preferable to silent off-screen clipping.
+  int pageDrawX = screenWidth - marginRight - pageTextWidth;
+  if (pageDrawX < marginLeft) {
+    pageDrawX = marginLeft;
+  }
+  r.drawText(statusFontId, pageDrawX, textY, pageStr, t.primaryTextBlack);
 
   // 3. Title (center)
   if (data.title && data.title[0] != '\0') {

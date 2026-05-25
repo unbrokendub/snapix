@@ -5,7 +5,7 @@
 #include <Fb2.h>
 #include <Fb2Parser.h>
 #include <GfxRenderer.h>
-#include <HtmlParser.h>
+#include <JpegToBmpConverter.h>  // v2.0.81: releaseAllPersistent() in memory-trim path
 #include <Logging.h>
 #include <MarkdownParser.h>
 #include <Page.h>
@@ -38,7 +38,6 @@ namespace snapix {
 using reader::contentCachePath;
 using reader::epubSectionCachePath;
 using reader::kEpubInteractiveHotExtendBatchPages;
-using reader::kPendingEpubPageLoadMaxRetries;
 using reader::kPendingTocJumpMaxRetries;
 
 // ============================================================================
@@ -316,30 +315,37 @@ void ReaderState::jumpToTocEntry(Core& core, int tocIndex) {
 
     if (page >= 0) {
       currentSectionPage_ = page;
-      pendingTocJumpActive_ = false;
-      pendingTocJumpIndexingShown_ = false;
-      pendingTocJumpTargetSpine_ = -1;
-      pendingTocJumpTargetPageHint_ = -1;
-      pendingTocJumpAnchor_.clear();
-      pendingTocJumpRetryCount_ = 0;
+      asyncJobs_.clearPendingTocJump();
       clearPendingEpubPageLoad();
       pendingBackgroundEpubRefresh_ = false;
       pendingBackgroundEpubRefreshSpine_ = -1;
       pendingBackgroundEpubRefreshPage_ = -1;
-      queuedPendingEpubTurn_ = 0;
-      queuedPendingEpubTurnQueuedMs_ = 0;
-      lastCachePreemptRequestedMs_ = 0;
+      asyncJobs_.clearQueuedPageTurns();
     } else {
+      // v2.0.84: optimistic TOC navigation.  Anchor wasn't in the cached
+      // map, but if the spine itself has SOME cached pages we want to
+      // render spine page 0 immediately rather than blocking the user on
+      // an "Indexing..." banner that might run for minutes.  Probe the
+      // cache cheaply (just header) to decide.  The processPendingTocJump
+      // loop keeps running in the background — when the BG worker
+      // resolves the anchor, it'll change currentSectionPage_ and trigger
+      // a re-render to refine.
+      //
+      // If the user manually navigates before that, navigateNext/Prev
+      // clear pendingTocJumpDeferredDisplay_ AND pendingTocJumpActive_ so
+      // the background refinement doesn't yank them out of their place.
+      const Theme& theme = THEME_MANAGER.current();
+      const auto vp = getReaderViewport(core.settings.statusBar != 0);
+      const auto config = core.settings.getRenderConfig(theme, vp.width, vp.height);
+      const auto probe = PageCache::probe(cachePath, config, false /*don't auto-clean*/);
+      const bool spineCacheUsable = probe.exists && probe.valid && probe.pageCount > 0;
+
       crashdebug::mark(crashdebug::CrashPhase::EpubTocSelected, static_cast<int16_t>(targetSpine), 0);
-      pendingTocJumpActive_ = true;
-      pendingTocJumpIndexingShown_ = false;
-      pendingTocJumpTargetSpine_ = targetSpine;
-      pendingTocJumpTargetPageHint_ = -1;
-      pendingTocJumpAnchor_ = tocItem.anchor;
-      pendingTocJumpRetryCount_ = 0;
-      pendingTocJumpStartedMs_ = millis();
-      pendingTocJumpLastDiagMs_ = 0;
-      LOG_INF(TAG, "[ASYNC] arm TOC jump toc=%d spine=%d anchor=%s", tocIndex, targetSpine, tocItem.anchor.c_str());
+      asyncJobs_.armPendingTocJump(targetSpine, tocItem.anchor, -1);
+      asyncJobs_.setPendingTocJumpDeferredDisplay(spineCacheUsable);
+      LOG_INF(TAG, "[ASYNC] arm TOC jump toc=%d spine=%d anchor=%s cache=%u pages=%u deferredDisplay=%u",
+              tocIndex, targetSpine, tocItem.anchor.c_str(), static_cast<unsigned>(probe.exists),
+              static_cast<unsigned>(probe.pageCount), static_cast<unsigned>(spineCacheUsable));
       clearPendingEpubPageLoad();
     }
   } else if (type == ContentType::Xtc) {
@@ -365,9 +371,7 @@ void ReaderState::jumpToTocEntry(Core& core, int tocIndex) {
       pendingBackgroundEpubRefresh_ = false;
       pendingBackgroundEpubRefreshSpine_ = -1;
       pendingBackgroundEpubRefreshPage_ = -1;
-      queuedPendingEpubTurn_ = 0;
-      queuedPendingEpubTurnQueuedMs_ = 0;
-      lastCachePreemptRequestedMs_ = 0;
+      asyncJobs_.clearQueuedPageTurns();
     } else {
       // Legacy fallback for TOC-less FB2 files that still use a flat page cache.
       auto* fb2 = provider ? provider->getFb2() : nullptr;
@@ -397,14 +401,7 @@ void ReaderState::jumpToTocEntry(Core& core, int tocIndex) {
         asyncJobs_.clearPendingTocJump();
         clearPendingEpubPageLoad();
       } else {
-        pendingTocJumpActive_ = true;
-        pendingTocJumpIndexingShown_ = false;
-        pendingTocJumpTargetSpine_ = 0;
-        pendingTocJumpTargetPageHint_ = targetPageHint;
-        pendingTocJumpAnchor_ = anchor;
-        pendingTocJumpRetryCount_ = 0;
-        pendingTocJumpStartedMs_ = millis();
-        pendingTocJumpLastDiagMs_ = 0;
+        asyncJobs_.armPendingTocJump(0, anchor, targetPageHint);
         clearPendingEpubPageLoad();
         LOG_INF(TAG, "[ASYNC] arm FB2 TOC jump toc=%d anchor=%s hintPage=%d", tocIndex, anchor.c_str(),
                 targetPageHint);
@@ -569,6 +566,52 @@ void ReaderState::processPendingTocJump(Core& core) {
     return;
   }
 
+  // v2.0.104 (architectural fix — TOC-jump deferred-display unblock,
+  // worker-driven version):
+  //
+  // Background.  v2.0.85 designed deferred-display so the user sees page 0
+  // of the target chapter ~2 s after pressing the TOC entry, while the BG
+  // worker continues searching for the anchor.  But the
+  // `isWorkerRunning()` early-return below blocked the upgrade until the
+  // worker idled, which on missing-anchor chapters meant waiting for the
+  // ENTIRE chapter to index (122 s observed on a 137 KB Calibre chapter).
+  //
+  // v2.0.103 tried to fix this with an eager `reloadCacheFromDisk` BEFORE
+  // the `isWorkerRunning` gate.  That broke on a different code path:
+  // after a menu-cache-clear, a stale `sections/N.bin` from an older
+  // firmware version sits on disk; the eager load hit the version check,
+  // failed, but the FD was kept open and prevented the worker's stale-
+  // file eviction (`Cannot rename; src is open`) for several seconds.
+  //
+  // v2.0.104 replaces the polling-from-main-thread approach with explicit
+  // signaling from the worker.  After the worker SUCCESSFULLY writes the
+  // first page to disk AND CLOSES the cache file (the create()/extend()
+  // success path closes the FD), it sets `pendingTocFirstPageReady_`.
+  // The main thread picks that up on the next tick and does a one-shot
+  // `reloadCacheFromDisk` — at that exact moment, no FD race is possible
+  // because the worker has explicitly handed off the file.
+  //
+  // The flag is cleared after the load.  Subsequent worker batches don't
+  // need to signal — the main thread's `pageCache_` is now populated and
+  // the deferred-display upgrade below has already fired.
+  if (type == ContentType::Epub && pendingTocFirstPageReady_ &&
+      !pendingTocJumpDeferredDisplay_) {
+    pendingTocFirstPageReady_ = false;
+    reloadCacheFromDisk(core);
+    if (pageCache_ && pageCache_->pageCount() > 0) {
+      LOG_INF(TAG, "[ASYNC] TOC jump upgraded to deferred-display (worker-signalled) spine=%d pages=%u",
+              pendingTocJumpTargetSpine_, static_cast<unsigned>(pageCache_->pageCount()));
+      asyncJobs_.setPendingTocJumpDeferredDisplay(true);
+      pendingTocJumpIndexingShown_ = false;
+      if (currentSectionPage_ < 0 ||
+          currentSectionPage_ >= static_cast<int>(pageCache_->pageCount())) {
+        currentSectionPage_ = 0;
+      }
+      needsRender_ = true;
+      return;
+    }
+  }
+
   if (isWorkerRunning()) {
     vTaskDelay(1 / portTICK_PERIOD_MS);
     return;
@@ -589,6 +632,36 @@ void ReaderState::processPendingTocJump(Core& core) {
     asyncJobs_.clearPendingTocJump();
     resumeBackgroundCachingAfterRender_ = true;
     needsRender_ = true;
+    return;
+  }
+
+  // v2.0.85: once the TOC worker has written ANY pages for the target spine,
+  // upgrade to deferred-display mode so the user sees page 0 (or wherever
+  // currentSectionPage_ points) while the worker keeps building toward the
+  // anchor.  Pre-2.0.85 the "Indexing..." banner stayed up until the anchor
+  // was resolved, which for a fresh spine could be minutes — even though
+  // page 0 was readable within seconds.
+  if (type == ContentType::Epub && !pendingTocJumpDeferredDisplay_ && pageCache_ &&
+      pageCache_->pageCount() > 0) {
+    LOG_INF(TAG, "[ASYNC] TOC jump upgraded to deferred-display spine=%d pages=%u (anchor still pending)",
+            pendingTocJumpTargetSpine_, static_cast<unsigned>(pageCache_->pageCount()));
+    asyncJobs_.setPendingTocJumpDeferredDisplay(true);
+    pendingTocJumpIndexingShown_ = false;  // clear the banner-shown flag
+    if (currentSectionPage_ < 0 ||
+        currentSectionPage_ >= static_cast<int>(pageCache_->pageCount())) {
+      currentSectionPage_ = 0;
+    }
+    needsRender_ = true;
+    return;
+  }
+
+  if (type == ContentType::Epub && pendingTocJumpDeferredDisplay_ &&
+      pendingTocJumpRetryCount_ > 0) {
+    LOG_INF(TAG,
+            "[ASYNC] TOC anchor unresolved after deferred display; releasing input spine=%d anchor=%s retries=%u",
+            pendingTocJumpTargetSpine_, pendingTocJumpAnchor_.c_str(),
+            static_cast<unsigned>(pendingTocJumpRetryCount_));
+    asyncJobs_.clearPendingTocJump();
     return;
   }
 
@@ -636,6 +709,11 @@ void ReaderState::startPendingEpubPageLoadBackgroundWork(Core& core) {
   const int targetSpine = (isEpub || fb2Sectioned) ? pendingEpubPageLoadTargetSpine_ : 0;
   const int targetPage = pendingEpubPageLoadTargetPage_;
   const bool requireComplete = pendingEpubPageLoadRequireComplete_;
+  const uint32_t nowMs = millis();
+  if (pendingEpubPageLoadNextRetryMs_ != 0 &&
+      static_cast<int32_t>(nowMs - pendingEpubPageLoadNextRetryMs_) < 0) {
+    return;
+  }
 
   const reader::HeapState heapBefore = reader::readHeapState();
   if (pageCache_) {
@@ -651,14 +729,58 @@ void ReaderState::startPendingEpubPageLoadBackgroundWork(Core& core) {
     clearLookaheadParser();
   }
   invalidateAnchorMapCache();
+  // v2.0.81: release JPEG persistent allocations (~25 KB JPEGDEC instance +
+  // up to ~20 KB decode arena).  Pre-2.0.81, these stayed pinned mid-heap
+  // from the first image decode onward, which limited `largest` to ~23 KB
+  // forever — below the 25.6 KB cold-rebuild gate, locking the cache
+  // extender out and freezing the reader at the last cacheable page.
+  // The next image decode pays one re-allocation each (~10 ms total),
+  // which is negligible compared to the deadlock we're escaping.
+  JpegToBmpConverter::releaseAllPersistent();
+  FONT_MANAGER.clearStreamingBitmapCaches();
   const reader::HeapState heapAfter = reader::readHeapState();
   LOG_INF(TAG, "[ASYNC] page-fill memory trim free=%u->%u largest=%u->%u",
           static_cast<unsigned>(heapBefore.freeBytes), static_cast<unsigned>(heapAfter.freeBytes),
           static_cast<unsigned>(heapBefore.largestBlock), static_cast<unsigned>(heapAfter.largestBlock));
 
-  pendingEpubPageLoadRetryCount_++;
-  LOG_INF(TAG, "[ASYNC] Start page worker spine=%d page=%d complete=%u attempt=%u", targetSpine, targetPage,
-          static_cast<unsigned>(requireComplete), static_cast<unsigned>(pendingEpubPageLoadRetryCount_));
+  // v2.0.175 — SAFETY NET for deterministic parse failures.  Pre-fix the
+  // retry counter incremented up to UINT8_MAX (255 attempts) with a final
+  // 1500 ms back-off, so a chapter whose parse legitimately fails (e.g.,
+  // root-cause bug, corrupted content, or an unrecoverable allocation
+  // failure) burned ~6 minutes of CPU before stopping — observed in
+  // hardware logs as 50+ attempts of "parsePages reached end with no
+  // streaming output" on a single spine.  Cap at kMaxPageLoadAttempts:
+  // after that many tries with no successful page, stop scheduling new
+  // worker invocations and clear the pending state so the reader's
+  // overlay falls back to a static "Failed to load chapter" message
+  // (the next user input — page-turn, back, exit — is honoured normally).
+  //
+  // kMaxPageLoadAttempts is chosen at 20: with the 120/350/800/1500-ms
+  // escalating back-off schedule, that's roughly 3*120 + 7*350 + 10*800
+  // = 360 + 2450 + 8000 = ~11 seconds of retries before giving up — long
+  // enough for transient causes (heap recovery from a one-off allocation
+  // peak, a slow LittleFS journal commit, the BG worker scheduler catching
+  // up) to clear, short enough that the user sees a definitive failure
+  // instead of an infinite spinner.
+  static constexpr uint8_t kMaxPageLoadAttempts = 20;
+  if (pendingEpubPageLoadRetryCount_ >= kMaxPageLoadAttempts) {
+    LOG_ERR(TAG,
+            "[ASYNC] Page worker giving up after %u attempts spine=%d page=%d — "
+            "chapter parse appears to be deterministically failing; clearing pending load",
+            static_cast<unsigned>(pendingEpubPageLoadRetryCount_), targetSpine, targetPage);
+    clearPendingEpubPageLoad();
+    needsRender_ = true;  // let overlay code repaint with the failure message
+    return;
+  }
+  if (pendingEpubPageLoadRetryCount_ < UINT8_MAX) {
+    pendingEpubPageLoadRetryCount_++;
+  }
+  const uint8_t attempt = pendingEpubPageLoadRetryCount_;
+  const uint32_t retryDelayMs = attempt < 3 ? 120U : (attempt < 10 ? 350U : (attempt < 30 ? 800U : 1500U));
+  pendingEpubPageLoadNextRetryMs_ = millis() + retryDelayMs;
+  LOG_INF(TAG, "[ASYNC] Start page worker spine=%d page=%d complete=%u attempt=%u/%u", targetSpine, targetPage,
+          static_cast<unsigned>(requireComplete), static_cast<unsigned>(pendingEpubPageLoadRetryCount_),
+          static_cast<unsigned>(kMaxPageLoadAttempts));
 
   reader::ReaderAsyncJobsController::PageFillRequest request;
   request.targetSpine = targetSpine;
@@ -805,34 +927,42 @@ void ReaderState::processPendingEpubPageLoad(Core& core) {
     }
   }
 
-  // Retry when: no cache, cache partial, or cache "complete" but empty (0 pages).
-  // The last case happens when the parser fails on the first attempt (e.g. a
-  // transient SD-card read error): the cache file is written with 0 pages and
-  // marked complete, which previously prevented any retry.
-  const bool cacheUsable = pageCache_ && pageCache_->pageCount() > 0 && !pageCache_->isPartial();
-  if (!cacheUsable && pendingEpubPageLoadRetryCount_ < kPendingEpubPageLoadMaxRetries) {
+  const bool cacheHasAnyPages = pageCache_ && pageCache_->pageCount() > 0;
+  const bool cacheStillPartial = !pageCache_ || pageCache_->isPartial();
+  if (cacheStillPartial) {
     startPendingEpubPageLoadBackgroundWork(core);
     return;
   }
 
-  if (pageCache_ && pageCache_->pageCount() > 0) {
+  if (cacheHasAnyPages) {
+    const bool blockedPartialTarget = !pendingEpubPageLoadRequireComplete_ && pageCache_->isPartial() &&
+                                      pendingEpubPageLoadTargetPage_ >= static_cast<int>(pageCache_->pageCount());
+    if (blockedPartialTarget) {
+      LOG_INF(TAG, "[NAV] target page not materialized yet spine=%d page=%d cachedPages=%u; keeping pending",
+              currentSpineIndex_, pendingEpubPageLoadTargetPage_, static_cast<unsigned>(pageCache_->pageCount()));
+      startPendingEpubPageLoadBackgroundWork(core);
+      return;
+    }
+
     currentSectionPage_ = pendingEpubPageLoadRequireComplete_
                               ? static_cast<int>(pageCache_->pageCount()) - 1
                               : std::min(pendingEpubPageLoadTargetPage_, static_cast<int>(pageCache_->pageCount()) - 1);
     if (type == ContentType::Fb2) {
       currentPage_ = currentSectionPage_;
     }
-    LOG_INF(TAG, "Falling back to nearest cached page spine=%d page=%d", currentSpineIndex_, currentSectionPage_);
+    LOG_INF(TAG, "Falling back to nearest cached page spine=%d page=%d (target=%d cachedPages=%u partial=%u)",
+            currentSpineIndex_, currentSectionPage_, pendingEpubPageLoadTargetPage_,
+            static_cast<unsigned>(pageCache_->pageCount()),
+            static_cast<unsigned>(pageCache_->isPartial()));
     clearPendingEpubPageLoad();
     resumeBackgroundCachingAfterRender_ = true;
     needsRender_ = true;
     return;
   }
 
-  LOG_ERR(TAG, "Failed to resolve page load for spine=%d page=%d", pendingEpubPageLoadTargetSpine_,
+  LOG_INF(TAG, "[NAV] target page still unavailable spine=%d page=%d; keeping pending", pendingEpubPageLoadTargetSpine_,
           pendingEpubPageLoadTargetPage_);
-  clearPendingEpubPageLoad();
-  needsRender_ = true;
+  startPendingEpubPageLoadBackgroundWork(core);
 }
 
 int ReaderState::tocVisibleCount() const {
@@ -1237,4 +1367,3 @@ int ReaderState::bookmarkVisibleCount() const {
 }
 
 }  // namespace snapix
-

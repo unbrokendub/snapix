@@ -3,11 +3,16 @@
 #include <Arduino.h>
 #include <ContentParser.h>
 #include <CoverHelpers.h>
+#include <Epub.h>  // v2.0.153 — Epub::getCachePath for metrics sidecar path
+#include <Epub/parsers/EpubImageCache.h>  // v2.0.148 — cacheImageForStreaming
 #include <EpubChapterParser.h>
 #include <Fb2.h>
 #include <Fb2Parser.h>
+#include <FsHelpers.h>  // v2.0.145 — normalisePath for streaming image-resolver
 #include <GfxRenderer.h>
-#include <HtmlParser.h>
+#include <JpegToBmpConverter.h>  // v2.0.101: releaseAllPersistent() after cover-gen
+#include <LittleFS.h>  // v2.0.153 — metrics.bin sidecar load/save (used in every env)
+#include <UnifiedCache.h>  // v2.0.166 — Phase 5 unified streaming cache
 #include <Logging.h>
 #include <MarkdownParser.h>
 #include <Page.h>
@@ -20,6 +25,25 @@
 
 #include <algorithm>
 #include <cstring>
+
+// v2.0.122 Phase R3.5 — streaming render path (opt-in).  Active only in
+// builds that flip `SNAPIX_MARKERIZED_RENDER=1`; default builds (and
+// even default v3_alpha) compile this section out.  When ON AND a
+// markers sidecar exists for the current spine, render goes through
+// the v3 streaming pipeline instead of the legacy `page.render()` Page-
+// tree path.
+//
+// v2.0.127 Phase R3.7 adds FB2 support: navigation tocIndex →
+// `Fb2::TocItem::sectionIndex` lookup → `markers/<sectionIndex>.bin`.
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+#include <Epub.h>
+#include <FS.h>
+#include <Fb2.h>
+#include <GfxRendererPaginatorAdapter.h>
+#include <LittleFS.h>
+#include <MarkerizedPageRender.h>
+#include <StreamingPaginator.h>
+#endif
 
 #include "../Battery.h"
 #include "../FontManager.h"
@@ -41,6 +65,7 @@
 namespace snapix {
 using reader::kCacheTaskStopTimeoutMs;
 using reader::kIdleBackgroundKickIntervalMs;
+using reader::kInteractiveCacheCancelTimeoutMs;
 
 namespace {
 constexpr int horizontalPadding = 5;
@@ -51,6 +76,79 @@ uint16_t estimatePagesForBytes(const size_t bytes, const size_t bytesPerPage = k
   const size_t safeBytesPerPage = std::max<size_t>(1, bytesPerPage);
   const size_t pageCount = std::max<size_t>(1, (bytes + safeBytesPerPage - 1) / safeBytesPerPage);
   return static_cast<uint16_t>(std::min<size_t>(pageCount, UINT16_MAX));
+}
+
+// v2.0.153 — sidecar that caches `globalSectionPageMetrics_` between sessions.
+// Replaces 55× PageCache::probe LittleFS opens (~200 ms each on FB2 with TOC
+// section navigation) with a single ~400-byte read.  See ReaderSupport.h for
+// path layout (`<bookCachePath>/metrics.bin`).
+//
+// Layout — little-endian, 12-byte header + 7 bytes per spine entry:
+//   header:  magic[4]='MTRC', version u8, flags u8, spineCount u16, configHash u32
+//   entry:   pages u16, byteSize u32, exact u8
+constexpr uint32_t kMetricsCacheMagic = 0x4352544Du;  // 'MTRC' little-endian
+constexpr uint8_t kMetricsCacheVersion = 1;
+constexpr size_t kMetricsCacheHeaderBytes = 12;
+constexpr size_t kMetricsCacheEntryBytes = 7;
+
+// FNV-1a over the RenderConfig fields PageCache::probe validates.  Two configs
+// that produce different page boundaries MUST hash to different values.  Hash
+// collision in the other direction (cache hit after a real config change) is
+// the only failure mode — corrected the next time a section becomes exact and
+// overwrites the saved metric.
+uint32_t computeMetricsConfigHash(const RenderConfig& config) {
+  uint32_t h = 2166136261u;
+  auto mixBytes = [&h](const uint8_t* p, const size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+      h ^= p[i];
+      h *= 16777619u;
+    }
+  };
+  auto mixU32 = [&](const uint32_t v) {
+    const uint8_t b[4] = {static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8),
+                          static_cast<uint8_t>(v >> 16), static_cast<uint8_t>(v >> 24)};
+    mixBytes(b, 4);
+  };
+  auto mixU16 = [&](const uint16_t v) {
+    const uint8_t b[2] = {static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8)};
+    mixBytes(b, 2);
+  };
+  uint32_t lineCompressionBits = 0;
+  std::memcpy(&lineCompressionBits, &config.lineCompression, sizeof(uint32_t));
+  mixU32(static_cast<uint32_t>(config.fontId));
+  mixU32(lineCompressionBits);
+  mixBytes(&config.indentLevel, 1);
+  mixBytes(&config.spacingLevel, 1);
+  mixBytes(&config.paragraphAlignment, 1);
+  const uint8_t boolPack = (config.hyphenation ? 1 : 0) | (config.showImages ? 2 : 0) |
+                           (config.bionicReading ? 4 : 0);
+  mixBytes(&boolPack, 1);
+  mixBytes(&config.fakeBold, 1);
+  mixU16(config.viewportWidth);
+  mixU16(config.viewportHeight);
+  // Format tag — bump if the on-disk layout ever changes so old files with
+  // a valid configHash but wrong byte layout are rejected.
+  const uint8_t formatTag = kMetricsCacheVersion;
+  mixBytes(&formatTag, 1);
+  return h;
+}
+
+// Resolves the per-book cache path the metrics sidecar lives under.  Returns
+// empty string for content types we don't paginate at the section-metric
+// level (TXT, MD, plain HTML, XTC) or when the content object isn't loaded.
+std::string bookCachePathForMetrics(snapix::Core& core) {
+  const ContentType type = core.content.metadata().type;
+  if (type == ContentType::Epub) {
+    auto* provider = core.content.asEpub();
+    if (!provider || !provider->getEpub()) return {};
+    return provider->getEpub()->getCachePath();
+  }
+  if (type == ContentType::Fb2) {
+    auto* provider = core.content.asFb2();
+    if (!provider || !provider->getFb2()) return {};
+    return provider->getFb2()->getCachePath();
+  }
+  return {};
 }
 }  // namespace
 
@@ -81,11 +179,11 @@ void ReaderState::prefetchAdjacentPage(Core& core) { cacheController_.prefetchAd
 void ReaderState::clearPendingEpubPageLoad() { asyncJobs_.clearPendingPageLoad(); }
 
 void ReaderState::enqueuePendingPageTurn(const int direction, const char* reason) {
-  navigationController_.enqueuePendingPageTurn(direction, reason, static_cast<int>(workerState()));
+  asyncJobs_.enqueuePendingPageTurn(direction, reason, static_cast<int>(workerState()));
 }
 
 bool ReaderState::deferPageTurnUntilCacheStops(const int direction) {
-  return navigationController_.deferPageTurnUntilWorkerStops(
+  return asyncJobs_.deferPageTurnUntilWorkerStops(
       direction, isWorkerRunning(), static_cast<int>(workerState()), [this]() { requestWorkerCancel(); });
 }
 
@@ -139,6 +237,100 @@ void ReaderState::recomputeGlobalPageMetricTotal() {
     total += metric.pages;
   }
   globalSectionPageMetricTotal_ = total;
+}
+
+bool ReaderState::loadGlobalPageMetricsFromDisk(const std::string& bookCachePath, const uint32_t configHash,
+                                                const int spineCount) {
+  if (bookCachePath.empty() || spineCount <= 0) return false;
+
+  // v2.0.166 — read from UnifiedCache (single `streaming.cache` per book)
+  // instead of the per-book `metrics.bin` file.  Same on-payload format
+  // as v2.0.153 (12-byte header + per-spine entries) just wrapped in a
+  // UnifiedCache frame.  Fallback: if the old metrics.bin file still
+  // exists (from a pre-v2.0.166 install), try reading it as before so
+  // upgraders don't lose their cached metrics on the first open.
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+  std::vector<uint8_t> payload;
+  const bool loadedFromUnified = cache->readSegment(
+      snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey, payload);
+  if (!loadedFromUnified) {
+    // Legacy fallback: pre-v2.0.166 metrics.bin file
+    const std::string legacyPath = reader::metricsCachePath(bookCachePath);
+    if (!LittleFS.exists(legacyPath.c_str())) return false;
+    File f = LittleFS.open(legacyPath.c_str(), "r");
+    if (!f) return false;
+    payload.resize(f.size());
+    const int n = f.read(payload.data(), payload.size());
+    f.close();
+    if (n != static_cast<int>(payload.size())) return false;
+  }
+
+  const size_t expectedBytes = kMetricsCacheHeaderBytes +
+                               static_cast<size_t>(spineCount) * kMetricsCacheEntryBytes;
+  if (payload.size() != expectedBytes) return false;
+
+  const uint8_t* p = payload.data();
+  const uint32_t magic = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+                         (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+  if (magic != kMetricsCacheMagic) return false;
+  if (p[4] != kMetricsCacheVersion) return false;
+  const uint16_t storedSpineCount = static_cast<uint16_t>(p[6]) | (static_cast<uint16_t>(p[7]) << 8);
+  if (storedSpineCount != static_cast<uint16_t>(spineCount)) return false;
+  const uint32_t storedHash = static_cast<uint32_t>(p[8]) | (static_cast<uint32_t>(p[9]) << 8) |
+                              (static_cast<uint32_t>(p[10]) << 16) | (static_cast<uint32_t>(p[11]) << 24);
+  if (storedHash != configHash) return false;
+
+  globalSectionPageMetrics_.assign(static_cast<size_t>(spineCount), SectionPageMetric{});
+  for (int i = 0; i < spineCount; ++i) {
+    const uint8_t* e = p + kMetricsCacheHeaderBytes + i * kMetricsCacheEntryBytes;
+    auto& m = globalSectionPageMetrics_[static_cast<size_t>(i)];
+    m.pages = static_cast<uint16_t>(e[0]) | (static_cast<uint16_t>(e[1]) << 8);
+    m.byteSize = static_cast<uint32_t>(e[2]) | (static_cast<uint32_t>(e[3]) << 8) |
+                 (static_cast<uint32_t>(e[4]) << 16) | (static_cast<uint32_t>(e[5]) << 24);
+    m.exact = e[6] != 0;
+  }
+  return true;
+}
+
+void ReaderState::saveGlobalPageMetricsToDisk(const std::string& bookCachePath, const uint32_t configHash) const {
+  if (bookCachePath.empty() || globalSectionPageMetrics_.empty()) return;
+
+  const uint16_t spineCount = static_cast<uint16_t>(
+      std::min<size_t>(globalSectionPageMetrics_.size(), static_cast<size_t>(UINT16_MAX)));
+  const size_t total = kMetricsCacheHeaderBytes + spineCount * kMetricsCacheEntryBytes;
+
+  // v2.0.166 — write to UnifiedCache.  Build the payload in a local buffer
+  // (~400 bytes for 55 sections, trivial) and hand it to UnifiedCache::
+  // writeSegment which appends a Metrics frame atomically.
+  std::vector<uint8_t> payload(total);
+  uint8_t* p = payload.data();
+  p[0] = static_cast<uint8_t>(kMetricsCacheMagic);
+  p[1] = static_cast<uint8_t>(kMetricsCacheMagic >> 8);
+  p[2] = static_cast<uint8_t>(kMetricsCacheMagic >> 16);
+  p[3] = static_cast<uint8_t>(kMetricsCacheMagic >> 24);
+  p[4] = kMetricsCacheVersion;
+  p[5] = 0;
+  p[6] = static_cast<uint8_t>(spineCount);
+  p[7] = static_cast<uint8_t>(spineCount >> 8);
+  p[8] = static_cast<uint8_t>(configHash);
+  p[9] = static_cast<uint8_t>(configHash >> 8);
+  p[10] = static_cast<uint8_t>(configHash >> 16);
+  p[11] = static_cast<uint8_t>(configHash >> 24);
+  for (uint16_t i = 0; i < spineCount; ++i) {
+    const auto& m = globalSectionPageMetrics_[i];
+    uint8_t* e = p + kMetricsCacheHeaderBytes + i * kMetricsCacheEntryBytes;
+    e[0] = static_cast<uint8_t>(m.pages);
+    e[1] = static_cast<uint8_t>(m.pages >> 8);
+    e[2] = static_cast<uint8_t>(m.byteSize);
+    e[3] = static_cast<uint8_t>(m.byteSize >> 8);
+    e[4] = static_cast<uint8_t>(m.byteSize >> 16);
+    e[5] = static_cast<uint8_t>(m.byteSize >> 24);
+    e[6] = static_cast<uint8_t>(m.exact ? 1 : 0);
+  }
+
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+  cache->writeSegment(snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey,
+                      payload.data(), payload.size());
 }
 
 void ReaderState::initializeGlobalPageMetrics(Core& core, const int currentSectionTotalPages,
@@ -218,6 +410,47 @@ void ReaderState::initializeGlobalPageMetrics(Core& core, const int currentSecti
     return;
   }
 
+  // v2.0.153 — fast path: try to load `globalSectionPageMetrics_` from the
+  // metrics.bin sidecar instead of probing every section file.  Replaces a
+  // 55× LittleFS.open loop (~200 ms/file → ~11 s wall time on the first FB2
+  // chapter render) with a single ~400-byte read.  On hit we skip the probe
+  // loop entirely — `currentSection` overlay still applies below so an
+  // in-session exact count beats a stale on-disk estimate.
+  const std::string bookCachePath = bookCachePathForMetrics(core);
+  const uint32_t configHash = computeMetricsConfigHash(config);
+  const bool loadedFromDisk =
+      loadGlobalPageMetricsFromDisk(bookCachePath, configHash, spineCount);
+
+  if (loadedFromDisk) {
+    // Refresh byteSize from the live spine/TOC table — itemSizes is what we
+    // would re-derive on a probe-loop init too, and keeping the on-disk value
+    // in sync with the current spine layout means recalibrateGlobalPageEstimates
+    // (fires on the next becameExact) sees consistent (bytes, pages) pairs.
+    for (int spineIndex = 0; spineIndex < spineCount; ++spineIndex) {
+      auto& metric = globalSectionPageMetrics_[static_cast<size_t>(spineIndex)];
+      metric.byteSize = static_cast<uint32_t>(itemSizes[static_cast<size_t>(spineIndex)]);
+    }
+
+    // Overlay the current section's freshly measured page count on top of the
+    // (possibly stale) saved metric — matches the slow-path behaviour and
+    // means the very first render after open already shows accurate totals.
+    if (currentSpineIndex_ >= 0 && currentSpineIndex_ < spineCount &&
+        currentSectionTotalPages > 0) {
+      auto& metric = globalSectionPageMetrics_[static_cast<size_t>(currentSpineIndex_)];
+      const auto currentPages = static_cast<uint16_t>(std::max(1, currentSectionTotalPages));
+      if (currentPages > metric.pages || !metric.exact) {
+        metric.pages = std::max(metric.pages, currentPages);
+        if (!currentSectionIsPartial) {
+          metric.exact = true;
+        }
+      }
+    }
+
+    recomputeGlobalPageMetricTotal();
+    globalSectionPageMetricsInitialized_ = true;
+    return;
+  }
+
   globalSectionPageMetrics_.resize(static_cast<size_t>(spineCount));
 
   size_t calibrationBytes = 0;
@@ -277,6 +510,13 @@ void ReaderState::initializeGlobalPageMetrics(Core& core, const int currentSecti
 
   recomputeGlobalPageMetricTotal();
   globalSectionPageMetricsInitialized_ = true;
+
+  // Persist the freshly probed metrics so the next book-open session can take
+  // the fast path above.  Save once at init time; further refinements as the
+  // user reads (becameExact in updateGlobalPageMetrics) trigger their own
+  // saves.  Best-effort — failure leaves the next session paying the probe-
+  // loop cost again, but never breaks correctness.
+  saveGlobalPageMetricsToDisk(bookCachePath, configHash);
 }
 
 void ReaderState::updateGlobalPageMetrics(Core& core, const int currentSectionTotalPages, const bool currentSectionIsPartial) {
@@ -316,6 +556,18 @@ void ReaderState::updateGlobalPageMetrics(Core& core, const int currentSectionTo
     // bytes-per-page calibration.  Re-estimate the still-partial sections so
     // the global total reflects the improved sample size and recompute total.
     recalibrateGlobalPageEstimates();
+
+    // v2.0.153 — persist the tightened metrics so the next session loads them
+    // verbatim instead of re-probing.  Only on becameExact (not every partial
+    // tick) to keep LittleFS write traffic bounded to spineCount writes per
+    // book lifetime.  Best-effort; failures are silent.
+    const std::string bookCachePath = bookCachePathForMetrics(core);
+    if (!bookCachePath.empty()) {
+      const Theme& theme = THEME_MANAGER.current();
+      const auto vp = getReaderViewport(core.settings.statusBar != 0);
+      const auto config = core.settings.getRenderConfig(theme, vp.width, vp.height);
+      saveGlobalPageMetricsToDisk(bookCachePath, computeMetricsConfigHash(config));
+    }
   } else if (changed) {
     recomputeGlobalPageMetricTotal();
   }
@@ -481,12 +733,14 @@ ReaderState::ReaderState(GfxRenderer& renderer)
       renderOverridePage_(cacheController_.renderOverridePageRef()),
       pendingTocJumpActive_(asyncJobs_.pendingTocJumpActiveRef()),
       pendingTocJumpIndexingShown_(asyncJobs_.pendingTocJumpIndexingShownRef()),
+      pendingTocJumpDeferredDisplay_(asyncJobs_.pendingTocJumpDeferredDisplayRef()),
       pendingTocJumpTargetSpine_(asyncJobs_.pendingTocJumpTargetSpineRef()),
       pendingTocJumpTargetPageHint_(asyncJobs_.pendingTocJumpTargetPageHintRef()),
       pendingTocJumpAnchor_(asyncJobs_.pendingTocJumpAnchorRef()),
       pendingTocJumpRetryCount_(asyncJobs_.pendingTocJumpRetryCountRef()),
       pendingTocJumpStartedMs_(asyncJobs_.pendingTocJumpStartedMsRef()),
       pendingTocJumpLastDiagMs_(asyncJobs_.pendingTocJumpLastDiagMsRef()),
+      pendingTocFirstPageReady_(asyncJobs_.pendingTocFirstPageReadyRef()),
       pendingEpubPageLoadActive_(asyncJobs_.pendingPageLoadActiveRef()),
       pendingEpubPageLoadMessageShown_(asyncJobs_.pendingPageLoadMessageShownRef()),
       pendingEpubPageLoadRequireComplete_(asyncJobs_.pendingPageLoadRequireCompleteRef()),
@@ -496,12 +750,13 @@ ReaderState::ReaderState(GfxRenderer& renderer)
       pendingEpubPageLoadRetryCount_(asyncJobs_.pendingPageLoadRetryCountRef()),
       pendingEpubPageLoadStartedMs_(asyncJobs_.pendingPageLoadStartedMsRef()),
       pendingEpubPageLoadLastDiagMs_(asyncJobs_.pendingPageLoadLastDiagMsRef()),
+      pendingEpubPageLoadNextRetryMs_(asyncJobs_.pendingPageLoadNextRetryMsRef()),
       pendingBackgroundEpubRefresh_(asyncJobs_.pendingRefresh().active),
       pendingBackgroundEpubRefreshSpine_(asyncJobs_.pendingRefresh().spine),
       pendingBackgroundEpubRefreshPage_(asyncJobs_.pendingRefresh().page),
-      queuedPendingEpubTurn_(navigationController_.queuedPendingPageTurnRef()),
-      queuedPendingEpubTurnQueuedMs_(navigationController_.queuedPendingPageTurnQueuedMsRef()),
-      lastCachePreemptRequestedMs_(navigationController_.lastCachePreemptRequestedMsRef()),
+      queuedPendingEpubTurn_(asyncJobs_.queuedPendingPageTurnRef()),
+      queuedPendingEpubTurnQueuedMs_(asyncJobs_.queuedPendingPageTurnQueuedMsRef()),
+      lastCachePreemptRequestedMs_(asyncJobs_.lastCachePreemptRequestedMsRef()),
       tocView_{} {
   asyncJobs_.setBackgroundCacheHandler(
       [this](const reader::ReaderAsyncJobsController::BackgroundCacheRequest& request,
@@ -577,6 +832,8 @@ void ReaderState::enter(Core& core) {
   navigationController_.resetSession();
   asyncJobs_.clearPendingTocJump();
   asyncJobs_.clearPendingPageLoad();
+  asyncJobs_.clearQueuedPageTurns();
+  asyncJobs_.clearPageLoadBlock();
   asyncJobs_.pendingRefresh().clear();
   stopBackgroundCaching();  // Ensure any previous task is stopped
   cacheController_.resetSession();
@@ -760,6 +1017,39 @@ void ReaderState::exit(Core& core) {
   asyncJobs_.clearPendingPageLoad();
   asyncJobs_.pendingRefresh().clear();
 
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+  // v2.0.128 R4.a — persist the current spine's page-offset cache to
+  // its `.idx` sidecar so the NEXT book-open session can skip the
+  // MEASURE-only walk.  Same atomic-write pattern as the in-render
+  // save path (write `.work` first, then rename).
+  if (streamOffsetCacheSpine_ >= 0 && !streamOffsetCache_.empty() &&
+      !streamOffsetCacheBookPath_.empty() && streamOffsetCacheKey_ >= 0) {
+    const size_t needed = snapix::smolport::kPageIndexHeaderBytes +
+                          streamOffsetCache_.size() * snapix::smolport::kPageIndexEntryBytes;
+    if (needed <= 4096) {
+      uint8_t serdebuf[4096];
+      const size_t wrote = snapix::smolport::serializePageIndex(
+          streamOffsetCache_.data(), streamOffsetCache_.size(), streamOffsetCacheConfigHash_,
+          serdebuf, sizeof(serdebuf));
+      if (wrote > 0) {
+        // v2.0.167 — UnifiedCache::Idx segment write replaces the legacy
+        // .work + rename atomic-publish.
+        auto ucache = snapix::unifiedcache::UnifiedCache::shared(streamOffsetCacheBookPath_);
+        if (ucache->writeSegment(snapix::unifiedcache::Kind::Idx,
+                                  static_cast<uint16_t>(streamOffsetCacheKey_), serdebuf, wrote)) {
+          LOG_INF(TAG, "[STREAM] idx saved (exit) spine=%d entries=%u (UnifiedCache::Idx)",
+                  streamOffsetCacheSpine_,
+                  static_cast<unsigned>(streamOffsetCache_.size()));
+        }
+      }
+    }
+    streamOffsetCache_.clear();
+    streamOffsetCacheSpine_ = -1;
+    streamOffsetCacheBookPath_.clear();
+    streamOffsetCacheKey_ = -1;
+  }
+#endif
+
   if (contentLoaded_) {
     // Save progress at last rendered position (not current requested position)
     ProgressManager::Progress progress;
@@ -774,6 +1064,35 @@ void ReaderState::exit(Core& core) {
     cacheController_.resetSession();
     core.content.close();
   }
+
+  // v2.0.180 — PROACTIVE JPEG decoder release on book exit.
+  //
+  // The shared JPEGDEC instance (sizeof ~25 KB on ESP32-C3) is lazily
+  // allocated on first cover/image decode and kept heap-pinned across the
+  // session for fast re-use.  Pre-fix it stayed pinned even after the
+  // user switched books, eating ~25 KB of heap baseline for the next
+  // book's chapter parse + cache cold-extend pressure window.  Concrete
+  // hardware symptom (v2.0.177-178 logs): FB2 spine=46 cold-extend with
+  // an inline image hit `largest=8180` because the JPEG instance from
+  // the previously-read Valley-of-Genius EPUB cover was still alive.
+  //
+  // Existing release callsites (line 2912 after cover-gen, ReaderState
+  // Overlays.cpp:739 / PageCache.cpp:986 reactive on heap-critical) all
+  // fire AFTER the damage is done.  Releasing here on book exit gives
+  // the next book a clean ~25 KB of recovered heap from the start,
+  // before any of its allocations begin.
+  //
+  // Cost: next book's first JPEG-bearing operation (cover decode or
+  // inline image) pays ~10 ms to re-allocate the JPEGDEC instance —
+  // negligible compared to the 50-200 ms typical JPEG decode time.
+  //
+  // No-op when SNAPIX_SMOL_JPEG=1 (v3_alpha env never instantiates
+  // JPEGDEC), so this is free in that build.
+  //
+  // Safety: ReaderState::exit() runs AFTER asyncJobs_.stopWorker() above
+  // (line 1015), so no concurrent JPEG decode can be in flight when we
+  // free the instance.
+  JpegToBmpConverter::releaseAllPersistent();
 
   // Keep the active .epdfont reader family loaded across UI transitions.
   // Several UI surfaces reuse theme.readerFontId directly, so unloading the
@@ -794,12 +1113,7 @@ void ReaderState::exit(Core& core) {
   directUiTransition_ = false;
   resumeBackgroundCachingAfterRender_ = false;
   lastIdleBackgroundKickMs_ = 0;
-  pendingTocJumpActive_ = false;
-  pendingTocJumpIndexingShown_ = false;
-  pendingTocJumpTargetSpine_ = -1;
-  pendingTocJumpTargetPageHint_ = -1;
-  pendingTocJumpAnchor_.clear();
-  pendingTocJumpRetryCount_ = 0;
+  asyncJobs_.clearPendingTocJump();
   clearPendingEpubPageLoad();
   invalidateAnchorMapCache();
 
@@ -817,9 +1131,19 @@ StateTransition ReaderState::update(Core& core) {
     return StateTransition::to(StateId::FileList);
   }
 
+  if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_ && !core.events.empty()) {
+    LOG_INF(TAG, "[ASYNC] cancelling deferred TOC follow-up due to user input");
+    asyncJobs_.clearPendingTocJump();
+    if (isWorkerRunning()) {
+      requestWorkerCancel();
+    }
+  }
+
   if (pendingTocJumpActive_ && !needsRender_) {
     processPendingTocJump(core);
-    return StateTransition::stay(StateId::Reader);
+    if (asyncJobs_.navigationJobBlocksInput()) {
+      return StateTransition::stay(StateId::Reader);
+    }
   }
 
   if (pendingEpubPageLoadActive_ && !needsRender_) {
@@ -869,14 +1193,15 @@ StateTransition ReaderState::update(Core& core) {
     return StateTransition::stay(StateId::Reader);
   }
 
-  if (queuedPendingEpubTurn_ != 0 && !needsRender_ && !pendingTocJumpActive_ && !pendingEpubPageLoadActive_ &&
+  const bool navigationBlocksInput = asyncJobs_.navigationJobBlocksInput();
+  if (queuedPendingEpubTurn_ != 0 && !needsRender_ && !navigationBlocksInput && !pendingEpubPageLoadActive_ &&
       !menuMode_ && !bookmarkMode_ && !tocMode_) {
     int queuedTurn = 0;
     uint32_t queuedForMs = 0;
-    navigationController_.noteWorkerIdle(isWorkerRunning());
-    if (navigationController_.tryConsumeQueuedTurn(isWorkerRunning(), needsRender_, pendingTocJumpActive_,
-                                                   pendingEpubPageLoadActive_, menuMode_, bookmarkMode_, tocMode_,
-                                                   queuedTurn, queuedForMs)) {
+    asyncJobs_.noteQueuedTurnWorkerIdle(isWorkerRunning());
+    if (asyncJobs_.tryConsumeQueuedTurn(isWorkerRunning(), needsRender_, navigationBlocksInput,
+                                        pendingEpubPageLoadActive_, menuMode_, bookmarkMode_, tocMode_, queuedTurn,
+                                        queuedForMs)) {
       LOG_INF(TAG, "[INPUT] executing deferred page-turn dir=%d wait=%lu remaining=%d", queuedTurn,
               static_cast<unsigned long>(queuedForMs), queuedPendingEpubTurn_);
 
@@ -941,7 +1266,7 @@ StateTransition ReaderState::update(Core& core) {
           case Button::Left:
           case Button::Up:
             if (isWorkerRunning()) {
-              lastCachePreemptRequestedMs_ = millis();
+              asyncJobs_.markCachePreemptRequested(millis());
               LOG_INF(TAG, "[INPUT] preempt requested button=%d workerState=%d", static_cast<int>(e.button),
                       static_cast<int>(workerState()));
               requestWorkerCancel();
@@ -956,7 +1281,7 @@ StateTransition ReaderState::update(Core& core) {
             if (core.settings.shortPwrBtn == Settings::PowerPageTurn) {
               powerPressStartedMs_ = millis();
               if (isWorkerRunning()) {
-                lastCachePreemptRequestedMs_ = millis();
+                asyncJobs_.markCachePreemptRequested(millis());
                 LOG_INF(TAG, "[INPUT] preempt requested button=%d workerState=%d", static_cast<int>(e.button),
                         static_cast<int>(workerState()));
                 requestWorkerCancel();
@@ -1049,10 +1374,22 @@ void ReaderState::render(Core& core) {
     stopBackgroundCaching();
   }
 
-  if (pendingTocJumpActive_) {
+  if (pendingTocJumpActive_ && !pendingTocJumpDeferredDisplay_) {
     if (!pendingTocJumpIndexingShown_) {
       renderCenteredStatusMessage(core, "Indexing...");
       pendingTocJumpIndexingShown_ = true;
+    }
+  } else if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_) {
+    // v2.0.84: optimistic TOC navigation — render the target spine's page
+    // 0 (or current target page) right away while processPendingTocJump
+    // continues looking for the exact anchor in the background.  When the
+    // anchor resolves, it'll mutate currentSectionPage_ and re-render.
+    renderCurrentPage(core);
+    if (resumeBackgroundCachingAfterRender_) {
+      resumeBackgroundCachingAfterRender_ = false;
+      if (!isWorkerRunning()) {
+        startBackgroundCaching(core, "resume-after-toc-deferred-render");
+      }
     }
   } else if (pendingEpubPageLoadActive_) {
     if (!pendingEpubPageLoadMessageShown_) {
@@ -1085,6 +1422,14 @@ void ReaderState::render(Core& core) {
 }
 
 void ReaderState::navigateNext(Core& core) {
+  // v2.0.84: user-initiated navigation cancels deferred-display TOC follow-up.
+  // The user has committed to reading at their current page; if the BG TOC
+  // worker resolves the anchor later, we don't want to yank them out of place.
+  if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_) {
+    LOG_INF(TAG, "[ASYNC] cancelling deferred TOC jump (user navigated forward)");
+    asyncJobs_.clearPendingTocJump();
+  }
+
   ContentType type = core.content.metadata().type;
 
   // XTC uses flatPage navigation, not spine/section - skip to navigation logic
@@ -1226,6 +1571,13 @@ bool ReaderState::tryFastNavigateWithinCurrentCache(Core& core, const int direct
 }
 
 void ReaderState::navigatePrev(Core& core) {
+  // v2.0.84: same cancel rule as navigateNext — user navigation kills the
+  // deferred TOC follow-up so we don't override their position.
+  if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_) {
+    LOG_INF(TAG, "[ASYNC] cancelling deferred TOC jump (user navigated back)");
+    asyncJobs_.clearPendingTocJump();
+  }
+
   ContentType type = core.content.metadata().type;
 
   // XTC uses flatPage navigation, not spine/section - skip to navigation logic
@@ -1622,8 +1974,20 @@ void ReaderState::renderCachedPage(Core& core) {
     return;
   }
 
+  // v2.0.110 (audit fix #1): use the short-wait interactive cancel instead
+  // of `stopBackgroundCaching()` here.  Pre-fix this called the full
+  // teardown variant which waits up to 15 s for the worker to idle and
+  // ESP.restart()s on timeout.  In practice the worker's cooperative
+  // cancel completes in ~100-300 ms for healthy paths; the 15 s ceiling
+  // was provisioned for heavy paths (huge JPEG decode, deeply nested
+  // parse).  On the render path that ceiling translates directly into
+  // "buttons unresponsive while the worker drains" — `loopTask` is
+  // blocked inside `xEventGroupWaitBits` and never gets to poll input.
+  // 500 ms is enough for healthy cancel; on timeout we proceed against
+  // the on-disk cache (worker writes use .rebuild → atomic rename, so
+  // the .bin reader sees a consistent snapshot regardless).
   if (isWorkerRunning()) {
-    stopBackgroundCaching();
+    requestBackgroundCachingPause("render-cached-page");
   }
 
   // Background task may have left parser in inconsistent state
@@ -1648,10 +2012,46 @@ void ReaderState::renderCachedPage(Core& core) {
     if (!pageIsCached) {
       const bool requireComplete = currentSectionPage_ == INT16_MAX;
       const int targetPage = requireComplete ? 0 : std::max(currentSectionPage_, 0);
-      LOG_INF(TAG, "[ASYNC] deferring cache build spine=%d page=%d complete=%u type=%d", currentSpineIndex_,
-              targetPage, static_cast<unsigned>(requireComplete), static_cast<int>(type));
-      armPendingEpubPageLoad(core, currentSpineIndex_, targetPage, requireComplete, true);
-      return;
+
+      // v2.0.112 (lifehack — instant page show on book entry):
+      //
+      // Pre-fix: when user resumes a book at e.g. saved page=7 but cache has
+      // only 4 pages (0..3), we'd arm page-load + show "Loading..." banner
+      // for the full cold rebuild (15-25 s on heavy chapters).  The user
+      // sees a frozen banner with no content.
+      //
+      // New: if the cache has ANY pages and the user's saved page is past
+      // the cached range, show the LAST CACHED PAGE immediately and remember
+      // the original target.  Background cache-extend continues; when it
+      // produces enough pages to cover the target, `processPendingEpubPageLoad`
+      // upgrade path (the existing v2.0.103 deferred-display logic) will
+      // navigate forward to the saved position.  Until then user reads real
+      // content instead of staring at "Loading".
+      //
+      // requireComplete=true (INT16_MAX sentinel = "end of section") still
+      // takes the original deferred path because there's no meaningful
+      // "show closest" — we need the full cache to know the END.
+      if (!requireComplete && pageCache_ && pageCache_->pageCount() > 0 &&
+          targetPage >= static_cast<int>(pageCache_->pageCount())) {
+        const int lastCached = static_cast<int>(pageCache_->pageCount()) - 1;
+        LOG_INF(TAG,
+                "[ASYNC] instant-show last cached spine=%d savedPage=%d shownPage=%d cachedPages=%u (bg extend → target)",
+                currentSpineIndex_, targetPage, lastCached,
+                static_cast<unsigned>(pageCache_->pageCount()));
+        currentSectionPage_ = lastCached;
+        // Arm page-load WITHOUT the "indexing=true" banner — BG extend
+        // continues silently.  When cachedPages > targetPage,
+        // processPendingEpubPageLoad's deferred-display upgrade picks
+        // up the navigation forward.
+        armPendingEpubPageLoad(core, currentSpineIndex_, targetPage, false, false);
+        // Don't return — fall through to the rest of renderCachedPage
+        // (cache load, page load, render).  Now pageIsCached is true.
+      } else {
+        LOG_INF(TAG, "[ASYNC] deferring cache build spine=%d page=%d complete=%u type=%d", currentSpineIndex_,
+                targetPage, static_cast<unsigned>(requireComplete), static_cast<int>(type));
+        armPendingEpubPageLoad(core, currentSpineIndex_, targetPage, requireComplete, true);
+        return;
+      }
     }
     readerPerfLog("reader-cache-bootstrap", cacheBootstrapMs, "(spine=%d page=%d)", currentSpineIndex_, currentSectionPage_);
 
@@ -1685,14 +2085,13 @@ void ReaderState::renderCachedPage(Core& core) {
     if (pendingEpubPageLoadActive_) {
       return;
     }
-    LOG_ERR(TAG, "Failed to load page spine=%d page=%d cache=%u pages=%u partial=%u", currentSpineIndex_,
+    LOG_ERR(TAG, "[NAV] page unavailable spine=%d page=%d cache=%u pages=%u partial=%u", currentSpineIndex_,
             currentSectionPage_, static_cast<unsigned>(pageCache_ != nullptr),
             static_cast<unsigned>(pageCache_ ? pageCache_->pageCount() : 0),
             static_cast<unsigned>(pageCache_ ? pageCache_->isPartial() : 0));
-    renderer_.drawCenteredText(core.settings.getReaderFontId(theme), 300, "Failed to load page", theme.primaryTextBlack,
-                               BOLD);
-    renderer_.displayBuffer();
-    needsRender_ = false;  // Prevent infinite render loop on cache failure
+    armPendingEpubPageLoad(core, currentSpineIndex_, currentSectionPage_, false, true);
+    resumeBackgroundCachingAfterRender_ = false;
+    needsRender_ = true;
     return;
   }
 
@@ -1703,10 +2102,33 @@ void ReaderState::renderCachedPage(Core& core) {
   readerPerfLog("reader-page-load", pageLoadMs, "(spine=%d page=%d)", currentSpineIndex_, currentSectionPage_);
 
   if (!page) {
-    LOG_ERR(TAG, "Failed to load page, clearing cache and recovering dir structure");
+    LOG_ERR(TAG, "[NAV] cached page unreadable; clearing cache and recovering dir structure");
     if (pageCache_) {
       pageCache_->clear();
       pageCache_.reset();
+    }
+    // v2.0.136 CRITICAL — reset the parser too.  Pre-fix, the parser's
+    // R4.b short-circuit progress (shortCircuitNextPage_ in
+    // EpubChapterParser/Fb2Parser) survived cache-clear-on-read-error.
+    // The next parsePages call would emit pages starting from where the
+    // parser left off (e.g. paginator-page 10) while writing them to a
+    // FRESH cache file at indices 0..N.  Reader requests page 3 → cache
+    // returns the page stored at file-index 3 → that's actually
+    // paginator-page 13.  Visible as "text doesn't connect between
+    // pages" (each page shows content from a totally different position
+    // in the chapter).
+    //
+    // parser->reset() drops shortCircuitActive_, clears initialized_,
+    // and releases the live legacy parser if any.  Next parsePages
+    // re-enters the init path which short-circuits cleanly from page 0.
+    // Markerize/idx files on disk are reused (markerizeAttempted_ flag
+    // is cleared by reset too — but the actual idx file's existence
+    // is what gates re-running tryMarkerizeChapter and R4.c).
+    if (parser_) {
+      parser_->reset();
+    }
+    if (lookaheadParser_) {
+      lookaheadParser_->reset();
     }
     // Re-create cache directory hierarchy — SdFat can lose directory entries
     // under memory pressure, causing all subsequent cache operations to fail.
@@ -1723,6 +2145,8 @@ void ReaderState::renderCachedPage(Core& core) {
     }
     invalidateAnchorMapCache();
     clearPagePrefetch();
+    armPendingEpubPageLoad(core, currentSpineIndex_, currentSectionPage_, false, true);
+    resumeBackgroundCachingAfterRender_ = false;
     needsRender_ = true;
     return;
   }
@@ -1894,6 +2318,397 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
   const int fontId = core.settings.getReaderFontId(theme);
   TextBlock::bionicReading = core.settings.bionicReading;
   TextBlock::fakeBold = core.settings.fakeBold;
+
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+  // v2.0.122 Phase R3.5 — try the v3 streaming render path.
+  // v2.0.127 Phase R3.7 — now supports both EPUB and FB2.
+  //
+  // Resolve markers path per content type:
+  //   * EPUB: `<epubCachePath>/markers/<currentSpineIndex_>.bin`
+  //   * FB2:  `<fb2CachePath>/markers/<sectionIndex>.bin`, where
+  //          `sectionIndex` is `Fb2::TocItem::sectionIndex` looked
+  //          up via `currentSpineIndex_` (== tocIndex for FB2).
+  //
+  // Falls back to the legacy Page-tree path on any failure (markers
+  // file missing, PageNotFound, ReadError, content type not supported).
+  bool streamedOK = false;
+  // v2.0.167 — markers + idx now live as UnifiedCache segments in
+  // <bookCachePath>/streaming.cache.  Build the cache instance + segment
+  // key (uint16) per content type.  EPUB key = spineIndex; FB2 key =
+  // sectionIndex (which differs from tocIndex via Fb2::TocItem).
+  std::string bookCachePath;
+  int markersKey = -1;
+  const ContentType contentType = core.content.metadata().type;
+  if (contentType == ContentType::Epub) {
+    auto* epubProv = core.content.asEpub();
+    if (epubProv && epubProv->getEpub() && currentSpineIndex_ >= 0) {
+      bookCachePath = epubProv->getEpub()->getCachePath();
+      markersKey = currentSpineIndex_;
+    }
+  } else if (contentType == ContentType::Fb2) {
+    auto* fb2Prov = core.content.asFb2();
+    if (fb2Prov && fb2Prov->getFb2() && currentSpineIndex_ >= 0 &&
+        currentSpineIndex_ < static_cast<int>(fb2Prov->getFb2()->tocCount())) {
+      const Fb2::TocItem item =
+          fb2Prov->getFb2()->getTocItem(static_cast<uint16_t>(currentSpineIndex_));
+      if (item.sectionIndex >= 0) {
+        bookCachePath = fb2Prov->getFb2()->getCachePath();
+        markersKey = item.sectionIndex;
+      }
+    }
+  }
+  if (!bookCachePath.empty() && markersKey >= 0) {
+    auto ucache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+    File mf;
+    size_t markersSegSize = 0;
+    if (ucache->openSegmentReader(snapix::unifiedcache::Kind::Markers,
+                                   static_cast<uint16_t>(markersKey), mf, &markersSegSize)) {
+      // The file is positioned at the segment's payload start.  Capture
+      // the base offset so any `mf.seek(byteOffset)` for resume below
+      // can be translated to segment-relative coordinates.
+      const uint32_t markersSegBase = static_cast<uint32_t>(mf.position());
+      if (mf) {
+          // Build paginator config from current viewport + font metrics.
+          // Page geometry intentionally mirrors GfxRenderer's logical
+          // screen so layout decisions match the legacy Page tree's
+          // assumptions.  Heading uses 1.5× line height; arbitrary —
+          // R3.6 will tune against the legacy renderer's heading metrics.
+          const uint16_t bodyLineH = static_cast<uint16_t>(renderer_.getLineHeight(fontId));
+          snapix::smolport::StreamingPaginatorConfig cfg{};
+          cfg.pageWidth = static_cast<uint16_t>(renderer_.getScreenWidth());
+          cfg.pageHeight = static_cast<uint16_t>(renderer_.getScreenHeight());
+          cfg.marginTop = static_cast<uint16_t>(marginTop);
+          cfg.marginBottom = static_cast<uint16_t>(marginBottom);
+          cfg.marginLeft = static_cast<uint16_t>(marginLeft);
+          cfg.marginRight = static_cast<uint16_t>(marginRight);
+          cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
+          cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
+          cfg.paragraphSpacing = static_cast<uint16_t>(cfg.bodyLineHeight / 4);
+
+          // v2.0.136 — diagnostic: dump R3.6 paginator config so a
+          // mismatch with R4.c's idx-build cfg becomes immediately
+          // visible in the log.  Compare against `[STREAM] R4.c
+          // paginator cfg` lines from EpubChapterParser / Fb2Parser.
+          LOG_INF(TAG,
+                  "[STREAM] R3.6 paginator cfg spine=%d type=%s fontId=%d "
+                  "pageW=%u pageH=%u mT=%u mB=%u mL=%u mR=%u bodyLH=%u",
+                  currentSpineIndex_,
+                  contentType == ContentType::Epub ? "epub" : "fb2", fontId,
+                  static_cast<unsigned>(cfg.pageWidth), static_cast<unsigned>(cfg.pageHeight),
+                  static_cast<unsigned>(cfg.marginTop), static_cast<unsigned>(cfg.marginBottom),
+                  static_cast<unsigned>(cfg.marginLeft), static_cast<unsigned>(cfg.marginRight),
+                  static_cast<unsigned>(cfg.bodyLineHeight));
+
+          // v2.0.145 — image resolver: marker stream's `<img src>` payload
+          // → cached BMP path on LittleFS.  Uses the same path convention
+          // as EpubImageCache::cacheImage:
+          //   bmpPath = <imageCachePath>/<std::hash(resolvedPath)>.bmp
+          // where resolvedPath = FsHelpers::normalisePath(chapterBase + src).
+          // The legacy parser populates these BMPs during chapter parse;
+          // we just consume them here.  FB2 sections use a similar
+          // convention via the Fb2 provider.  Returns empty string if
+          // the content type doesn't support inline images (yet) or
+          // the path can't be resolved.
+          std::string imageCacheDir;
+          std::string chapterBase;
+          if (contentType == ContentType::Epub) {
+            auto* epubProv = core.content.asEpub();
+            if (epubProv && epubProv->getEpub() && currentSpineIndex_ >= 0) {
+              imageCacheDir = epubProv->getEpub()->getCachePath() + "/images";
+              // Chapter base path = directory of the spine item's href
+              // (e.g., "OEBPS/Text/" for "OEBPS/Text/chapter01.xhtml").
+              const auto spineItem =
+                  epubProv->getEpub()->getSpineItem(static_cast<uint16_t>(currentSpineIndex_));
+              const size_t lastSlash = spineItem.href.rfind('/');
+              if (lastSlash != std::string::npos) {
+                chapterBase = spineItem.href.substr(0, lastSlash + 1);
+              }
+            }
+          } else if (contentType == ContentType::Fb2) {
+            auto* fb2Prov = core.content.asFb2();
+            if (fb2Prov && fb2Prov->getFb2()) {
+              imageCacheDir = fb2Prov->getFb2()->getCachePath() + "/images";
+              // FB2 image refs are bare binary-ids (no chapter-relative
+              // path needed); chapterBase stays empty.
+            }
+          }
+          // v2.0.147/148 — image resolvers for FB2 + EPUB.  Both use
+          // the same lazy-decode-on-demand pattern: if the cached BMP
+          // doesn't exist on LittleFS yet, decode the source image
+          // (FB2 binary block / EPUB ZIP entry) → write BMP → return
+          // path.  Idempotent on subsequent calls (cached BMP is just
+          // re-opened).  Lets the streaming render pipeline display
+          // images without running the full legacy parser.
+          Fb2* fb2ForImages = nullptr;
+          Epub* epubForImages = nullptr;
+          if (contentType == ContentType::Fb2) {
+            auto* fb2Prov = core.content.asFb2();
+            if (fb2Prov) fb2ForImages = fb2Prov->getFb2();
+          } else if (contentType == ContentType::Epub) {
+            auto* epubProv = core.content.asEpub();
+            if (epubProv) epubForImages = epubProv->getEpub();
+          }
+          const uint16_t imgMaxW = static_cast<uint16_t>(renderer_.getScreenWidth() -
+                                                           marginLeft - marginRight);
+          const uint16_t imgMaxH = static_cast<uint16_t>(renderer_.getScreenHeight() -
+                                                           marginTop - marginBottom);
+          // v2.0.148 — EPUB lazy image cache.  Construct a temp
+          // EpubImageCache instance with the minimal setup
+          // needed for `cacheImageForStreaming` (no parse loop,
+          // no Page tree build).  Wraps the chapter's readItemFn
+          // so JPEG/PNG decode can pull the source from the EPUB
+          // ZIP exactly the way the legacy parser would.  Capture
+          // by value so the lambda's lifetime spans the render.
+          std::shared_ptr<EpubImageCache> epubImageCacheParser;
+          if (epubForImages != nullptr && !imageCacheDir.empty() &&
+              currentSpineIndex_ >= 0) {
+            auto readItemFn = [epubForImages](
+                                  const std::string& href, Print& out, size_t chunkSize,
+                                  const std::function<bool()>& localAbort)
+                -> EpubImageCache::ReadItemStatus {
+              // v2.0.152 — DO NOT pass `renderer_.getFrameBuffer()` as the
+              // ZIP-extract scratch buffer here.  The legacy EpubChapter
+              // Parser does that in ReaderAsync where the framebuffer is
+              // idle, but the streaming resolver runs INSIDE the render
+              // path (loopTask, mid-page-draw) — using the framebuffer
+              // as ZIP scratch overwrites the pixels being sent to the
+              // display, producing vertical-stripe garbage on the right
+              // 2/3 of the screen (left side stays correct because
+              // text-draw happens before the image-cache call).
+              //
+              // Passing nullptr makes Epub::readItemContentsToStreamDetailed
+              // allocate its own scratch from heap — one-shot, freed
+              // when the call returns.  Slightly slower (allocation
+              // overhead per image decode) but correct.
+              switch (epubForImages->readItemContentsToStreamDetailed(
+                  href, out, chunkSize, /*scratch=*/nullptr, localAbort)) {
+                case Epub::ItemReadResult::Success:
+                  return EpubImageCache::ReadItemStatus::Success;
+                case Epub::ItemReadResult::Aborted:
+                  return EpubImageCache::ReadItemStatus::Aborted;
+                case Epub::ItemReadResult::NotFound:
+                  return EpubImageCache::ReadItemStatus::NotFound;
+                case Epub::ItemReadResult::WriteError:
+                  return EpubImageCache::ReadItemStatus::WriteError;
+                case Epub::ItemReadResult::ArchiveError:
+                  return EpubImageCache::ReadItemStatus::ArchiveError;
+                case Epub::ItemReadResult::IoError:
+                case Epub::ItemReadResult::OpenFailed:
+                  return EpubImageCache::ReadItemStatus::IoError;
+              }
+              return EpubImageCache::ReadItemStatus::ArchiveError;
+            };
+            // Build RenderConfig from the streaming paginator's
+            // viewport — RenderConfig's only fields cacheImage cares
+            // about are viewportWidth/Height, which gate the max
+            // image bounds during the BMP scale-down pass.
+            const auto vpForImg = getReaderViewport(core.settings.statusBar != 0);
+            const RenderConfig rcfg = core.settings.getRenderConfig(theme, vpForImg.width, vpForImg.height);
+            // v2.0.171 — EpubImageCache ctor trimmed to just the params
+            // it actually uses (renderer, config, chapterBase, imageCachePath,
+            // readItemFn, quickImageDecode).  Parser-era args dropped.
+            epubImageCacheParser = std::make_shared<EpubImageCache>(
+                renderer_, rcfg, chapterBase, imageCacheDir, readItemFn,
+                /*quickImageDecode=*/false);
+          }
+          auto resolveImage = [imageCacheDir, chapterBase, contentType,
+                                fb2ForImages, epubImageCacheParser, imgMaxW,
+                                imgMaxH](const uint8_t* p, size_t l) -> std::string {
+            if (p == nullptr || l == 0) return {};
+            std::string src(reinterpret_cast<const char*>(p), l);
+            if (contentType == ContentType::Fb2 && fb2ForImages != nullptr) {
+              // FB2: strip leading `#` from `<image l:href="#id">`.
+              if (!src.empty() && src[0] == '#') src.erase(0, 1);
+              std::string outPath;
+              uint16_t w = 0, h = 0;
+              const bool ok = fb2ForImages->cacheImage(
+                  src, outPath, w, h, imgMaxW, imgMaxH,
+                  /*fastMode=*/true, /*shouldAbort=*/{});
+              return ok ? outPath : std::string();
+            }
+            if (contentType == ContentType::Epub && epubImageCacheParser) {
+              // EPUB: lazy decode via temp parser; idempotent fast-path
+              // if BMP already on disk.
+              std::string outPath;
+              uint16_t w = 0, h = 0;
+              const bool ok = epubImageCacheParser->cacheImageForStreaming(
+                  src, outPath, w, h);
+              return ok ? outPath : std::string();
+            }
+            // No resolver available — return empty so paginator skips.
+            return {};
+          };
+
+          // v2.0.146 — propagate user's fakeBold setting so the
+          // streaming render path matches the legacy Page-tree's
+          // bold-via-multi-pass behaviour.  Settings:
+          //   0 = off (use real bold font)
+          //   1 = bold (2× draw at x, x+1 with REGULAR/ITALIC)
+          //   2 = extrabold (3× draw at x-1, x, x+1)
+          snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer_, fontId, fontId,
+                                                                  theme.primaryTextBlack,
+                                                                  resolveImage,
+                                                                  core.settings.fakeBold);
+          snapix::smolport::StreamingPaginator paginator(cfg, adapter);
+
+          // Streaming chunk buffer on stack — same 4 KB sizing as the
+          // markerize path; ReaderAsync stack high water is ~12 KB
+          // observed, leaves ~4 KB headroom.
+          constexpr size_t kChunkBufBytes = 4096;
+          uint8_t chunkBuf[kChunkBufBytes];
+
+          // v2.0.125 R3.6 — clear per-spine offset cache when chapter
+          // changes (different markers file → different page offsets).
+          // v2.0.128 R4.a — on spine change, ALSO persist the previous
+          // spine's cache to its `.idx` file (if non-empty), and try
+          // to load the new spine's `.idx` from disk to avoid the
+          // MEASURE-only walk from scratch.
+          if (streamOffsetCacheSpine_ != currentSpineIndex_) {
+            // Persist outgoing spine's cache (R4.a save side).
+            if (streamOffsetCacheSpine_ >= 0 && !streamOffsetCache_.empty() &&
+                !streamOffsetCacheBookPath_.empty() && streamOffsetCacheKey_ >= 0) {
+              const uint16_t prevHash = streamOffsetCacheConfigHash_;
+              const size_t needed =
+                  snapix::smolport::kPageIndexHeaderBytes +
+                  streamOffsetCache_.size() * snapix::smolport::kPageIndexEntryBytes;
+              if (needed <= 4096) {  // sanity cap; ~500 pages fits
+                uint8_t serdebuf[4096];
+                const size_t wrote = snapix::smolport::serializePageIndex(
+                    streamOffsetCache_.data(), streamOffsetCache_.size(), prevHash,
+                    serdebuf, sizeof(serdebuf));
+                if (wrote > 0) {
+                  // v2.0.167 — write idx to UnifiedCache::Idx segment instead
+                  // of separate .idx file with .work + rename dance.
+                  auto prevCache = snapix::unifiedcache::UnifiedCache::shared(streamOffsetCacheBookPath_);
+                  if (prevCache->writeSegment(snapix::unifiedcache::Kind::Idx,
+                                              static_cast<uint16_t>(streamOffsetCacheKey_),
+                                              serdebuf, wrote)) {
+                    LOG_INF(TAG, "[STREAM] idx saved spine=%d entries=%u (UnifiedCache::Idx key=%d)",
+                            streamOffsetCacheSpine_,
+                            static_cast<unsigned>(streamOffsetCache_.size()),
+                            streamOffsetCacheKey_);
+                  }
+                }
+              }
+            }
+
+            streamOffsetCache_.clear();
+            streamOffsetCacheSpine_ = currentSpineIndex_;
+
+            // Try to load incoming spine's .idx (R4.a load side).
+            const uint16_t cfgHash =
+                snapix::smolport::computePageIndexConfigHash(cfg, fontId,
+                                                              core.settings.fakeBold);
+            streamOffsetCacheConfigHash_ = cfgHash;
+            streamOffsetCacheBookPath_ = bookCachePath;
+            streamOffsetCacheKey_ = markersKey;
+            // v2.0.167 — read idx from UnifiedCache::Idx segment.
+            std::vector<uint8_t> idxPayload;
+            if (ucache->readSegment(snapix::unifiedcache::Kind::Idx,
+                                     static_cast<uint16_t>(markersKey), idxPayload)) {
+              if (idxPayload.size() > 0 && idxPayload.size() <= 4096 &&
+                  snapix::smolport::deserializePageIndex(idxPayload.data(), idxPayload.size(),
+                                                          cfgHash, streamOffsetCache_)) {
+                LOG_INF(TAG, "[STREAM] idx loaded spine=%d entries=%u (UnifiedCache::Idx)",
+                        currentSpineIndex_,
+                        static_cast<unsigned>(streamOffsetCache_.size()));
+              } else {
+                // Stale (config mismatch) or corrupt — tombstone + start fresh.
+                ucache->removeSegment(snapix::unifiedcache::Kind::Idx,
+                                       static_cast<uint16_t>(markersKey));
+                streamOffsetCache_.clear();
+                LOG_INF(TAG, "[STREAM] idx stale/corrupt spine=%d (removed)", currentSpineIndex_);
+              }
+            }
+          }
+
+          // Look up best resume point in the cache: highest known
+          // page <= currentSectionPage_.  If the target page itself
+          // is cached, that's a 1-page render (no skip).  Otherwise
+          // skip from the highest known prior page.
+          snapix::smolport::MarkerizedRenderResume resume;
+          if (!streamOffsetCache_.empty()) {
+            for (auto it = streamOffsetCache_.rbegin(); it != streamOffsetCache_.rend(); ++it) {
+              if (it->pageIndex <= static_cast<uint16_t>(currentSectionPage_)) {
+                resume.startPage = it->pageIndex;
+                resume.styleBits = it->styleBits;
+                // v2.0.140 fix — also propagate the absolute byte
+                // offset to the paginator's PageCountingObserver so
+                // boundary callbacks captured during this resume
+                // render report ABSOLUTE source positions, not
+                // relative-to-seek-start.  Without this, the
+                // streamOffsetCache_ accumulates relative offsets for
+                // every page past the cold-walked range, and the next
+                // page-turn seeks to a way-too-early position →
+                // "first 3 lines change between pages" on-device.
+                resume.byteOffset = it->byteOffset;
+                // Seek the file to the captured offset; readChunk
+                // returns bytes belonging to page resume.startPage
+                // and onward.
+                // v2.0.167 — seek is segment-relative; add markersSegBase
+                // to get absolute offset within streaming.cache.
+                mf.seek(static_cast<uint32_t>(markersSegBase + it->byteOffset));
+                break;
+              }
+            }
+          }
+
+          // v2.0.167 — bound reads by remaining segment bytes so the
+          // paginator doesn't run past the segment into neighbouring frame
+          // data.  Compute remaining from current position relative to
+          // segment start + segment size.
+          const uint32_t curPos = static_cast<uint32_t>(mf.position());
+          size_t markersRemaining = (curPos >= markersSegBase + markersSegSize)
+                                      ? 0
+                                      : (markersSegBase + markersSegSize - curPos);
+          auto readFn = [&mf, &markersRemaining](uint8_t* buf, size_t bufSize) -> int {
+            if (!mf) return -1;
+            if (markersRemaining == 0) return 0;  // segment EOF
+            const size_t want = std::min(bufSize, markersRemaining);
+            const int got = mf.read(buf, want);
+            if (got > 0) markersRemaining -= static_cast<size_t>(got);
+            return got;
+          };
+
+          // Capture every new boundary into the cache so subsequent
+          // renders can reuse them.  We append in order, but a render
+          // may rediscover a page we already have cached (shouldn't
+          // happen with proper resume, but defensive).
+          auto onBoundary = [this](const snapix::smolport::PageBoundarySnapshot& s) {
+            if (!streamOffsetCache_.empty() &&
+                streamOffsetCache_.back().pageIndex >= s.pageIndex) {
+              return;  // already cached this page or earlier — skip
+            }
+            streamOffsetCache_.push_back(s);
+          };
+
+          snapix::smolport::MarkerizedRenderStats stats{};
+          const auto status = snapix::smolport::renderMarkerizedPage(
+              paginator, readFn, chunkBuf, sizeof(chunkBuf),
+              static_cast<uint16_t>(currentSectionPage_), {}, &stats, resume, onBoundary);
+          mf.close();
+
+        if (status == snapix::smolport::MarkerizedRenderResult::Success) {
+          LOG_INF(TAG,
+                  "[STREAM] markerized render done type=%s spine=%d page=%d skipped=%u bytes=%u resume=%u cached=%u",
+                  contentType == ContentType::Epub ? "epub" : "fb2", currentSpineIndex_, currentSectionPage_,
+                  static_cast<unsigned>(stats.pagesAdvancedThrough),
+                  static_cast<unsigned>(stats.bytesConsumed),
+                  static_cast<unsigned>(resume.startPage),
+                  static_cast<unsigned>(streamOffsetCache_.size()));
+          streamedOK = true;
+        } else {
+          LOG_INF(TAG,
+                  "[STREAM] markerized render fallback type=%s spine=%d page=%d status=%u (legacy path)",
+                  contentType == ContentType::Epub ? "epub" : "fb2", currentSpineIndex_, currentSectionPage_,
+                  static_cast<unsigned>(status));
+        }
+      }
+    }
+  }
+  if (streamedOK) return;
+#endif
+
   page.render(renderer_, fontId, marginLeft, marginTop, theme.primaryTextBlack);
 }
 
@@ -2016,17 +2831,34 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   // Calculate compact overlay banner dimensions (centered on screen).
   constexpr int padH = 24;  // horizontal padding inside banner
   constexpr int padV = 16;  // vertical padding inside banner
+  constexpr int iconW = 14;
+  constexpr int iconH = 20;
+  constexpr int iconGap = 10;
   const int textWidth = renderer_.getTextWidth(fontId, message, EpdFontFamily::BOLD);
   const int lineHeight = renderer_.getLineHeight(fontId);
-  const int bannerW = textWidth + padH * 2;
-  const int bannerH = lineHeight + padV * 2;
+  const int contentW = iconW + iconGap + textWidth;
+  const int contentH = std::max(iconH, lineHeight);
+  const int bannerW = contentW + padH * 2;
+  const int bannerH = contentH + padV * 2;
   const int bannerX = (renderer_.getScreenWidth() - bannerW) / 2;
   const int bannerY = (renderer_.getScreenHeight() - bannerH) / 2;
+  const int iconX = bannerX + padH;
+  const int iconY = bannerY + padV + (contentH - iconH) / 2;
+  const int textX = iconX + iconW + iconGap;
+  const int textY = bannerY + padV + (contentH - lineHeight) / 2;
 
   // Draw overlay banner on top of existing framebuffer content — no clearScreen,
   // so the previous page / file-list stays visible behind the banner.
   renderer_.fillRect(bannerX, bannerY, bannerW, bannerH, !theme.primaryTextBlack);
-  renderer_.drawText(fontId, bannerX + padH, bannerY + padV, message, theme.primaryTextBlack, EpdFontFamily::BOLD);
+  renderer_.drawRect(iconX, iconY, iconW, iconH, theme.primaryTextBlack);
+  renderer_.drawLine(iconX + 2, iconY + 2, iconX + iconW - 3, iconY + iconH / 2, theme.primaryTextBlack);
+  renderer_.drawLine(iconX + iconW - 3, iconY + 2, iconX + 2, iconY + iconH / 2, theme.primaryTextBlack);
+  renderer_.drawLine(iconX + 2, iconY + iconH - 3, iconX + iconW - 3, iconY + iconH / 2,
+                     theme.primaryTextBlack);
+  renderer_.drawLine(iconX + iconW - 3, iconY + iconH - 3, iconX + 2, iconY + iconH / 2,
+                     theme.primaryTextBlack);
+  renderer_.fillRect(iconX + iconW / 2 - 1, iconY + iconH / 2 - 1, 3, 3, theme.primaryTextBlack);
+  renderer_.drawText(fontId, textX, textY, message, theme.primaryTextBlack, EpdFontFamily::BOLD);
   renderer_.drawRect(bannerX + 3, bannerY + 3, bannerW - 6, bannerH - 6, theme.primaryTextBlack);
 
   // Use drive-all refresh for the full screen so every pixel — including the
@@ -2090,6 +2922,24 @@ bool ReaderState::renderCoverPage(Core& core) {
   }
 
   std::string coverPath = core.content.generateCover(true);  // Always 1-bit in reader (saves ~48KB grayscale buffer)
+
+  // v2.0.101 (architectural fix — post-cover "no-return" point):
+  // Cover-gen via JPEGDEC pins ~25 KB (shared decoder instance) + ~7-32 KB
+  // (decode arena) mid-heap for the rest of the session.  The next chapter
+  // parser then starts with `largest_free` artificially shrunk to ~25 KB
+  // instead of the ~70 KB it actually has — and a handful of ParsedText
+  // allocations later (each ~1.8 KB contiguous from words.reserve(64))
+  // collapse below the MIN_LAYOUT_FREE_HEAP=10240 watermark, aborting
+  // every retry forever.  The "no-return" point.
+  //
+  // Releasing the JPEGDEC instance + arena here is cheap (one-line free,
+  // ~100 µs) and the next image decode pays one re-allocation (~10 ms),
+  // which is in the noise compared to the 50-200 ms per-image decode
+  // total.  releaseAllPersistent() is a no-op when SNAPIX_SMOL_JPEG=1
+  // (v3_alpha) because the SmolJpeg path never instantiates JPEGDEC at
+  // all — costs nothing in either env, helps default env enormously.
+  JpegToBmpConverter::releaseAllPersistent();
+
   if (coverPath.empty()) {
     LOG_DBG(TAG, "No cover available, skipping cover page");
     return false;
@@ -2209,6 +3059,28 @@ void ReaderState::startBackgroundCaching(Core& core, const char* trigger) {
     LOG_ERR(TAG, "[ASYNC] failed to queue background cache trigger=%s reason=%s", trigger ? trigger : "auto",
             backgroundCacheWakeReasonToString(plan.reason));
   }
+}
+
+bool ReaderState::requestBackgroundCachingPause(const char* siteTag) {
+  // v2.0.110 (audit fix #1): non-blocking-ish cancel for render path.
+  // Worker yields cooperatively on shouldAbort, typically within ~100 ms.
+  // We wait up to `kInteractiveCacheCancelTimeoutMs` (500 ms) for that
+  // honest yield — long enough for normal cancellation, short enough that
+  // input polling resumes in the human-perceptible "instant" window.
+  // No ESP.restart() on timeout: render proceeds against on-disk cache
+  // (the worker can't corrupt that — writes use .rebuild sidecar with
+  // atomic rename, and the in-memory pageCache_ access is read-only on
+  // the render path).
+  if (!isWorkerRunning()) {
+    return true;
+  }
+  requestWorkerCancel();
+  if (!waitWorkerIdle(kInteractiveCacheCancelTimeoutMs)) {
+    LOG_INF(TAG, "[ASYNC] interactive-cancel timeout site=%s — proceeding (worker still draining)",
+            siteTag ? siteTag : "?");
+    return false;
+  }
+  return true;
 }
 
 bool ReaderState::stopBackgroundCaching() {

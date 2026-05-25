@@ -48,6 +48,10 @@ std::string contentCachePath(const char* cacheDir, const int fontId) {
   return std::string(cacheDir) + "/pages_" + std::to_string(fontId) + ".bin";
 }
 
+std::string metricsCachePath(const std::string& bookCachePath) {
+  return bookCachePath + "/metrics.bin";
+}
+
 HeapState readHeapState() {
   return HeapState{heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)};
 }

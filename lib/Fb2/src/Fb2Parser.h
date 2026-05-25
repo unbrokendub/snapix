@@ -28,7 +28,12 @@ class Fb2Parser : public ContentParser {
   bool parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages = 0,
                   const AbortCallback& shouldAbort = nullptr) override;
   bool hasMoreContent() const override { return hasMore_; }
-  bool canResume() const override { return initialized_ && suspended_ && xmlParser_ != nullptr && file_; }
+  bool canResume() const override {
+    // v2.0.132 — also resume mid-flight R4.b short-circuit emit (see
+    // header doc on shortCircuitActive_).
+    if (shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_) return true;
+    return initialized_ && suspended_ && xmlParser_ != nullptr && file_;
+  }
   void reset() override;
   const std::vector<std::pair<std::string, uint16_t>>& getAnchorMap() const override { return anchorMap_; }
   uint32_t lastParsedOffset() const { return lastParsedOffset_; }
@@ -38,8 +43,26 @@ class Fb2Parser : public ContentParser {
    * to materialise <image l:href="#id"/> references during page layout — base64
    * → JPEG → BMP on first encounter, then a fast cache hit thereafter.  Pass
    * nullptr (or never call) to disable images entirely (legacy behaviour).
+   *
+   * v2.0.117 Phase R2.6: also derives the markers sidecar directory from
+   * `fb2->getCachePath() + "/markers"` so the SmolPort byte-marker pass
+   * (gated by `SNAPIX_MARKERIZER`) knows where to drop its `<spine>.bin`
+   * files.  Same lifetime as fb2_; no extra setter call site.
    */
-  void setFb2(const Fb2* fb2) { fb2_ = fb2; }
+  void setFb2(const Fb2* fb2);
+
+  // v2.0.131 — see EpubChapterParser::setStreamingViewport doc.  Plumbs
+  // real reader viewport margins from ReaderStateAsyncJobs so R4.c's
+  // upfront .idx build uses the SAME paginator config that the
+  // streaming render path will use, eliminating the configHash
+  // mismatch (and the pageCount mismatch that caused the v2.0.130 FB2
+  // white-screen-on-page-turn bug).
+  void setStreamingViewport(int marginTop, int marginBottom, int marginLeft, int marginRight) {
+    streamingViewportMarginTop_ = marginTop;
+    streamingViewportMarginBottom_ = marginBottom;
+    streamingViewportMarginLeft_ = marginLeft;
+    streamingViewportMarginRight_ = marginRight;
+  }
 
  private:
   std::string filepath_;
@@ -100,6 +123,36 @@ class Fb2Parser : public ContentParser {
 
   // Anchor map for TOC navigation (section_N → page index)
   std::vector<std::pair<std::string, uint16_t>> anchorMap_;
+
+  // v2.0.117 Phase R2.6 — markers sidecar directory.  Set via setFb2();
+  // empty means "skip markerize" (e.g. fb2_ never wired).
+  std::string markersDir_;
+  bool markerizeAttempted_ = false;  // one-shot per Fb2Parser lifetime
+
+  // v2.0.131 — real viewport margins from ReaderState (see header
+  // comment on setStreamingViewport).  Defaults of 4 preserve v2.0.130
+  // behaviour when setter never called.
+  int streamingViewportMarginTop_ = 4;
+  int streamingViewportMarginBottom_ = 4;
+  int streamingViewportMarginLeft_ = 4;
+  int streamingViewportMarginRight_ = 4;
+
+  // v2.0.132 — stateful R4.b short-circuit progress tracking.  See
+  // parallel comment in EpubChapterParser.h for rationale.  Caller
+  // (PageCache::create/extend) batches with maxPages=1 for first-page
+  // surfacing; without this state, R4.b emitted 1 of N pages and
+  // marked the chapter complete, so user couldn't navigate past
+  // page 0 of any section.
+  bool shortCircuitActive_ = false;
+  uint16_t shortCircuitTotalPages_ = 0;
+  uint16_t shortCircuitNextPage_ = 0;
+
+  // v2.0.117 Phase R2.6 — best-effort byte-marker side-channel.  Reads
+  // the FB2 source file's [startOffset_..endOffset_) byte range, runs
+  // it through Fb2Stripper (HtmlStripper Mode::Fb2), writes the marker
+  // stream to `<markersDir_>/<startingSectionIndex_>.bin`.  Compiled
+  // out entirely when SNAPIX_MARKERIZER=0.
+  bool tryMarkerizeSection();
 
   // Callback state
   std::function<void(std::unique_ptr<Page>)> onPageComplete_;

@@ -4,7 +4,6 @@
 #include <EpubChapterParser.h>
 #include <Fb2Parser.h>
 #include <GfxRenderer.h>
-#include <HtmlParser.h>
 #include <LittleFS.h>  // v2.0.61: anchors file moved to LittleFS alongside page cache
 #include <Logging.h>
 #include <MarkdownParser.h>
@@ -14,6 +13,8 @@
 #include <SDCardManager.h>
 #include <Serialization.h>
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>  // v2.0.80: mutex serialising .anchors save/load
+#include <freertos/semphr.h>
 
 #include <new>
 
@@ -36,6 +37,45 @@ constexpr size_t kEpubResidentWarmMinFreeBytes = 44 * 1024;
 constexpr size_t kEpubResidentWarmMinLargestBlock = 20 * 1024;
 constexpr size_t kEpubFarSweepMinFreeBytes = 56 * 1024;
 constexpr size_t kEpubFarSweepMinLargestBlock = 24 * 1024;
+
+// v2.0.80: serialises all .anchors save/load operations.  Pre-2.0.80, the UI
+// task's periodic TOC-pending poll called loadAnchorMap() (open + read +
+// close) every second, while the background TOC worker called
+// saveAnchorMap() (rename .tmp → .anchors) at the end of each parse batch.
+// LittleFS refused the rename when the UI's File hadn't been closed yet —
+// "Cannot rename; dst is open" — leaving the anchor map stale and forcing
+// the TOC jump to fall back to spine page 0 (wrong location for the user).
+//
+// A static binary semaphore is enough: lock contention is bounded (worst
+// case ~50 ms saveAnchorMap waits behind a ~5 ms loadAnchorMap, or vice
+// versa), and neither operation can deadlock (both take the lock at entry
+// and release at exit without nested LittleFS ops).
+SemaphoreHandle_t& anchorFileMutex() {
+  static SemaphoreHandle_t mutex = []() {
+    SemaphoreHandle_t m = xSemaphoreCreateMutex();
+    return m;
+  }();
+  return mutex;
+}
+
+class AnchorFileLock {
+ public:
+  AnchorFileLock() : owned_(false) {
+    SemaphoreHandle_t m = anchorFileMutex();
+    if (m && xSemaphoreTake(m, pdMS_TO_TICKS(2000)) == pdTRUE) {
+      owned_ = true;
+    }
+  }
+  ~AnchorFileLock() {
+    if (owned_) xSemaphoreGive(anchorFileMutex());
+  }
+  AnchorFileLock(const AnchorFileLock&) = delete;
+  AnchorFileLock& operator=(const AnchorFileLock&) = delete;
+  explicit operator bool() const { return owned_; }
+
+ private:
+  bool owned_;
+};
 
 // v2.0.74: foreground parser/page-cache allocations can throw std::bad_alloc
 // on a fragmented heap (typical mid-session) — and the foreground render path
@@ -342,6 +382,14 @@ void ReaderCacheController::saveAnchorMap(const ContentParser& parser, const std
   const auto& anchorMap = parser.getAnchorMap();
   if (anchorMap.empty()) return;
 
+  // v2.0.80: serialise against concurrent loadAnchorMap on the UI task.
+  // See anchorFileMutex() comment for the rename-failure history.
+  AnchorFileLock lock;
+  if (!lock) {
+    LOG_ERR(TAG, "saveAnchorMap: failed to acquire anchor lock for %s.anchors", cachePath.c_str());
+    return;
+  }
+
   // v2.0.74: write to .tmp then atomic rename so a power loss mid-write
   // doesn't leave a corrupt .anchors file (which would silently break TOC
   // navigation on the next load — `loadAnchorMap` returns an empty vector
@@ -395,6 +443,16 @@ int ReaderCacheController::loadAnchorPage(const std::string& cachePath, const st
 
 std::vector<std::pair<std::string, uint16_t>> ReaderCacheController::loadAnchorMap(const std::string& cachePath) {
   std::vector<std::pair<std::string, uint16_t>> anchors;
+
+  // v2.0.80: serialise against concurrent saveAnchorMap on the BG TOC worker.
+  // If the lock can't be acquired within the timeout we return an empty
+  // vector — caller treats that as "anchor not found yet", same as a missing
+  // file, and retries on the next poll tick.  Better than blocking the UI.
+  AnchorFileLock lock;
+  if (!lock) {
+    return anchors;
+  }
+
   const std::string mapPath = cachePath + ".anchors";
   File file = LittleFS.open(mapPath.c_str(), "r");
   if (!file) {
@@ -595,7 +653,8 @@ bool ReaderCacheController::shouldContinueIdleBackgroundCaching(Core& core) {
 
 bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderConfig& config, const int activeSpineIndex,
                                                        const bool coverExists, const int textStartIndex,
-                                                       const bool allowFarSweep, const AbortCallback& shouldAbort) {
+                                                       const bool allowFarSweep, const AbortCallback& shouldAbort,
+                                                       const Viewport& viewport) {
   auto* provider = core.content.asEpub();
   if (!provider || !provider->getEpub()) {
     return false;
@@ -667,6 +726,12 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
                                                                 epub, spine, resources_.renderer(), config,
                                                                 imageCachePath, true);
         if (!state.lookaheadParser) return didWork;
+        // v2.0.131 — plumb real viewport margins so R4.c .idx build
+        // uses the same paginator config as the render path.  Caller
+        // passes Viewport{} as default; non-zero values flow through.
+        static_cast<EpubChapterParser*>(state.lookaheadParser.get())
+            ->setStreamingViewport(viewport.marginTop, viewport.marginBottom,
+                                    viewport.marginLeft, viewport.marginRight);
         state.lookaheadParserSpineIndex = spine;
       }
       parser = state.lookaheadParser.get();
@@ -678,6 +743,9 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
                                                              epub, spine, resources_.renderer(), config,
                                                              imageCachePath, true);
       if (!transientParser) return didWork;
+      // v2.0.131 — plumb real viewport margins (see persistent path above).
+      transientParser->setStreamingViewport(viewport.marginTop, viewport.marginBottom,
+                                            viewport.marginLeft, viewport.marginRight);
       if (nextCache.load(config) && nextCache.isPartial()) {
         if (nextCache.extend(*transientParser, kDefaultCacheBatchPages, shouldAbort)) {
           didWork = true;
@@ -998,14 +1066,9 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     }
     parser = state.parser.get();
   } else if (type == ContentType::Html) {
-    if (!state.parser) {
-      state.parser = tryNewUnique<ContentParser, HtmlParser>("HtmlParser", contentPath_, core.content.cacheDir(),
-                                                              resources_.renderer(), config);
-      if (!state.parser) return;
-      state.parserSpineIndex = 0;
-    }
-    cachePath = contentCachePath(core.content.cacheDir(), config.fontId);
-    parser = state.parser.get();
+    // v2.0.162 — standalone HTML reading was dropped along with the
+    // legacy ChapterHtmlSlimParser pipeline; no parser is created so
+    // `parser` stays null below and the cache build path early-returns.
   } else if (type == ContentType::Txt) {
     if (!state.parser) {
       state.parser = tryNewUnique<ContentParser, PlainTextParser>("PlainTextParser", contentPath_,

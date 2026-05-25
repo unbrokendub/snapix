@@ -2,6 +2,9 @@
   "name": "Fb2",
   "version": "1.0.0",
   "description": "FictionBook 2.0 format parsing",
+  "dependencies": {
+    "SmolJpeg": "*"
+  },
   "build": {
     "srcDir": "src",
     "includeDir": "src"

@@ -4,6 +4,7 @@
 
 #define TAG "CACHE"
 
+#include <JpegToBmpConverter.h>  // v2.0.81: releaseAllPersistent() in cold-extend pre-flight
 #include <LittleFS.h>
 #include <Page.h>
 #include <Serialization.h>
@@ -262,6 +263,27 @@ bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
   serialization::writePod(file_, pageCount_);
   serialization::writePod(file_, static_cast<uint8_t>(isPartial_ ? 1 : 0));
   serialization::writePod(file_, lutOffset);
+
+  // v2.0.165 — fsync the write handle BEFORE any subsequent reader can
+  // open a fresh read handle on the same path.  Without this, LittleFS
+  // keeps the writes (LUT entries + updated header) in its internal
+  // buffer; a concurrent read on another file handle sees the updated
+  // header (lutOffset, pageCount) but the LUT bytes at that offset are
+  // not yet committed to flash.  Visible as:
+  //
+  //   [ERR] [CACHE] [CACHE] LUT truncated at entry 0 of 24
+  //                (lutOffset=275 file=371) path=.../sections/11.bin
+  //
+  // even though `file=371` matches what would be expected for 24
+  // entries × 4 bytes after the offset.  The reader reads what's
+  // on flash, not the writer's buffer.
+  //
+  // `flush()` forces the write through; once it returns, subsequent
+  // LittleFS.open(path, "r") sees a consistent view.  Cost: one
+  // flush per hot-extend (~5-10 ms typical), negligible vs the
+  // millisecond-scale page-cache writes themselves.
+  file_.flush();
+
   lutOffset_ = lutOffset;
   pageLut_ = lut;
   // Don't clear resident pages here — hot extend only appends pages,
@@ -305,16 +327,37 @@ bool PageCache::loadLut(std::vector<uint32_t>& lut) {
   }
 
   // Read existing LUT entries
+  // v2.0.138 — default-init `pos` and use checked read.  Pre-fix, an
+  // unchecked `readPod` left `pos` with whatever stack residue was
+  // there if the LittleFS read came up short (e.g. truncated file,
+  // concurrent write from BG worker mid-update).  That residue —
+  // typically a heap/code pointer like 0x3C50C000 — was pushed into
+  // pageLut_ and surfaced later as the "[CACHE] Invalid page position:
+  // 1011724288 (file size: NNNN)" error, after which the cache had to
+  // be cleared and rebuilt mid-session (cascading into the v2.0.136
+  // parser-reset path and visible content discontinuity).
   readFile_.seek(lutOffset_);
   lut.clear();
   lut.reserve(pageCount_);
   for (uint16_t i = 0; i < pageCount_; i++) {
-    uint32_t pos;
-    serialization::readPod(readFile_, pos);
+    uint32_t pos = 0;
+    if (!serialization::readPodChecked(readFile_, pos)) {
+      LOG_ERR(TAG, "[CACHE] LUT truncated at entry %u of %u (lutOffset=%u file=%zu) path=%s",
+              static_cast<unsigned>(i), static_cast<unsigned>(pageCount_),
+              static_cast<unsigned>(lutOffset_), fileSize, cachePath_.c_str());
+      lut.clear();
+      pageLut_.clear();
+      closeReadHandle();
+      return false;
+    }
     lut.push_back(pos);
   }
   pageLut_ = lut;
   clearResidentPages();
+  // v2.0.80: see comment in PageCache::load.  loadLut is called from extend
+  // paths and from ensureLutLoaded; in both cases the LUT is now in memory
+  // and follow-up reads (loadPage / prefetchWindow) re-open as needed.
+  closeReadHandle();
   return true;
 }
 
@@ -355,6 +398,9 @@ bool PageCache::loadRaw() {
 
   pageLut_.clear();
   clearResidentPages();
+  // v2.0.80: same rationale as PageCache::load — see comment there.  Header
+  // data is now in members; don't pin the FD past the read.
+  closeReadHandle();
   return true;
 }
 
@@ -497,6 +543,16 @@ bool PageCache::load(const RenderConfig& config) {
   config_ = config;
   pageLut_.clear();
   clearResidentPages();
+  // v2.0.80: close readFile_ now that the header is parsed into members.
+  // Pre-2.0.80 the handle persisted until destructor / explicit clear, which
+  // caused two-instance bin races: a TOC-jump handler loads spine N from the
+  // main thread, then the TOC worker creates its own PageCache for the same
+  // spine and tries to clear() / evict the bin file.  LittleFS refused with
+  // "Has open FD" because the main thread's readFile_ was still open.  All
+  // subsequent loadPage / prefetchWindow calls re-open via ensureReadHandle()
+  // anyway, so closing here just shifts cost (one open per page-read burst,
+  // matching the original SD-era behaviour).
+  closeReadHandle();
   LOG_INF(TAG, "Loaded: %d pages, partial=%d", pageCount_, isPartial_);
   return true;
 }
@@ -746,7 +802,9 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
   // On cold extend paths (FB2/TXT or rebuilt EPUB parser) they cause long
   // "indexing" bursts because we end up reparsing from the start just to
   // skip already cached pages. Respect the caller's requested batch there.
-  const uint16_t chunk =
+  // v2.0.114: non-const so the cold path can shrink to chunk=1 if heap is
+  // tight — see the chunk=1 fallback below.
+  uint16_t chunk =
       parser.canResume() ? (pageCount_ >= 30 ? std::min<uint16_t>(50, additionalPages) : additionalPages)
                          : additionalPages;
   const uint16_t currentPages = pageCount_;
@@ -875,7 +933,9 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
   // Rebuild the whole section into a temporary cache and promote it only if the
   // new file preserves at least the already-visible page count. This keeps the
   // previous cache usable when an aborted rebuild fails to catch up.
-  const uint16_t targetPages = pageCount_ + chunk;
+  // v2.0.114: non-const so the chunk=1 fallback below can update it after
+  // shrinking `chunk`.
+  uint16_t targetPages = pageCount_ + chunk;
 
   // v2.0.64: cold rebuild parses content from byte 0 with a fresh parser
   // session.  That session allocates significantly more transient memory
@@ -893,21 +953,113 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
   // the cold-rebuild-specific threshold; the caller treats this as a
   // transient failure and BG cache stays partial until heap recovers
   // (memory trim, parser reset, page eviction).
-  constexpr size_t kColdRebuildMinLargest = 25 * 1024;
-  constexpr size_t kColdRebuildMinFree = 50 * 1024;
-  const size_t freeBytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-  const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  // A one-page foreground fill has a much smaller transient target than the
+  // multi-page background rebuild; keep the strict gate for background work.
+  // v2.0.114: the per-chunk threshold table.  Multi-page chunks need
+  // ~25 KB largest contiguous to be safe (the ~6 KB Calibre word
+  // anchor map, ~10 KB makePages buffers, ~4-10 KB transient TextBlock
+  // pools per page accumulate).  Single-page rebuilds need only ~8 KB
+  // because nothing accumulates beyond one page's worth of state.
+  // The threshold pair is recomputed if we shrink `chunk` mid-flight
+  // below (chunk=1 fallback path).
+  auto coldRebuildThresholds = [](uint16_t c) -> std::pair<size_t, size_t> {
+    return (c <= 1) ? std::make_pair(static_cast<size_t>(8 * 1024), static_cast<size_t>(24 * 1024))
+                    : std::make_pair(static_cast<size_t>(25 * 1024), static_cast<size_t>(50 * 1024));
+  };
+  auto thresh = coldRebuildThresholds(chunk);
+  size_t kColdRebuildMinLargest = thresh.first;
+  size_t kColdRebuildMinFree = thresh.second;
+  size_t freeBytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   if (largestBlock < kColdRebuildMinLargest || freeBytes < kColdRebuildMinFree) {
+    // v2.0.81: try one heap-defrag pass before giving up.  The JPEGDEC
+    // instance (~25 KB) and decode arena (~7-20 KB) live mid-heap from the
+    // first image decode forward; they pin `largest` below the cold-rebuild
+    // threshold even when total free is plentiful.  Releasing them returns
+    // ~30-45 KB to one contiguous block.  Next image decode re-allocates
+    // them at the end of the heap (~10 ms cost) — far cheaper than the
+    // alternative: a permanently stuck cache extender that freezes the
+    // reader at the last cacheable page.
     LOG_INF(TAG,
-            "[CACHE] cold extend deferred — heap headroom insufficient (free=%u/%u largest=%u/%u)",
-            static_cast<unsigned>(freeBytes), static_cast<unsigned>(kColdRebuildMinFree),
-            static_cast<unsigned>(largestBlock), static_cast<unsigned>(kColdRebuildMinLargest));
-    return false;
+            "[CACHE] cold extend pre-flight tight (free=%u largest=%u) — releasing JPEG persistent state",
+            static_cast<unsigned>(freeBytes), static_cast<unsigned>(largestBlock));
+    JpegToBmpConverter::releaseAllPersistent();
+    freeBytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largestBlock < kColdRebuildMinLargest || freeBytes < kColdRebuildMinFree) {
+      // v2.0.114 — chunk=1 fallback before deferring.
+      //
+      // The empirical 25 KB largest / 50 KB free threshold for chunk>1
+      // accumulates from per-page transient allocations during a multi-page
+      // rebuild.  But a SINGLE-page rebuild only needs ~8 KB largest /
+      // ~24 KB free (one TextBlock pool, one wordWidths vector, one
+      // ParsedText spill, then released).  If multi-page is blocked but
+      // single-page would fit, shrink the chunk and proceed — the user
+      // sees ONE new page per extend call instead of nothing at all.
+      // Subsequent extend calls retry the full chunk size; once the heap
+      // recovers (parser reset, image decode flush) chunk>1 starts
+      // succeeding again.
+      if (chunk > 1) {
+        auto thresh1 = coldRebuildThresholds(1);
+        const size_t minLargest1 = thresh1.first;
+        const size_t minFree1 = thresh1.second;
+        if (largestBlock >= minLargest1 && freeBytes >= minFree1) {
+          LOG_INF(TAG,
+                  "[CACHE] cold extend chunk=1 fallback (free=%u largest=%u below %u/%u for chunk=%u, "
+                  "fits %u/%u for chunk=1)",
+                  static_cast<unsigned>(freeBytes), static_cast<unsigned>(largestBlock),
+                  static_cast<unsigned>(kColdRebuildMinFree),
+                  static_cast<unsigned>(kColdRebuildMinLargest),
+                  static_cast<unsigned>(chunk),
+                  static_cast<unsigned>(minFree1), static_cast<unsigned>(minLargest1));
+          chunk = 1;
+          targetPages = pageCount_ + 1;  // shrink rebuild scope to match
+          kColdRebuildMinLargest = minLargest1;
+          kColdRebuildMinFree = minFree1;
+          // Fall through — pre-flight now passes at chunk=1 thresholds.
+        } else {
+          LOG_INF(TAG,
+                  "[CACHE] cold extend deferred — heap headroom insufficient even for chunk=1 "
+                  "(free=%u/%u largest=%u/%u)",
+                  static_cast<unsigned>(freeBytes), static_cast<unsigned>(minFree1),
+                  static_cast<unsigned>(largestBlock), static_cast<unsigned>(minLargest1));
+          return false;
+        }
+      } else {
+        LOG_INF(TAG,
+                "[CACHE] cold extend deferred — heap headroom still insufficient after JPEG release "
+                "(free=%u/%u largest=%u/%u)",
+                static_cast<unsigned>(freeBytes), static_cast<unsigned>(kColdRebuildMinFree),
+                static_cast<unsigned>(largestBlock), static_cast<unsigned>(kColdRebuildMinLargest));
+        return false;
+      }
+    } else {
+      LOG_INF(TAG, "[CACHE] cold extend headroom recovered after JPEG release (free=%u largest=%u)",
+              static_cast<unsigned>(freeBytes), static_cast<unsigned>(largestBlock));
+    }
   }
   LOG_INF(TAG, "Cold extend from %d to %d pages (free=%u largest=%u)", currentPages, targetPages,
           static_cast<unsigned>(freeBytes), static_cast<unsigned>(largestBlock));
 
-  parser.reset();
+  // v2.0.110 (audit fix #4 — cold-rebuild trap elimination):
+  //
+  // Pre-fix: `parser.reset()` was called HERE before the rebuild started,
+  // wiping any in-progress parser state.  The intent was to force a clean
+  // re-parse from byte 0 for "stable pagination" (so newly-emitted pages
+  // wouldn't mix with the kept old cache).  Side effect: every cold
+  // rebuild followed by partial-success-or-preempt left the parser in a
+  // reset state, so the NEXT extend attempt re-entered cold path again.
+  // That's the "cold rebuild trap" — Agent #2 audit root cause of
+  // "buttons frozen for 25-75 s, then fallback to old page" symptom.
+  //
+  // The reset is unnecessary: `rebuiltCache.create(parser, ...)` already
+  // calls `parser.parsePages(...)` which initializes the parser from
+  // scratch internally when `initialized_ == false` OR when
+  // `canResume() == false`.  If the parser comes in WITH a suspended
+  // resumable state (from a previous hot extend or cooperative abort),
+  // `parsePages` resumes from byte cursor — saving the cold-rebuild
+  // penalty entirely.  Either path produces consistent pages in the
+  // sidecar .rebuild file; the kept old cache is untouched.
   const std::string rebuildPath = cachePath_ + ".rebuild";
   if (LittleFS.exists(rebuildPath.c_str())) {
     LittleFS.remove(rebuildPath.c_str());
@@ -918,17 +1070,23 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
   const bool canPromoteRebuild = rebuildResult && rebuiltCache.pageCount() >= currentPages;
 
   if (!canPromoteRebuild) {
-    // The parser state now belongs to the discarded rebuild lineage, not to the
-    // currently active cache file. Keeping it resumable here would allow a later
-    // hot-extend to append pages from an incompatible parser position onto the
-    // old cache, corrupting section pagination.
-    parser.reset();
+    // v2.0.110: do NOT reset parser here either.  Pre-fix this wiped
+    // suspended state from the partial rebuild, guaranteeing the next
+    // extend also went cold.  Now we KEEP whatever cooperative-suspend
+    // state the parser holds — next extend can resume from where this
+    // rebuild left off, going hot instead of cold.  The pagination-
+    // consistency concern is moot here because the sidecar .rebuild
+    // file is DISCARDED (line below) and the kept old cache is the
+    // authoritative source.  The parser's byte cursor advanced into
+    // the chapter source during rebuild, so a future hot extend from
+    // that cursor produces pages consistent with what it would produce
+    // if cold-rebuilt from the same cursor.
     if (LittleFS.exists(rebuildPath.c_str())) {
       LittleFS.remove(rebuildPath.c_str());
     }
-    LOG_INF(TAG, "[CACHE] cold extend kept previous path=%s rebuilt=%u rebuiltPages=%u current=%u",
+    LOG_INF(TAG, "[CACHE] cold extend kept previous path=%s rebuilt=%u rebuiltPages=%u current=%u canResumeNext=%u",
             cachePath_.c_str(), static_cast<unsigned>(rebuildResult), static_cast<unsigned>(rebuiltCache.pageCount()),
-            static_cast<unsigned>(currentPages));
+            static_cast<unsigned>(currentPages), static_cast<unsigned>(parser.canResume()));
     // Return false to break the caller's retry loop — the rebuild couldn't
     // produce enough pages and retrying with the same memory won't help.
     return false;
@@ -1040,6 +1198,14 @@ std::shared_ptr<Page> PageCache::loadPage(uint16_t pageNum) {
   readFile_.seek(pagePos);
   auto page = Page::deserialize(readFile_);
 
+  // v2.0.80: release the FD as soon as the deserialize finishes.  Pre-2.0.80
+  // the handle persisted across page-turn boundaries, blocking eviction /
+  // rename when another task (e.g. TOC-jump worker) needed to mutate the
+  // same path.  Keeping it open was a micro-optimisation for consecutive
+  // page-reads; the resident-page cache already covers that case, so
+  // closing here only costs an extra LittleFS.open on a true cache miss.
+  closeReadHandle();
+
   if (page) {
     auto sharedPage = std::shared_ptr<Page>(std::move(page));
     putResidentPage(pageNum, sharedPage);
@@ -1100,6 +1266,10 @@ void PageCache::prefetchWindow(uint16_t centerPage, int direction, uint8_t span)
       putResidentPage(pageNum, std::shared_ptr<Page>(std::move(page)));
     }
   }
+  // v2.0.80: release the FD now that the prefetch burst is complete.  See
+  // comment in loadPage() — keeping it open across navigation boundaries
+  // caused the eviction-on-TOC-jump bug.
+  closeReadHandle();
   perfLog("page-prefetch", startMs, "(center=%u dir=%d resident=%zu)", centerPage, direction, residentPages_.size());
 }
 

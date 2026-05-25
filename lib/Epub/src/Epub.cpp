@@ -450,19 +450,69 @@ bool Epub::clearCache() const {
 void Epub::setupCacheDir() const {
   // v2.0.73: cache lives on LittleFS now.  ensureFlashDir walks parents,
   // so we don't need the per-subdir mkdir dance — but the explicit subdirs
-  // (sections/chapters/images) still need to exist as empty leaves before
-  // their respective writers create files inside.
+  // (sections/images) still need to exist as empty leaves before their
+  // respective writers create files inside.
+  //
+  // v2.0.163: `chapters/` subdir no longer created.  v2.0.159's markerize-
+  // from-ZIP eliminated the temp `chapters/N.src.html` files; v2.0.161
+  // deleted the legacy prepareChapterHtml that wrote them.  For
+  // upgraders coming from <=2.0.160, run a one-shot cleanup that removes
+  // any orphaned `chapters/` subtree under this book's cache dir —
+  // reclaims ~50-100 KB of LittleFS per book that hadn't been opened
+  // since v2.0.161 wiped its in-memory references.
   if (!cache_fs::ensureFlashDir(cachePath)) {
     LOG_ERR(TAG, "Failed to create cache dir: %s", cachePath.c_str());
   }
   if (!cache_fs::ensureFlashDir(cachePath + "/sections")) {
     LOG_ERR(TAG, "Failed to create sections dir");
   }
-  if (!cache_fs::ensureFlashDir(cachePath + "/chapters")) {
-    LOG_ERR(TAG, "Failed to create chapters dir");
-  }
   if (!cache_fs::ensureFlashDir(cachePath + "/images")) {
     LOG_ERR(TAG, "Failed to create images dir");
+  }
+
+  // v2.0.163 + v2.0.167 one-shot orphan-cleanup pass.  Removes:
+  //   * <cachePath>/chapters/    — temp HTML files, gone since v2.0.159
+  //   * <cachePath>/markers/     — markers + idx, moved to UnifiedCache in v2.0.167
+  //   * <cachePath>/metrics.bin  — moved to UnifiedCache::Metrics in v2.0.166
+  std::function<bool(const std::string&)> rmTree = [&](const std::string& p) -> bool {
+    if (!LittleFS.exists(p.c_str())) return true;
+    File dir = LittleFS.open(p.c_str(), "r");
+    if (!dir) return false;
+    if (!dir.isDirectory()) {
+      dir.close();
+      return LittleFS.remove(p.c_str());
+    }
+    File entry = dir.openNextFile();
+    while (entry) {
+      const std::string entryPath = p + "/" + entry.name();
+      const bool isDir = entry.isDirectory();
+      entry.close();
+      if (isDir) {
+        if (!rmTree(entryPath)) {
+          dir.close();
+          return false;
+        }
+      } else {
+        LittleFS.remove(entryPath.c_str());
+      }
+      entry = dir.openNextFile();
+    }
+    dir.close();
+    return LittleFS.rmdir(p.c_str());
+  };
+  const std::string chaptersDir = cachePath + "/chapters";
+  if (LittleFS.exists(chaptersDir.c_str()) && rmTree(chaptersDir)) {
+    LOG_INF(TAG, "[CONTENT][EPUB] cleanup: removed orphaned chapters/ dir from %s", cachePath.c_str());
+  }
+  const std::string markersDir = cachePath + "/markers";
+  if (LittleFS.exists(markersDir.c_str()) && rmTree(markersDir)) {
+    LOG_INF(TAG, "[CONTENT][EPUB] cleanup: removed legacy markers/ dir from %s (migrated to UnifiedCache)",
+            cachePath.c_str());
+  }
+  const std::string metricsPath = cachePath + "/metrics.bin";
+  if (LittleFS.exists(metricsPath.c_str()) && LittleFS.remove(metricsPath.c_str())) {
+    LOG_INF(TAG, "[CONTENT][EPUB] cleanup: removed legacy metrics.bin from %s (migrated to UnifiedCache)",
+            cachePath.c_str());
   }
 }
 
@@ -901,6 +951,17 @@ Epub::ItemReadResult Epub::readItemContentsToStreamDetailed(const std::string& i
     return ItemReadResult::NotFound;
   }
 
+  // v2.0.174 — ARCHITECTURAL FIX for "InflateReader init failed" wall.  When
+  // the caller passes dictBuffer=nullptr, uzlib heap-allocates its own 32 KB
+  // ring buffer per call.  After even a single "switch books" sequence the
+  // heap fragments enough that the 32 KB contiguous request fails (largest
+  // free drops to ~30 KB).  Reuse the always-static 48 KB display framebuffer
+  // (already idle during inflate on e-paper: panel-side RAM holds the visible
+  // image; the framebuffer itself is only touched during render→upload
+  // bursts that bracket the inflate window).  Zero added BSS cost.  Existing
+  // callers that explicitly passed sharedZipDictBuffer() see no change.
+  if (dictBuffer == nullptr) dictBuffer = sharedZipDictBuffer();
+
   // IRI references from OPF manifest or XHTML content may contain percent-
   // encoded characters and fragment identifiers.  Decode before ZIP lookup.
   const std::string path = FsHelpers::normalisePath(
@@ -932,6 +993,26 @@ bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, con
                                     uint8_t* dictBuffer, const std::function<bool()>& shouldAbort) const {
   return readItemContentsToStreamDetailed(itemHref, out, chunkSize, dictBuffer, shouldAbort) ==
          ItemReadResult::Success;
+}
+
+std::unique_ptr<ZipItemReader> Epub::openItemStream(const std::string& itemHref, const size_t chunkSize,
+                                                    uint8_t* dictBuffer) const {
+  if (itemHref.empty()) {
+    LOG_ERR(TAG, "openItemStream: empty href");
+    return nullptr;
+  }
+  // v2.0.174 — same nullptr→framebuffer fallback as readItemContentsToStreamDetailed.
+  // This is the path EpubChapterParser::tryMarkerizeChapter takes for streaming
+  // chapter XHTML through HtmlStripper; pre-fix it allocated 32 KB on the heap
+  // per chapter parse and failed with `InflateReader init failed (largest free=
+  // 30708)` whenever the second EPUB in a session needed a new chapter parse.
+  // See the readItemContentsToStreamDetailed comment for the safety argument.
+  if (dictBuffer == nullptr) dictBuffer = sharedZipDictBuffer();
+  const std::string path = FsHelpers::normalisePath(
+      FsHelpers::percentDecode(FsHelpers::stripQueryAndFragment(itemHref)));
+  // ZipFile is a transient — the returned reader holds its own file handle
+  // and outlives the ZipFile instance.
+  return ZipFile(filepath).openItemStream(path.c_str(), chunkSize, dictBuffer);
 }
 
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {

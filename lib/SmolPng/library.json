@@ -1,0 +1,17 @@
+{
+  "name": "SmolPng",
+  "version": "1.0.0",
+  "description": "Minimal one-pass 1-bit PNG decoder ported from smol-epub png.rs. Parses PNG chunks + uzlib deflate + scanline filter inversion + RGB-to-luma + Floyd-Steinberg dither, emitting 1-bit BMP directly. Mirrors the SmolJpeg pattern: no intermediate full-image grayscale buffer. Phase 6 of the snapix v3 refactor; activates under SNAPIX_SMOL_PNG.",
+  "dependencies": {
+    "uzlib": "*"
+  },
+  "platforms": "espressif32",
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

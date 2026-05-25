@@ -84,6 +84,30 @@ constexpr int kFb2TocJumpMinimumGrowthPages = 24;
 constexpr int kFb2TocJumpColdStartCapPages = 72;
 constexpr int kFb2TocHintInflationDivisor = 2;
 
+// EPUB TOC jump tuning (v2.0.102 — amortize per-cycle parse overhead).
+// First batch stays at 1 page so we can surface page-0 of the chapter
+// quickly via pendingTocJumpDeferredDisplay_; subsequent batches use a
+// much larger size so the ~900 ms task-launch + ~1700 ms disk-write
+// fixed cost per cycle is amortized over many pages.  Observed on a
+// 137 KB Calibre chapter: 14 cycles × 11 s = 154 s with batch=5;
+// projected 4-5 cycles × ~20 s = 80-100 s with batch=25 (~40% faster).
+// `shouldAbort` is checked per-line inside the parser so a user press
+// preempts within ~100 ms regardless of batch size — batching just
+// reduces the dead-air between checks, doesn't increase max latency.
+constexpr uint16_t kEpubTocJumpFirstBatchPages = 1;
+constexpr uint16_t kEpubTocJumpFollowUpBatchPages = 25;
+// v2.0.110 (audit fix #3 — TOC worker kill condition):
+// After page 0 has been surfaced to the user via deferred-display, the
+// worker runs at most this many additional follow-up batches before
+// exiting cleanly — even if the anchor isn't found.  Page 0 is already
+// renderable; further anchor search is no longer user-critical and
+// shouldn't compete with input responsiveness.  Background cache
+// controller picks up the chapter extension at priority=0 on its own
+// schedule.  1 budget × 25 pages = ~25 pages of post-render search,
+// covers most TOC anchors within the first few thousand bytes of any
+// chapter.
+constexpr uint8_t kEpubTocJumpFollowUpBatchBudget = 1;
+
 inline int estimateFb2TocTargetPageHint(const Fb2* fb2, const uint32_t estimatedTotalPages,
                                         const Fb2::TocItem& tocItem) {
   if (!fb2 || estimatedTotalPages == 0) {

@@ -1,6 +1,7 @@
 #include "JpegToBmpConverter.h"
 
 #include <Arduino.h>
+#include <FS.h>          // v2.0.79: fs::File for LittleFS-backed JPEG inputs
 #include <JPEGDEC.h>
 #include <Logging.h>
 #include <esp_heap_caps.h>
@@ -130,6 +131,104 @@ int32_t jpegSeek(JPEGFILE* pFile, int32_t iPosition) {
 
 // JPEGDEC close callback — we own the FsFile lifetime in the caller.
 void jpegClose(void* /*handle*/) {}
+
+// ---------------------------------------------------------------------------
+// v2.0.79: LittleFS-backed pump.  EPUB chapter image temp files (and EPUB
+// cover/thumb temp files) live on LittleFS post-v2.0.73; the existing FsFile
+// pump only knows how to read from SD via SDFat.  We mirror the pump struct
+// + read/seek callbacks with an `fs::File` underneath so JPEGDEC can pull
+// bytes through the same hot path.
+//
+// Notes:
+//   * fs::File::read returns size_t (not int — no error sentinel; 0 means
+//     EOF).  We treat 0 as "no more data" and break the fill loop.
+//   * LittleFS lives on a different SPI controller than the SD card / display
+//     bus, so reads don't need the SharedBusLock.  Acquiring it here would
+//     pointlessly stall the display thread.
+//   * Buffer size matches the FsFile pump (4 KB) for consistent JPEGDEC
+//     read-ahead behaviour.
+// ---------------------------------------------------------------------------
+struct LittleFsJpegPumpCtx {
+  fs::File* file;
+  static constexpr size_t kBufferSize = 4096;
+  uint8_t* buffer;
+  size_t bufferPos;
+  size_t bufferFilled;
+  int32_t streamPos;
+};
+
+int32_t jpegReadLittleFs(JPEGFILE* pFile, uint8_t* pBuf, int32_t iLen) {
+  auto* ctx = static_cast<LittleFsJpegPumpCtx*>(pFile->fHandle);
+  if (!ctx || !ctx->file || !*ctx->file) return 0;
+
+  int32_t copied = 0;
+  while (copied < iLen) {
+    if (ctx->bufferPos >= ctx->bufferFilled) {
+      const size_t readResult = ctx->file->read(ctx->buffer, LittleFsJpegPumpCtx::kBufferSize);
+      ctx->bufferPos = 0;
+      if (readResult == 0) {
+        ctx->bufferFilled = 0;
+        break;
+      }
+      ctx->bufferFilled = readResult;
+    }
+    const size_t available = ctx->bufferFilled - ctx->bufferPos;
+    const size_t want = static_cast<size_t>(iLen - copied);
+    const size_t take = available < want ? available : want;
+    memcpy(pBuf + copied, ctx->buffer + ctx->bufferPos, take);
+    ctx->bufferPos += take;
+    copied += static_cast<int32_t>(take);
+  }
+  ctx->streamPos += copied;
+  return copied;
+}
+
+int32_t jpegSeekLittleFs(JPEGFILE* pFile, int32_t iPosition) {
+  auto* ctx = static_cast<LittleFsJpegPumpCtx*>(pFile->fHandle);
+  if (!ctx || !ctx->file || !*ctx->file) return 0;
+
+  if (iPosition == ctx->streamPos) return 1;  // no-op; pump buffer still valid
+
+  if (!ctx->file->seek(static_cast<uint32_t>(iPosition))) return 0;
+  ctx->bufferPos = 0;
+  ctx->bufferFilled = 0;
+  ctx->streamPos = iPosition;
+  return 1;
+}
+
+// Forward declaration — defined ~600 lines below in this same anonymous
+// namespace, alongside decodeImpl(FsFile&,...).
+bool decodeImplCallbacks(JPEG_READ_CALLBACK pfnRead, JPEG_SEEK_CALLBACK pfnSeek,
+                         JPEG_CLOSE_CALLBACK pfnClose, void* fHandle, int32_t iSize,
+                         Print& bmpOut, int maxW, int maxH,
+                         const std::function<bool()>& shouldAbort);
+
+// LittleFS pump adapter: sets up a LittleFsJpegPumpCtx around the file and
+// forwards to decodeImplCallbacks.  Mirror of decodeImpl(FsFile&,...).
+bool decodeImplLittleFs(fs::File& jpegFile, Print& bmpOut, int maxW, int maxH,
+                        const std::function<bool()>& shouldAbort) {
+  if (!jpegFile) return false;
+  if (!jpegFile.seek(0)) return false;
+
+  const int32_t fileSize = static_cast<int32_t>(jpegFile.size());
+  if (fileSize <= 0) return false;
+
+  std::unique_ptr<uint8_t[]> pumpBuf(new (std::nothrow) uint8_t[LittleFsJpegPumpCtx::kBufferSize]);
+  if (!pumpBuf) {
+    LOG_ERR(TAG, "JPEG OOM allocating %u-byte LittleFS pump buffer",
+            static_cast<unsigned>(LittleFsJpegPumpCtx::kBufferSize));
+    return false;
+  }
+
+  LittleFsJpegPumpCtx pump = {.file = &jpegFile,
+                              .buffer = pumpBuf.get(),
+                              .bufferPos = 0,
+                              .bufferFilled = 0,
+                              .streamPos = 0};
+
+  return decodeImplCallbacks(jpegReadLittleFs, jpegSeekLittleFs, jpegClose, &pump, fileSize,
+                             bmpOut, maxW, maxH, shouldAbort);
+}
 
 inline void write16(Print& out, const uint16_t value) {
   out.write(value & 0xFF);
@@ -660,15 +759,18 @@ void freeContext(DecodeCtx& ctx) {
 // aborting JPEG decodes mid-flight.  v2.0.54 holds onto the instance so the
 // 25 KB chunk lives at a stable address — heap fluctuations during decode
 // are now bounded by just the scratch buffers (~5-10 KB).
+// v2.0.81: lifted from function-local static to anonymous-namespace so the
+// public release entry point can free it on demand.
+JPEGDEC* gSharedJpegDec = nullptr;
+
 JPEGDEC* getSharedJpegDec() {
-  static JPEGDEC* shared = nullptr;
-  if (!shared) {
-    shared = new (std::nothrow) JPEGDEC();
-    if (!shared) {
+  if (!gSharedJpegDec) {
+    gSharedJpegDec = new (std::nothrow) JPEGDEC();
+    if (!gSharedJpegDec) {
       LOG_ERR(TAG, "JPEGDEC: OOM allocating shared workspace (~25 KB)");
     }
   }
-  return shared;
+  return gSharedJpegDec;
 }
 
 // Generic stream-source decoder, callable with any JPEGDEC pump (FsFile-backed
@@ -967,6 +1069,38 @@ void JpegToBmpConverter::warmup(size_t arenaBytes) {
           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
+// v2.0.81: heap-defrag release entry points.  See header for rationale and
+// safety constraints.  These work in tandem: releasing only the arena
+// (~7-20 KB) leaves JPEGDEC's pin (~25 KB), which still bisects the heap
+// into <23.5 KB chunks; releasing only JPEGDEC leaves the arena pin.  The
+// combined release returns one ~40 KB contiguous run.
+void JpegToBmpConverter::releaseDecodeArena() {
+  DecodeArena& arena = getSharedArena();
+  if (!arena.base) return;
+  const size_t freed = arena.capacity;
+  delete[] arena.base;
+  arena.base = nullptr;
+  arena.capacity = 0;
+  LOG_INF(TAG, "JPEG arena released (%u bytes freed; free=%u largest=%u)",
+          static_cast<unsigned>(freed),
+          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
+
+void JpegToBmpConverter::releaseSharedInstance() {
+  if (!gSharedJpegDec) return;
+  delete gSharedJpegDec;
+  gSharedJpegDec = nullptr;
+  LOG_INF(TAG, "JPEGDEC instance released (~25 KB; free=%u largest=%u)",
+          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
+
+void JpegToBmpConverter::releaseAllPersistent() {
+  releaseDecodeArena();
+  releaseSharedInstance();
+}
+
 // Stub kept solely so the static declaration in JpegToBmpConverter.h still
 // resolves at link time.  This signature dates back to the picojpeg era and
 // nothing inside this file references it; the decoder uses its own pump
@@ -1033,6 +1167,65 @@ bool JpegToBmpConverter::jpegStreamToBmp(JPEG_READ_CALLBACK pfnRead, JPEG_SEEK_C
                                           const std::function<bool()>& shouldAbort) {
   return decodeImplCallbacks(pfnRead, pfnSeek, pfnClose, fHandle, fileSize, bmpOut, targetMaxWidth,
                              targetMaxHeight, shouldAbort);
+}
+
+// v2.0.79: LittleFS-backed entry point.  Used by ImageConverterFactory when
+// the input image temp file lives on internal flash (EPUB chapter inline
+// images and EPUB cover/thumb temp files since v2.0.73).  Output Print&
+// may still be an SD FsFile, a LittleFS fs::File, or any other Stream — the
+// converter doesn't care which.
+bool JpegToBmpConverter::jpegLittleFsFileToBmpStreamWithSize(fs::File& jpegFile, Print& bmpOut,
+                                                              int targetMaxWidth, int targetMaxHeight,
+                                                              const std::function<bool()>& shouldAbort) {
+  return decodeImplLittleFs(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, shouldAbort);
+}
+
+// v2.0.83: header-only peek for LittleFS-backed JPEGs.  Parallels the
+// existing peekDimensions(FsFile&,...) but takes an Arduino fs::File.  Used
+// by ChapterHtmlSlimParser::cacheImage when running in async-decode mode:
+// it extracts the JPEG to a LittleFS temp file, peeks dimensions for the
+// page-layout pass, and defers the full BMP conversion to a BG worker.
+//
+// JPEGDEC open() parses the SOF marker as part of its lazy init, which on
+// a 240×300 source touches ~1-3 KB of file data.  Even on a Calibre EPUB's
+// deflate-everything packing the temp JPEG is already inflated by the
+// extract step, so peek runs in ~30-50 ms.
+bool JpegToBmpConverter::peekDimensionsLittleFs(fs::File& jpegFile, int& outWidth, int& outHeight) {
+  outWidth = 0;
+  outHeight = 0;
+  if (!jpegFile) return false;
+  if (!jpegFile.seek(0)) return false;
+
+  const int32_t fileSize = static_cast<int32_t>(jpegFile.size());
+  if (fileSize <= 0) return false;
+
+  std::unique_ptr<uint8_t[]> pumpBuf(new (std::nothrow) uint8_t[LittleFsJpegPumpCtx::kBufferSize]);
+  if (!pumpBuf) return false;
+
+  LittleFsJpegPumpCtx pump = {.file = &jpegFile,
+                              .buffer = pumpBuf.get(),
+                              .bufferPos = 0,
+                              .bufferFilled = 0,
+                              .streamPos = 0};
+
+  // Borrow the persistent JPEGDEC instance.  Open + read SOF + close —
+  // does not allocate the decode arena (that only fires inside decode()).
+  JPEGDEC* jpeg = getSharedJpegDec();
+  if (!jpeg) return false;
+
+  if (jpeg->open(&pump, fileSize, jpegClose, jpegReadLittleFs, jpegSeekLittleFs, jpegDraw) == 0) {
+    LOG_DBG(TAG, "peekDimensionsLittleFs: open failed err=%d", jpeg->getLastError());
+    return false;
+  }
+  if (jpeg->getJPEGType() == JPEG_MODE_PROGRESSIVE) {
+    LOG_DBG(TAG, "peekDimensionsLittleFs: progressive JPEG not supported");
+    jpeg->close();
+    return false;
+  }
+  outWidth = jpeg->getWidth();
+  outHeight = jpeg->getHeight();
+  jpeg->close();
+  return outWidth > 0 && outHeight > 0;
 }
 
 // ---------------------------------------------------------------------------

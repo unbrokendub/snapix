@@ -2,6 +2,7 @@
 
 #include "Fb2.h"
 #include <GfxRenderer.h>
+#include <UnifiedCache.h>  // v2.0.167 — Phase 5 unified streaming cache
 #include <Logging.h>
 #include <Page.h>
 #include <ParsedText.h>
@@ -9,6 +10,23 @@
 #include <SharedSpiLock.h>
 #include <Utf8.h>
 #include <blocks/ImageBlock.h>
+
+// v2.0.117 Phase R2.6 — markerize side-channel for FB2.  See header.  Active
+// only when SNAPIX_MARKERIZER=1 (currently only in v3_alpha env).
+//
+// v2.0.130 R4.c — adds the streaming paginator + adapter so the parser
+// can build the `.idx` upfront via a MEASURE-only walk, eliminating
+// the legacy parser dependency even on a section's first visit.
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+#include <Arduino.h>          // vTaskDelay (yield between markerize chunks)
+#include <FS.h>
+#include <Fb2Stripper.h>
+#include <GfxRendererPaginatorAdapter.h>
+#include <LittleFS.h>
+#include <MarkerizedPageRender.h>
+#include <MarkerizeChapter.h>
+#include <StreamingPaginator.h>
+#endif
 
 #define TAG "FB2_PARSE"
 
@@ -65,6 +83,113 @@ Fb2Parser::Fb2Parser(std::string filepath, GfxRenderer& renderer, const RenderCo
 
 Fb2Parser::~Fb2Parser() { reset(); }
 
+void Fb2Parser::setFb2(const Fb2* fb2) {
+  fb2_ = fb2;
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  if (fb2_) {
+    markersDir_ = fb2_->getCachePath() + "/markers";
+  } else {
+    markersDir_.clear();
+  }
+#endif
+}
+
+// =============================================================================
+// v2.0.117 Phase R2.6 — markerize side-channel for FB2.  Best-effort, side-
+// channel: failures log but don't fail the parser.  Compiled out entirely
+// when SNAPIX_MARKERIZER=0.
+//
+// Lifecycle: called ONCE per Fb2Parser instance from `parsePages` init path
+// (guarded by `markerizeAttempted_`).  For section-scoped parsers, markerizes
+// just the [startOffset_..endOffset_) byte range.  For full-file parsers,
+// markerizes the entire FB2 source from byte 0.
+// =============================================================================
+bool Fb2Parser::tryMarkerizeSection() {
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  if (!fb2_ || filepath_.empty()) return false;
+
+  // v2.0.167 — markers now live as a UnifiedCache::Markers segment in
+  // <fb2CachePath>/streaming.cache, keyed by sectionIndex.
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
+  size_t existingSize = 0;
+  if (cache->segmentSize(snapix::unifiedcache::Kind::Markers,
+                         static_cast<uint16_t>(startingSectionIndex_), &existingSize)) {
+    LOG_INF(TAG, "[CONTENT][FB2] markerize cache hit section=%d (UnifiedCache::Markers size=%zu)",
+            startingSectionIndex_, existingSize);
+    return true;
+  }
+
+  // Open SD source separately from the parser's `file_` so the parser's
+  // position cursor isn't disturbed.  Same SPI bus is shared — caller
+  // must ensure markerize runs OUTSIDE any SharedBusLock (we open inside
+  // our own).
+  FsFile srcFile;
+  if (!SdMan.openFileForRead("FB2_M", filepath_, srcFile)) {
+    LOG_ERR(TAG, "[CONTENT][FB2] markerize open source failed path=%s", filepath_.c_str());
+    return false;
+  }
+  if (startOffset_ > 0) {
+    snapix::spi::SharedBusLock lk;
+    srcFile.seek(startOffset_);
+  }
+
+  constexpr size_t kChunkBufBytes = 4096;
+  uint8_t chunkBuf[kChunkBufBytes];
+  uint32_t bytesRemaining = (sectionScoped_ && endOffset_ > startOffset_)
+                                ? (endOffset_ - startOffset_)
+                                : UINT32_MAX;
+
+  snapix::smolport::MarkerizeStats stats{};
+  snapix::smolport::MarkerizeStatus status = snapix::smolport::MarkerizeStatus::ReadError;
+  const bool ok = cache->writeSegmentStreamingDeferred(
+      snapix::unifiedcache::Kind::Markers, static_cast<uint16_t>(startingSectionIndex_),
+      [&](File& outFile) -> bool {
+        auto readFn = [&srcFile, &bytesRemaining](uint8_t* buf, size_t bufSize) -> int {
+          if (bytesRemaining == 0) return 0;
+          int n;
+          {
+            snapix::spi::SharedBusLock lk;
+            if (!srcFile.available()) return 0;
+            size_t toRead = bufSize;
+            if (toRead > bytesRemaining) toRead = bytesRemaining;
+            n = srcFile.read(buf, toRead);
+          }
+          if (n < 0) return -1;
+          if (n > 0) bytesRemaining -= static_cast<uint32_t>(n);
+          return n;
+        };
+        auto writeFn = [&outFile](const uint8_t* data, size_t len) -> bool {
+          if (!outFile) return false;
+          const size_t n = outFile.write(data, len);
+          return n == len;
+        };
+        status = snapix::smolport::markerizeChapter(
+            snapix::smolport::HtmlStripper::Mode::Fb2, readFn, writeFn, chunkBuf, sizeof(chunkBuf),
+            {}, &stats);
+        return status == snapix::smolport::MarkerizeStatus::Success;
+      });
+
+  srcFile.close();
+
+  if (!ok || status != snapix::smolport::MarkerizeStatus::Success) {
+    LOG_ERR(TAG,
+            "[CONTENT][FB2] markerize failed section=%d status=%u in=%u out=%u chunks=%u (UnifiedCache ok=%u)",
+            startingSectionIndex_, static_cast<unsigned>(status),
+            static_cast<unsigned>(stats.inputBytes), static_cast<unsigned>(stats.outputBytes),
+            static_cast<unsigned>(stats.chunksProcessed), static_cast<unsigned>(ok));
+    return false;
+  }
+
+  LOG_INF(TAG,
+          "[CONTENT][FB2] markerize done section=%d in=%u out=%u chunks=%u (UnifiedCache::Markers)",
+          startingSectionIndex_, static_cast<unsigned>(stats.inputBytes),
+          static_cast<unsigned>(stats.outputBytes), static_cast<unsigned>(stats.chunksProcessed));
+  return true;
+#else
+  return true;
+#endif
+}
+
 void Fb2Parser::releaseStreamingState() {
   if (xmlParser_) {
     XML_ParserFree(xmlParser_);
@@ -117,6 +242,10 @@ void Fb2Parser::reset() {
   fileSize_ = 0;
   lastParsedOffset_ = startOffset_;
   anchorMap_.clear();
+  // v2.0.132 — drop any in-flight short-circuit state.
+  shortCircuitActive_ = false;
+  shortCircuitTotalPages_ = 0;
+  shortCircuitNextPage_ = 0;
 }
 
 void Fb2Parser::requestXmlSuspend() {
@@ -192,6 +321,32 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
   stopRequested_ = false;
   shouldAbort_ = shouldAbort;
 
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  // v2.0.132 — R4.b STATEFUL short-circuit continuation.  See parallel
+  // EpubChapterParser::parsePages branch for rationale.  Cache batches
+  // with maxPages=1 typically — drain one batch worth of empty pages
+  // per call until shortCircuitNextPage_ == shortCircuitTotalPages_.
+  if (shortCircuitActive_) {
+    const uint16_t startPage = shortCircuitNextPage_;
+    while (shortCircuitNextPage_ < shortCircuitTotalPages_) {
+      if (maxPages > 0 && pagesCreated_ >= maxPages) break;
+      onPageComplete_(std::unique_ptr<Page>(new Page));
+      pagesCreated_++;
+      shortCircuitNextPage_++;
+    }
+    hasMore_ = (shortCircuitNextPage_ < shortCircuitTotalPages_);
+    if (!hasMore_) {
+      shortCircuitActive_ = false;
+    }
+    LOG_INF(TAG,
+            "[CONTENT][FB2] [STREAM] short-circuit batch section=%d emitted=%u..%u of %u hasMore=%u",
+            startingSectionIndex_, static_cast<unsigned>(startPage),
+            static_cast<unsigned>(shortCircuitNextPage_),
+            static_cast<unsigned>(shortCircuitTotalPages_), static_cast<unsigned>(hasMore_));
+    return pagesCreated_ > 0;
+  }
+#endif
+
   if (!canResume()) {
     reset();
 
@@ -220,6 +375,255 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
     XML_SetUserData(xmlParser_, this);
     XML_SetElementHandler(xmlParser_, startElement, endElement);
     XML_SetCharacterDataHandler(xmlParser_, characterData);
+
+    // v2.0.117 Phase R2.6 — markerize side-channel runs ONCE per Fb2Parser
+    // instance (one-shot via markerizeAttempted_), before the legacy Expat
+    // pass kicks in.  Best-effort: failure logs but doesn't block the
+    // legacy parser.  Compiled out entirely in default env.
+    if (!markerizeAttempted_) {
+      markerizeAttempted_ = true;
+      (void)tryMarkerizeSection();
+    }
+
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+    // v2.0.130 R4.c — build `.idx` upfront via MEASURE-only walk so
+    // the R4.b short-circuit below fires on FIRST visit, not just
+    // repeats.  See parallel change in EpubChapterParser::parsePages
+    // for the full rationale and cost analysis.
+    if (fb2_) {
+      // v2.0.167 — markers + idx in UnifiedCache (per book streaming.cache).
+      auto ucache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
+      do {
+        if (ucache->segmentSize(snapix::unifiedcache::Kind::Idx,
+                                static_cast<uint16_t>(startingSectionIndex_), nullptr)) {
+          break;  // R4.b will handle existing idx
+        }
+        File mf;
+        size_t markersStreamSize = 0;
+        if (!ucache->openSegmentReader(snapix::unifiedcache::Kind::Markers,
+                                        static_cast<uint16_t>(startingSectionIndex_), mf,
+                                        &markersStreamSize)) {
+          break;  // markerize hasn't produced markers yet
+        }
+
+        // v2.0.131 — paginator config from real viewport margins (set via
+        // setStreamingViewport from ReaderStateAsyncJobs).  See parallel
+        // change in EpubChapterParser.cpp for the rationale (avoids the
+        // configHash mismatch and pageCount mismatch that caused the
+        // v2.0.130 white-screen-on-page-turn bug).
+        const uint16_t bodyLineH = static_cast<uint16_t>(renderer_.getLineHeight(config_.fontId));
+        snapix::smolport::StreamingPaginatorConfig cfg{};
+        cfg.pageWidth = static_cast<uint16_t>(renderer_.getScreenWidth());
+        cfg.pageHeight = static_cast<uint16_t>(renderer_.getScreenHeight());
+        cfg.marginTop = static_cast<uint16_t>(streamingViewportMarginTop_);
+        cfg.marginBottom = static_cast<uint16_t>(streamingViewportMarginBottom_);
+        cfg.marginLeft = static_cast<uint16_t>(streamingViewportMarginLeft_);
+        cfg.marginRight = static_cast<uint16_t>(streamingViewportMarginRight_);
+        cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
+        cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
+        cfg.paragraphSpacing = static_cast<uint16_t>(cfg.bodyLineHeight / 4);
+
+        // v2.0.136 — diagnostic log; mirrors EpubChapterParser.
+        LOG_INF(TAG,
+                "[CONTENT][FB2] [STREAM] R4.c paginator cfg section=%d fontId=%d "
+                "pageW=%u pageH=%u mT=%u mB=%u mL=%u mR=%u bodyLH=%u",
+                startingSectionIndex_, config_.fontId,
+                static_cast<unsigned>(cfg.pageWidth), static_cast<unsigned>(cfg.pageHeight),
+                static_cast<unsigned>(cfg.marginTop), static_cast<unsigned>(cfg.marginBottom),
+                static_cast<unsigned>(cfg.marginLeft), static_cast<unsigned>(cfg.marginRight),
+                static_cast<unsigned>(cfg.bodyLineHeight));
+
+        // v2.0.145/147 — image resolver for FB2.  Calls Fb2::cacheImage
+        // for lazy decode-on-demand so MEASURE walk page boundaries
+        // account for image heights even on first visit (cacheImage
+        // is idempotent; subsequent calls just re-open the cached BMP).
+        const Fb2* fb2Ptr = fb2_;
+        const uint16_t imgMaxW =
+            static_cast<uint16_t>(cfg.pageWidth - cfg.marginLeft - cfg.marginRight);
+        const uint16_t imgMaxH = static_cast<uint16_t>(cfg.pageHeight -
+                                                         cfg.marginTop -
+                                                         cfg.marginBottom);
+        auto resolveImage = [fb2Ptr, imgMaxW, imgMaxH](const uint8_t* p,
+                                                        size_t l) -> std::string {
+          if (fb2Ptr == nullptr || p == nullptr || l == 0) return {};
+          std::string src(reinterpret_cast<const char*>(p), l);
+          if (!src.empty() && src[0] == '#') src.erase(0, 1);
+          std::string outPath;
+          uint16_t w = 0, h = 0;
+          const bool ok = fb2Ptr->cacheImage(src, outPath, w, h, imgMaxW, imgMaxH,
+                                              /*fastMode=*/true, /*shouldAbort=*/{});
+          return ok ? outPath : std::string();
+        };
+        // v2.0.146 — pass fakeBold for layout consistency between
+        // MEASURE-walk and runtime render.  See EpubChapterParser.cpp.
+        snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer_, config_.fontId,
+                                                                config_.fontId, true,
+                                                                resolveImage,
+                                                                config_.fakeBold);
+        snapix::smolport::StreamingPaginator paginator(cfg, adapter);
+
+        constexpr size_t kChunkBufBytes = 4096;
+        uint8_t chunkBuf[kChunkBufBytes];
+        // v2.0.167 — markers reader is in streaming.cache; bound reads.
+        size_t markersRemaining = markersStreamSize;
+        auto readFn = [&mf, &markersRemaining](uint8_t* buf, size_t bufSize) -> int {
+          if (!mf || markersRemaining == 0) return markersRemaining == 0 ? 0 : -1;
+          const size_t want = std::min(bufSize, markersRemaining);
+          const int got = mf.read(buf, want);
+          if (got > 0) markersRemaining -= static_cast<size_t>(got);
+          return got;
+        };
+
+        std::vector<snapix::smolport::PageBoundarySnapshot> captured;
+        auto captureFn = [&captured](const snapix::smolport::PageBoundarySnapshot& s) {
+          captured.push_back(s);
+        };
+
+        snapix::smolport::MarkerizedRenderStats stats{};
+        (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf, sizeof(chunkBuf),
+                                                      UINT16_MAX, {}, &stats, {}, captureFn);
+        mf.close();
+
+        // v2.0.175 — same short-section fix as EpubChapterParser.cpp.  FB2
+        // sections sometimes contain only a brief title or a single
+        // paragraph (especially title-only sections, dedications, or
+        // sub-chapter dividers) whose markers fit in less than one page.
+        // The paginator never fires an overflow-triggered boundary
+        // callback for such sections, leaving `captured` empty and the
+        // R4.c block breaking without writing an idx — which propagates
+        // up as a hard "parsePages returned no output" failure that
+        // ReaderState retries forever.  Synthesize a single page-0
+        // boundary in that case so R4.b emits one Page and the streaming
+        // render path shows the short content correctly.
+        if (captured.empty()) {
+          if (stats.bytesConsumed == 0) {
+            LOG_ERR(TAG,
+                    "[CONTENT][FB2] [STREAM] R4.c read 0 bytes from markers section=%d "
+                    "size=%zu — markers segment is empty/corrupt",
+                    startingSectionIndex_, markersStreamSize);
+            break;
+          }
+          LOG_INF(TAG,
+                  "[CONTENT][FB2] [STREAM] R4.c short section=%d: synthesizing 1-page "
+                  "idx (markers=%zu bytes consumed=%u, fits in less than one page)",
+                  startingSectionIndex_, markersStreamSize, static_cast<unsigned>(stats.bytesConsumed));
+          snapix::smolport::PageBoundarySnapshot s{};
+          s.pageIndex = 0;
+          s.byteOffset = 0;
+          s.styleBits = 0;
+          captured.push_back(s);
+        }
+
+        const uint16_t configHash =
+            snapix::smolport::computePageIndexConfigHash(cfg, config_.fontId,
+                                                          config_.fakeBold);
+        const size_t needed = snapix::smolport::kPageIndexHeaderBytes +
+                               captured.size() * snapix::smolport::kPageIndexEntryBytes;
+        if (needed > 4096) break;
+        uint8_t serdebuf[4096];
+        const size_t wrote = snapix::smolport::serializePageIndex(
+            captured.data(), captured.size(), configHash, serdebuf, sizeof(serdebuf));
+        if (wrote == 0) break;
+
+        // v2.0.167 — write idx as UnifiedCache::Idx segment.
+        if (!ucache->writeSegment(snapix::unifiedcache::Kind::Idx,
+                                  static_cast<uint16_t>(startingSectionIndex_), serdebuf, wrote)) {
+          LOG_ERR(TAG, "[CONTENT][FB2] [STREAM] idx write to UnifiedCache failed section=%d",
+                  startingSectionIndex_);
+          break;
+        }
+        LOG_INF(TAG,
+                "[CONTENT][FB2] [STREAM] idx built upfront section=%d pages=%u bytes=%u (skipping legacy parser)",
+                startingSectionIndex_, static_cast<unsigned>(captured.size()),
+                static_cast<unsigned>(stats.bytesConsumed));
+      } while (false);
+    }
+#endif
+
+    // v2.0.129 R4.b — short-circuit: if `.idx` sidecar exists, emit
+    // that many empty Page objects and skip the legacy Expat parser
+    // entirely.  See parallel change in EpubChapterParser::parsePages
+    // for the rationale (eliminates Page-tree heap allocs that drive
+    // the cold-extend OOM class of failures on memory-tight chapters).
+    // Falls through to legacy parser if `.idx` missing/malformed.
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+    if (fb2_) {
+      // v2.0.167 — read idx from UnifiedCache::Idx segment.
+      auto ucache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
+      do {
+        File idxF;
+        size_t idxSegSize = 0;
+        if (!ucache->openSegmentReader(snapix::unifiedcache::Kind::Idx,
+                                        static_cast<uint16_t>(startingSectionIndex_), idxF,
+                                        &idxSegSize)) {
+          break;
+        }
+        if (idxSegSize < 12) {
+          idxF.close();
+          break;
+        }
+        uint8_t header[12];
+        const int n = idxF.read(header, sizeof(header));
+        idxF.close();
+        if (n != static_cast<int>(sizeof(header))) break;
+        if (header[0] != 0x53 || header[1] != 0x50 || header[2] != 0x49 || header[3] != 0x58) break;
+        // Compare against the canonical constant — see parallel comment in
+        // EpubChapterParser.cpp.  v2.0.134 bumped 1→2 to invalidate pre-fix
+        // paginator's offsets.
+        const uint16_t version = static_cast<uint16_t>(header[4]) |
+                                  (static_cast<uint16_t>(header[5]) << 8);
+        if (version != snapix::smolport::kPageIndexVersion) break;
+        const uint16_t pageCount = static_cast<uint16_t>(header[8]) |
+                                    (static_cast<uint16_t>(header[9]) << 8);
+        if (pageCount == 0) break;
+
+        LOG_INF(TAG,
+                "[CONTENT][FB2] [STREAM] short-circuit: total %u pages from .idx section=%d "
+                "(skipping legacy parser)",
+                static_cast<unsigned>(pageCount), startingSectionIndex_);
+
+        // v2.0.132 — activate STATEFUL short-circuit so cache's batched
+        // extend() calls drain the .idx page-count incrementally.  Pre-
+        // fix, a maxPages=1 first call emitted 1 of N pages and set
+        // hasMore_=false, claiming the section was 1 page total — user
+        // couldn't navigate past page 0 of ANY FB2 section.
+        shortCircuitActive_ = true;
+        shortCircuitTotalPages_ = pageCount;
+        shortCircuitNextPage_ = 0;
+
+        while (shortCircuitNextPage_ < shortCircuitTotalPages_) {
+          if (maxPages > 0 && pagesCreated_ >= maxPages) break;
+          onPageComplete_(std::unique_ptr<Page>(new Page));
+          pagesCreated_++;
+          shortCircuitNextPage_++;
+        }
+        hasMore_ = (shortCircuitNextPage_ < shortCircuitTotalPages_);
+        if (!hasMore_) {
+          shortCircuitActive_ = false;
+          releaseStreamingState();
+          suspended_ = false;
+        }
+        // Else: keep shortCircuitActive_=true; canResume() returns true
+        // until the cache drains the remaining pages.
+
+        LOG_INF(TAG,
+                "[CONTENT][FB2] [STREAM] short-circuit batch section=%d pagesCreated=%u nextPage=%u "
+                "total=%u hasMore=%u",
+                startingSectionIndex_, static_cast<unsigned>(pagesCreated_),
+                static_cast<unsigned>(shortCircuitNextPage_),
+                static_cast<unsigned>(shortCircuitTotalPages_), static_cast<unsigned>(hasMore_));
+
+        // Close the file we opened above — we never started parsing.
+        // (Subsequent shortCircuitActive_ batches re-enter through the
+        // top-of-parsePages branch and don't touch file_ at all.)
+        {
+          snapix::spi::SharedBusLock lk;
+          if (file_) file_.close();
+        }
+        return pagesCreated_ > 0;
+      } while (false);
+    }
+#endif
 
     startNewPage();
     if (startOffset_ > 0) {

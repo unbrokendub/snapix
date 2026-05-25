@@ -1,0 +1,15 @@
+{
+  "name": "EpubWorkspace",
+  "version": "1.0.0",
+  "description": "Static-allocation EpubRenderWorkspace — fixed-size BSS struct hosting the largest transient per-chapter allocations (HTML chunk buffer, word/line metrics, anchor map, string arena). Phase 4 of the snapix v3 refactor; activates under SNAPIX_STATIC_WORKSPACE.",
+  "dependencies": {},
+  "platforms": "espressif32",
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

@@ -1,5 +1,6 @@
 #include "PngToBmpConverter.h"
 
+#include <FS.h>  // v2.0.79: fs::File for LittleFS-backed PNG inputs
 #include <Logging.h>
 
 #define TAG "PNG"
@@ -68,8 +69,16 @@ void writeBmpHeader2bit(Print& bmpOut, const int width, const int height) {
   }
 }
 
+// v2.0.79: byte-reader callback used by pngFileToBmpStreamInternal.  Returns:
+//   >0 — number of bytes read (always ≤ requested size; partial reads OK)
+//    0 — clean EOF (decode wraps up normally)
+//   <0 — I/O error (decode aborts with failure)
+// Filesystem-specific entry points wrap their file handle in a lambda that
+// honours these semantics.  Replaces the old `FsFile* pngFile` ctx field so
+// PNG decode can pull bytes from SD (FsFile) or LittleFS (fs::File).
+using PngByteReader = std::function<int(uint8_t* buf, size_t size)>;
+
 struct PngContext {
-  FsFile* pngFile;
   Print* bmpOut;
   int srcWidth;
   int srcHeight;
@@ -291,7 +300,8 @@ void pngInitCallback(pngle_t* pngle, uint32_t w, uint32_t h) {
   ctx->headerWritten = true;
 }
 
-bool pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOut, int targetMaxWidth, int targetMaxHeight, bool quickMode,
+bool pngFileToBmpStreamInternal(const PngByteReader& reader, Print& bmpOut, int targetMaxWidth, int targetMaxHeight,
+                                bool quickMode,
                                 const std::function<bool()>& shouldAbort = nullptr) {
   LOG_INF(TAG, "Converting PNG to BMP (target: %dx%d)%s", targetMaxWidth, targetMaxHeight, quickMode ? " [QUICK]" : "");
 
@@ -302,7 +312,6 @@ bool pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOut, int targetMaxWid
   }
 
   PngContext ctx = {};
-  ctx.pngFile = &pngFile;
   ctx.bmpOut = &bmpOut;
   ctx.targetMaxWidth = targetMaxWidth;
   ctx.targetMaxHeight = targetMaxHeight;
@@ -315,10 +324,11 @@ bool pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOut, int targetMaxWid
   pngle_set_init_callback(pngle, pngInitCallback);
   pngle_set_draw_callback(pngle, pngDrawCallback);
 
-  // Read and feed PNG data.  Each refill of `buffer` takes the SPI bus lock
-  // briefly so an e-ink redraw on the same bus can interleave between reads.
-  // Holding it across pngle_feed() (pure CPU work) would needlessly block
-  // the display thread.
+  // Read and feed PNG data via the caller-supplied reader.  For SD-backed
+  // sources the reader internally takes the SharedBusLock per chunk so an
+  // e-ink redraw can interleave between reads; for LittleFS-backed sources
+  // no lock is needed (separate SPI controller).  Either way, we never hold
+  // a bus lock across pngle_feed (pure CPU work).
   uint8_t buffer[1024];
   int bytesRead;
   bool success = true;
@@ -338,17 +348,9 @@ bool pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOut, int targetMaxWid
       success = false;
       break;
     }
-    {
-      snapix::spi::SharedBusLock busLock;
-      if (!busLock) {
-        LOG_ERR(TAG, "Shared SPI lock unavailable during PNG read");
-        success = false;
-        break;
-      }
-      bytesRead = pngFile.read(buffer, sizeof(buffer));
-    }
+    bytesRead = reader(buffer, sizeof(buffer));
     if (bytesRead <= 0) {
-      // 0 = EOF (success), <0 = SD read error
+      // 0 = EOF (success), <0 = read error
       if (bytesRead < 0) {
         LOG_ERR(TAG, "PNG file read error");
         success = false;
@@ -382,14 +384,60 @@ bool pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOut, int targetMaxWid
 
 }  // namespace
 
+namespace {
+// SD-backed reader: each chunk read goes under the SharedBusLock so e-ink
+// redraws can interleave between reads.  Returns the same int convention as
+// FsFile::read (>0 bytes read, 0 EOF, <0 error).
+PngByteReader makeFsFileReader(FsFile& pngFile) {
+  return [&pngFile](uint8_t* buf, size_t size) -> int {
+    snapix::spi::SharedBusLock busLock;
+    if (!busLock) {
+      LOG_ERR(TAG, "Shared SPI lock unavailable during PNG read");
+      return -1;
+    }
+    return pngFile.read(buf, size);
+  };
+}
+
+// v2.0.79: LittleFS-backed reader.  No bus lock needed (separate SPI
+// controller from SD/display).  fs::File::read returns size_t (no error
+// sentinel) — translate to the int contract by treating 0 as EOF.
+PngByteReader makeLittleFsReader(fs::File& pngFile) {
+  return [&pngFile](uint8_t* buf, size_t size) -> int {
+    const size_t got = pngFile.read(buf, size);
+    return static_cast<int>(got);
+  };
+}
+}  // namespace
+
 bool PngToBmpConverter::pngFileToBmpStreamWithSize(FsFile& pngFile, Print& bmpOut, int targetMaxWidth,
                                                    int targetMaxHeight, const std::function<bool()>& shouldAbort) {
-  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetMaxWidth, targetMaxHeight, false, shouldAbort);
+  return pngFileToBmpStreamInternal(makeFsFileReader(pngFile), bmpOut, targetMaxWidth, targetMaxHeight, false,
+                                    shouldAbort);
 }
 
 bool PngToBmpConverter::pngFileToBmpStreamQuick(FsFile& pngFile, Print& bmpOut, int targetMaxWidth,
                                                 int targetMaxHeight, const std::function<bool()>& shouldAbort) {
-  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetMaxWidth, targetMaxHeight, true, shouldAbort);
+  return pngFileToBmpStreamInternal(makeFsFileReader(pngFile), bmpOut, targetMaxWidth, targetMaxHeight, true,
+                                    shouldAbort);
+}
+
+// v2.0.79: LittleFS-backed entry points.  EPUB chapter inline images and
+// EPUB cover/thumb temp files live on internal flash post-v2.0.73.  Pipeline
+// and output BMP are identical to the FsFile variants — only the file-handle
+// type and per-read locking differ.
+bool PngToBmpConverter::pngLittleFsFileToBmpStreamWithSize(fs::File& pngFile, Print& bmpOut, int targetMaxWidth,
+                                                            int targetMaxHeight,
+                                                            const std::function<bool()>& shouldAbort) {
+  return pngFileToBmpStreamInternal(makeLittleFsReader(pngFile), bmpOut, targetMaxWidth, targetMaxHeight, false,
+                                    shouldAbort);
+}
+
+bool PngToBmpConverter::pngLittleFsFileToBmpStreamQuick(fs::File& pngFile, Print& bmpOut, int targetMaxWidth,
+                                                         int targetMaxHeight,
+                                                         const std::function<bool()>& shouldAbort) {
+  return pngFileToBmpStreamInternal(makeLittleFsReader(pngFile), bmpOut, targetMaxWidth, targetMaxHeight, true,
+                                    shouldAbort);
 }
 
 // PNG header is fixed-format: 8-byte signature, then IHDR chunk at offset 8

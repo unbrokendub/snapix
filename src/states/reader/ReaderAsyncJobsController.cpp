@@ -89,62 +89,146 @@ bool ReaderAsyncJobsController::queuePageFillWork(const PageFillRequest& request
   return enqueue(cmd);
 }
 
+void ReaderAsyncJobsController::enqueuePendingPageTurn(const int direction, const char* reason, const int workerState) {
+  navigationJob_.queuedTurn += direction > 0 ? 1 : -1;
+  if (!navigationJob_.queuedTurnHasQueuedMs) {
+    navigationJob_.queuedTurnQueuedMs = millis();
+    navigationJob_.queuedTurnHasQueuedMs = true;
+  }
+  LOG_INF("RDR_NAV", "[INPUT] deferred page-turn dir=%d queue=%d reason=%s workerState=%d preemptAge=%lu", direction,
+          navigationJob_.queuedTurn, reason ? reason : "unknown", workerState,
+          navigationJob_.lastCachePreemptRequestedMs == 0
+              ? 0UL
+              : static_cast<unsigned long>(millis() - navigationJob_.lastCachePreemptRequestedMs));
+}
+
+bool ReaderAsyncJobsController::deferPageTurnUntilWorkerStops(const int direction, const bool workerRunning,
+                                                              const int workerState,
+                                                              const std::function<void()>& requestStop) {
+  if (!workerRunning) {
+    return false;
+  }
+
+  navigationJob_.deferredTurnAwaitingWorkerIdle = true;
+  navigationJob_.deferredTurnIdleLogged = false;
+  enqueuePendingPageTurn(direction, "background-worker-active", workerState);
+  if (requestStop) {
+    requestStop();
+  }
+  return true;
+}
+
+void ReaderAsyncJobsController::noteQueuedTurnWorkerIdle(const bool workerRunning) {
+  if (workerRunning || navigationJob_.queuedTurn == 0 || !navigationJob_.deferredTurnAwaitingWorkerIdle ||
+      navigationJob_.deferredTurnIdleLogged) {
+    return;
+  }
+
+  navigationJob_.deferredTurnIdleLogged = true;
+  const uint32_t queuedForMs = !navigationJob_.queuedTurnHasQueuedMs
+                                   ? 0
+                                   : static_cast<uint32_t>(millis() - navigationJob_.queuedTurnQueuedMs);
+  LOG_INF("RDR_NAV", "[INPUT] deferred page-turn resumed queue=%d wait=%lu", navigationJob_.queuedTurn,
+          static_cast<unsigned long>(queuedForMs));
+}
+
+bool ReaderAsyncJobsController::tryConsumeQueuedTurn(const bool workerRunning, const bool needsRender,
+                                                     const bool pendingTocJump, const bool pendingPageLoad,
+                                                     const bool menuMode, const bool bookmarkMode, const bool tocMode,
+                                                     int& queuedTurn, uint32_t& queuedForMs) {
+  queuedTurn = 0;
+  queuedForMs = 0;
+
+  if (navigationJob_.queuedTurn == 0 || needsRender || pendingTocJump || pendingPageLoad || menuMode || bookmarkMode ||
+      tocMode || workerRunning) {
+    return false;
+  }
+
+  queuedTurn = navigationJob_.queuedTurn > 0 ? 1 : -1;
+  navigationJob_.queuedTurn -= queuedTurn;
+  queuedForMs = !navigationJob_.queuedTurnHasQueuedMs
+                    ? 0
+                    : static_cast<uint32_t>(millis() - navigationJob_.queuedTurnQueuedMs);
+  if (navigationJob_.queuedTurn == 0) {
+    navigationJob_.clearQueuedTurn();
+  }
+  return true;
+}
+
+void ReaderAsyncJobsController::markPageLoadBlocked(const int spine, const int page,
+                                                    const ReaderNavigationBlockReason reason) {
+  navigationJob_.blockedReason = reason;
+  navigationJob_.blockedSpine = spine;
+  navigationJob_.blockedPage = page;
+  navigationJob_.blockedFailures++;
+  navigationJob_.blockedAtMs = millis();
+  navigationJob_.clearQueuedTurn();
+  LOG_INF("RDR_NAV", "[NAV] page-load blocked spine=%d page=%d reason=%u failures=%u", spine, page,
+          static_cast<unsigned>(reason), static_cast<unsigned>(navigationJob_.blockedFailures));
+}
+
 void ReaderAsyncJobsController::clearPendingTocJump() {
-  pendingTocJumpActive_ = false;
-  pendingTocJumpIndexingShown_ = false;
-  pendingTocJumpTargetSpine_ = -1;
-  pendingTocJumpTargetPageHint_ = -1;
-  pendingTocJumpAnchor_.clear();
-  pendingTocJumpRetryCount_ = 0;
-  pendingTocJumpStartedMs_ = 0;
-  pendingTocJumpLastDiagMs_ = 0;
+  navigationJob_.clearTocJump();
 }
 
 void ReaderAsyncJobsController::armPendingTocJump(const int targetSpine, const std::string& anchor,
                                                   const int targetPageHint) {
-  pendingTocJumpActive_ = true;
-  pendingTocJumpIndexingShown_ = false;
-  pendingTocJumpTargetSpine_ = targetSpine;
-  pendingTocJumpTargetPageHint_ = targetPageHint;
-  pendingTocJumpAnchor_ = anchor;
-  pendingTocJumpRetryCount_ = 0;
-  pendingTocJumpStartedMs_ = millis();
-  pendingTocJumpLastDiagMs_ = 0;
+  navigationJob_.clearPageLoad();
+  navigationJob_.kind = ReaderNavigationJobKind::TocJump;
+  navigationJob_.visibility = ReaderNavigationJobVisibility::BlockingOverlay;
+  navigationJob_.tocJumpActive = true;
+  navigationJob_.tocJumpIndexingShown = false;
+  navigationJob_.tocJumpDeferredDisplay = false;
+  navigationJob_.tocJumpTargetSpine = targetSpine;
+  navigationJob_.tocJumpTargetPageHint = targetPageHint;
+  navigationJob_.tocJumpAnchor = anchor;
+  navigationJob_.tocJumpRetryCount = 0;
+  navigationJob_.tocJumpStartedMs = millis();
+  navigationJob_.tocJumpLastDiagMs = 0;
+  navigationJob_.tocFirstPageReady = false;
+  navigationJob_.clearBlocked();
 }
 
 void ReaderAsyncJobsController::decrementPendingTocJumpRetry() {
-  if (pendingTocJumpRetryCount_ > 0) {
-    pendingTocJumpRetryCount_--;
+  if (navigationJob_.tocJumpRetryCount > 0) {
+    navigationJob_.tocJumpRetryCount--;
   }
 }
 
 void ReaderAsyncJobsController::clearPendingPageLoad() {
-  pendingEpubPageLoadActive_ = false;
-  pendingEpubPageLoadMessageShown_ = false;
-  pendingEpubPageLoadRequireComplete_ = false;
-  pendingEpubPageLoadUseIndexingMessage_ = false;
-  pendingEpubPageLoadTargetSpine_ = -1;
-  pendingEpubPageLoadTargetPage_ = 0;
-  pendingEpubPageLoadRetryCount_ = 0;
-  pendingEpubPageLoadStartedMs_ = 0;
-  pendingEpubPageLoadLastDiagMs_ = 0;
+  navigationJob_.clearPageLoad();
 }
 
 void ReaderAsyncJobsController::armPendingPageLoad(const int targetSpine, const int targetPage, const bool requireComplete,
                                                    const bool useIndexingMessage) {
-  pendingEpubPageLoadActive_ = true;
-  pendingEpubPageLoadTargetSpine_ = targetSpine;
-  pendingEpubPageLoadTargetPage_ = targetPage;
-  pendingEpubPageLoadRequireComplete_ = requireComplete;
-  pendingEpubPageLoadUseIndexingMessage_ = useIndexingMessage;
-  pendingEpubPageLoadStartedMs_ = millis();
-  pendingEpubPageLoadLastDiagMs_ = 0;
-  pendingEpubPageLoadMessageShown_ = false;
+  const bool sameRequest = navigationJob_.pageLoadActive && navigationJob_.pageLoadTargetSpine == targetSpine &&
+                           navigationJob_.pageLoadTargetPage == targetPage &&
+                           navigationJob_.pageLoadRequireComplete == requireComplete &&
+                           navigationJob_.pageLoadUseIndexingMessage == useIndexingMessage;
+
+  navigationJob_.clearTocJump();
+  if (!navigationJob_.blocksPageLoad(targetSpine, targetPage)) {
+    navigationJob_.clearBlocked();
+  }
+  navigationJob_.kind = ReaderNavigationJobKind::PageLoad;
+  navigationJob_.visibility = ReaderNavigationJobVisibility::BlockingOverlay;
+  navigationJob_.pageLoadActive = true;
+  navigationJob_.pageLoadTargetSpine = targetSpine;
+  navigationJob_.pageLoadTargetPage = targetPage;
+  navigationJob_.pageLoadRequireComplete = requireComplete;
+  navigationJob_.pageLoadUseIndexingMessage = useIndexingMessage;
+  if (!sameRequest) {
+    navigationJob_.pageLoadRetryCount = 0;
+    navigationJob_.pageLoadStartedMs = millis();
+    navigationJob_.pageLoadLastDiagMs = 0;
+    navigationJob_.pageLoadNextRetryMs = 0;
+    navigationJob_.pageLoadMessageShown = false;
+  }
 }
 
 void ReaderAsyncJobsController::decrementPendingPageLoadRetry() {
-  if (pendingEpubPageLoadRetryCount_ > 0) {
-    pendingEpubPageLoadRetryCount_--;
+  if (navigationJob_.pageLoadRetryCount > 0) {
+    navigationJob_.pageLoadRetryCount--;
   }
 }
 
@@ -189,20 +273,35 @@ ReaderAsyncJobsController::AbortCallback ReaderAsyncJobsController::abortCallbac
   return [this]() {
     if (cancelCurrentJob_.load(std::memory_order_acquire) || workerTask_.shouldStop()) return true;
     // Abort parsing early when heap is dangerously low to prevent std::bad_alloc.
-    // Normal operating heap on ESP32-C3 is ~40-55 KB; the parser pipeline needs
-    // ~5-10 KB working memory for text layout.  Threshold must stay well below
-    // the steady-state level so normal extend/create operations are not blocked.
+    //
+    // v2.0.157: lowered the free-heap threshold from 15 KB to 6 KB.  The old
+    // 15 KB number was calibrated for the framebuffer-scratch ZIP-dict era
+    // (the dict cost 0 heap, only ~16 KB of transient I/O buffers were on
+    // the heap during a chapter extract).  v2.0.156 moved the dict to the
+    // heap to break the framebuffer race that caused mojibake and screen
+    // garbage — so a chapter extract now transiently holds ~32 KB dict +
+    // ~16 KB I/O + ~5 KB uzlib state ≈ 50–55 KB.  Boot free heap is ~75 KB,
+    // so free heap DURING extract sits around 10–25 KB — and the 15 KB
+    // gate fired on every attempt, never letting the extract finish.
+    //
+    // 6 KB matches the EXTRACT/NORMALIZE phase's own `PREPARE_MIN_FREE_HEAP`
+    // budget (8 KB largest block) plus a small free-bytes headroom.  The
+    // gate's job is to prevent std::bad_alloc downstream — uzlib has
+    // already alloc'd its dict + state by the time this fires, so no new
+    // malloc happens INSIDE the decompress loop.  The only remaining
+    // failure modes need <6 KB available (small string operations, LittleFS
+    // write buffer top-ups), which the largestBlock guard below catches.
     const size_t freeBytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    if (freeBytes < 15 * 1024) {
+    if (freeBytes < 6 * 1024) {
       LOG_ERR(TAG, "Aborting job: heap dangerously low (%u bytes free)", static_cast<unsigned>(freeBytes));
       return true;
     }
-    // Also check heap fragmentation.  Repeated hot extends keep the parser
-    // alive between calls; its allocations sit in the middle of the heap
-    // and prevent coalescing.  With pool-based TextBlock the parser's largest
-    // single allocation is well under 4 KB, so 8 KB contiguous is sufficient.
+    // Also check catastrophic heap fragmentation.  Long text now spills to
+    // LittleFS and interactive page-fill must be allowed to continue with a
+    // 7-8 KB largest block; aborting there creates a permanent no-page loop.
+    // Only stop below 4 KB, where the next layout allocation is genuinely risky.
     const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    if (largestBlock < 8 * 1024) {
+    if (largestBlock < 4 * 1024) {
       LOG_ERR(TAG, "Aborting job: heap fragmented (largest=%u free=%u)",
               static_cast<unsigned>(largestBlock), static_cast<unsigned>(freeBytes));
       return true;

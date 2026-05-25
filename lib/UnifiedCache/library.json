@@ -1,0 +1,12 @@
+{
+  "name": "UnifiedCache",
+  "version": "1.0.0",
+  "description": "Single-file per-book cache consolidating markers, idx, metrics sidecars (v2.0.166 Phase 5 from SmolPort plan).",
+  "dependencies": {
+    "FS": "*",
+    "LittleFS": "*",
+    "Logging": "*"
+  },
+  "frameworks": "*",
+  "platforms": "*"
+}

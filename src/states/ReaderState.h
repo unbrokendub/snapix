@@ -8,6 +8,13 @@
 #include <string>
 #include <vector>
 
+// v2.0.125 R3.6 — page-boundary snapshot type for the per-spine
+// stream offset cache (SNAPIX_MARKERIZED_RENDER path only).  Empty
+// header in default builds where the flag is OFF.
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+#include <MarkerizedPageRender.h>
+#endif
+
 #include "../content/BookmarkManager.h"
 #include "../content/ReaderNavigation.h"
 #include "../core/Types.h"
@@ -78,6 +85,37 @@ class ReaderState : public State {
   int lastRenderedSpineIndex_ = 0;
   int lastRenderedSectionPage_ = 0;
 
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+  // v2.0.125 R3.6 — per-spine in-memory cache of page-boundary
+  // snapshots captured during streaming render.  Lets subsequent
+  // renders within the same chapter session SKIP the MEASURE-only
+  // walk through earlier pages: render of page N seeks the
+  // markers file to `streamOffsetCache_[N].byteOffset` and tells
+  // the paginator to start at `startPage=N` with
+  // `styleBits=streamOffsetCache_[N].styleBits`.
+  //
+  // Cleared on spine change (different chapter = different
+  // markers file = different offsets).  Lives only in RAM —
+  // R3.6.b follow-up (later) persists to `markers/<spine>.idx`
+  // for cross-session reuse.
+  //
+  // Vector indexed by page number; size grows as new pages are
+  // discovered.  ~6 bytes per entry; 100 pages = 600 B per
+  // spine.  Fits easily on heap once per active chapter.
+  //
+  // v2.0.128 R4.a — also persists to a `.idx` sidecar at
+  // `<markers path>.idx`.  Loaded on first render of a spine,
+  // saved on spine change.  The configHash field detects stale
+  // .idx after font/margin/orientation changes.
+  int streamOffsetCacheSpine_ = -1;
+  std::vector<snapix::smolport::PageBoundarySnapshot> streamOffsetCache_;
+  // v2.0.167 — replaced streamOffsetCacheIdxPath_ (str path to *.idx file)
+  // with (bookCachePath + key) so idx writes route through UnifiedCache.
+  std::string streamOffsetCacheBookPath_;
+  int streamOffsetCacheKey_ = -1;
+  uint16_t streamOffsetCacheConfigHash_ = 0;
+#endif
+
   // Whether book has a valid cover image
   bool hasCover_ = false;
 
@@ -105,6 +143,14 @@ class ReaderState : public State {
   uint32_t& lastReaderInteractionMs_;
   void startBackgroundCaching(Core& core, const char* trigger = "auto");
   bool stopBackgroundCaching();
+  // v2.0.110 (audit fix #1): non-blocking variant for the render path.
+  // Requests worker cancel and waits at most ~500 ms for the honest
+  // cooperative-cancel to fire.  If worker doesn't yield by then,
+  // log and return false WITHOUT calling ESP.restart() — render proceeds
+  // anyway against the on-disk cache state.  Use the full
+  // `stopBackgroundCaching()` for teardown paths where parser state
+  // must be fully released before mutation.
+  bool requestBackgroundCachingPause(const char* siteTag);
 
   // Navigation helpers (delegates to ReaderNavigation)
   void navigateNext(Core& core);
@@ -155,6 +201,13 @@ class ReaderState : public State {
   void updateGlobalPageMetrics(Core& core, int currentSectionTotalPages, bool currentSectionIsPartial);
   void recalibrateGlobalPageEstimates();
   void recomputeGlobalPageMetricTotal();
+  // v2.0.153 — persist `globalSectionPageMetrics_` between sessions to avoid
+  // re-probing every cached section file at book open (which was ~200 ms/file
+  // on LittleFS and added 11 s of latency on Fire_in_the_Valley.fb2's 55 TOC
+  // entries).  Returns true on a successful load (caller can skip the probe
+  // loop entirely).  saveGlobalPageMetricsToDisk is best-effort and silent.
+  bool loadGlobalPageMetricsFromDisk(const std::string& bookCachePath, uint32_t configHash, int spineCount);
+  void saveGlobalPageMetricsToDisk(const std::string& bookCachePath, uint32_t configHash) const;
   GlobalPageMetrics resolveGlobalPageMetrics(Core& core, int currentSectionTotalPages, bool currentSectionIsPartial);
 
   // Cache management
@@ -230,12 +283,14 @@ class ReaderState : public State {
   bool tocOverlayRendered_ = false;
   bool& pendingTocJumpActive_;
   bool& pendingTocJumpIndexingShown_;
+  bool& pendingTocJumpDeferredDisplay_;  // v2.0.84: skip "Indexing..." banner when spine cache exists
   int& pendingTocJumpTargetSpine_;
   int& pendingTocJumpTargetPageHint_;
   std::string& pendingTocJumpAnchor_;
   uint8_t& pendingTocJumpRetryCount_;
   uint32_t& pendingTocJumpStartedMs_;
   uint32_t& pendingTocJumpLastDiagMs_;
+  bool& pendingTocFirstPageReady_;  // v2.0.104: worker→main signal for deferred-display
   bool& pendingEpubPageLoadActive_;
   bool& pendingEpubPageLoadMessageShown_;
   bool& pendingEpubPageLoadRequireComplete_;
@@ -245,6 +300,7 @@ class ReaderState : public State {
   uint8_t& pendingEpubPageLoadRetryCount_;
   uint32_t& pendingEpubPageLoadStartedMs_;
   uint32_t& pendingEpubPageLoadLastDiagMs_;
+  uint32_t& pendingEpubPageLoadNextRetryMs_;
   bool& pendingBackgroundEpubRefresh_;
   int& pendingBackgroundEpubRefreshSpine_;
   int& pendingBackgroundEpubRefreshPage_;

@@ -794,3 +794,256 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
                                const std::function<bool()>& shouldAbort) {
   return readFileToStreamDetailed(filename, out, chunkSize, dictBuffer, shouldAbort) == StreamReadResult::Success;
 }
+
+// =============================================================================
+// v2.0.159 — ZipItemReader: lazy streaming reader for a single ZIP entry.
+// =============================================================================
+
+struct ZipItemReader::Impl {
+  // Layout matters: ZipInflateCtx::reader (InflateReader) must be at the
+  // start of `ctx` because the uzlib read callback casts `uzlib_uncomp*` →
+  // `ZipInflateCtx*` (see zipReadCallback at the top of this file).  We
+  // satisfy that here implicitly because `ctx` is a plain ZipInflateCtx.
+  ZipInflateCtx ctx;
+
+  // Self-owned file handle — opened during openItemStream, closed in dtor.
+  // The reader keeps the file alive for its full lifetime so the parent
+  // ZipFile can go out of scope before the reader does.
+  FsFile file;
+
+  // Self-owned heap buffer for compressed-data reads from SD.  Sized at
+  // openItemStream time; freed in the destructor.
+  uint8_t* readBuffer = nullptr;
+  size_t readBufferSize = 0;
+
+  // Cached entry metadata
+  uint16_t method = 0;
+  uint32_t uncompressedSize = 0;
+  uint32_t storedRemaining = 0;  // bytes left to read for STORED entries
+
+  // Running counters / state
+  uint32_t produced = 0;
+  bool eofReached = false;
+  bool errored = false;
+};
+
+ZipItemReader::ZipItemReader() : impl_(std::make_unique<Impl>()) {}
+
+ZipItemReader::~ZipItemReader() {
+  if (!impl_) return;
+  if (impl_->file) {
+    impl_->file.close();
+  }
+  if (impl_->readBuffer) {
+    free(impl_->readBuffer);
+    impl_->readBuffer = nullptr;
+  }
+  // impl_->ctx.reader (InflateReader) destructor frees its ring buffer
+  // if it owns one (init was called with externalBuffer = nullptr).
+}
+
+ZipItemReader::ZipItemReader(ZipItemReader&& other) noexcept = default;
+ZipItemReader& ZipItemReader::operator=(ZipItemReader&& other) noexcept = default;
+
+uint32_t ZipItemReader::totalUncompressedSize() const {
+  return impl_ ? impl_->uncompressedSize : 0;
+}
+
+uint32_t ZipItemReader::bytesProduced() const {
+  return impl_ ? impl_->produced : 0;
+}
+
+bool ZipItemReader::isEof() const {
+  return impl_ ? impl_->eofReached : true;
+}
+
+bool ZipItemReader::hasError() const {
+  return impl_ ? impl_->errored : true;
+}
+
+int ZipItemReader::read(uint8_t* buf, size_t maxLen) {
+  if (!impl_ || impl_->errored) return -1;
+  if (impl_->eofReached || maxLen == 0) return 0;
+
+  // v2.0.160 — hold the shared SPI bus lock for the whole read call.
+  // Without it, SD reads issued from this BG task (via FsFile::read in
+  // the uzlib callback) race with concurrent display SPI writes on
+  // loopTask — visible as "ZipItemReader DEFLATED size mismatch
+  // (expected 78010, got 26556)" when a display refresh kicks off
+  // mid-decompress, corrupts the compressed-byte read, and uzlib
+  // decodes the garbage as a premature end-of-stream marker.
+  //
+  // The legacy readFileToStreamDetailed holds the same lock for the
+  // ENTIRE stream pass; for a pull-based reader we have to re-acquire
+  // it on each call.  Per-call lock keeps loopTask responsive (it
+  // gets a chance to take the bus between chunks) at the cost of one
+  // extra mutex op per chunk — negligible vs the I/O itself.
+  snapix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    LOG_ERR(TAG, "ZipItemReader::read: SPI bus unavailable");
+    impl_->errored = true;
+    return -1;
+  }
+
+  // STORED (uncompressed) — just copy bytes straight from SD.  Rare for
+  // EPUB chapter HTML (Calibre always deflates) but cover.jpg and other
+  // already-compressed assets often ship as STORED.
+  if (impl_->method == ZIP_METHOD_STORED) {
+    if (impl_->storedRemaining == 0) {
+      impl_->eofReached = true;
+      return 0;
+    }
+    const size_t toRead = std::min<size_t>(maxLen, impl_->storedRemaining);
+    const int n = impl_->file.read(buf, toRead);
+    if (n <= 0) {
+      LOG_ERR(TAG, "ZipItemReader STORED read failed (remaining=%u)",
+              static_cast<unsigned>(impl_->storedRemaining));
+      impl_->errored = true;
+      return -1;
+    }
+    impl_->storedRemaining -= static_cast<uint32_t>(n);
+    impl_->produced += static_cast<uint32_t>(n);
+    if (impl_->storedRemaining == 0) {
+      impl_->eofReached = true;
+    }
+    return n;
+  }
+
+  // DEFLATED — pump uzlib for up to maxLen bytes.  readAtMost may return
+  // Done (clean EOF), Ok (more available), or Error.
+  size_t produced = 0;
+  const InflateStatus status = impl_->ctx.reader.readAtMost(buf, maxLen, &produced);
+  if (produced > impl_->uncompressedSize - impl_->produced) {
+    LOG_ERR(TAG, "ZipItemReader DEFLATED overshoot (produced=%u total=%u)",
+            static_cast<unsigned>(impl_->produced + produced),
+            static_cast<unsigned>(impl_->uncompressedSize));
+    impl_->errored = true;
+    return -1;
+  }
+  impl_->produced += static_cast<uint32_t>(produced);
+
+  if (status == InflateStatus::Done) {
+    impl_->eofReached = true;
+    if (impl_->produced != impl_->uncompressedSize) {
+      LOG_ERR(TAG, "ZipItemReader DEFLATED size mismatch (expected %u, got %u)",
+              static_cast<unsigned>(impl_->uncompressedSize), static_cast<unsigned>(impl_->produced));
+      impl_->errored = true;
+      return -1;
+    }
+  } else if (status == InflateStatus::Error) {
+    LOG_ERR(TAG, "ZipItemReader DEFLATED decompression error at %u/%u",
+            static_cast<unsigned>(impl_->produced), static_cast<unsigned>(impl_->uncompressedSize));
+    impl_->errored = true;
+    return -1;
+  }
+
+  return static_cast<int>(produced);
+}
+
+std::unique_ptr<ZipItemReader> ZipFile::openItemStream(const char* filename, const size_t chunkSize,
+                                                       uint8_t* dictBuffer) {
+  // Acquire the shared SPI bus lock for the lookup phase (we'll release
+  // implicitly when this method returns — the reader holds its own File
+  // handle and reads in small chunks, each chunk taking the bus briefly
+  // via the SD driver's internal locking).
+  snapix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    LOG_ERR(TAG, "openItemStream: SPI bus unavailable for %s", filename);
+    return nullptr;
+  }
+
+  // Open the parent ZipFile just long enough to find the entry's data
+  // offset + sizes.  After this we hand control to the reader's own file
+  // handle, so the parent ZipFile can safely go out of scope.
+  const bool wasOpen = isOpen();
+  if (!wasOpen && !open()) {
+    LOG_ERR(TAG, "openItemStream: failed to open ZIP for %s", filename);
+    return nullptr;
+  }
+
+  FileStatSlim fileStat = {};
+  if (!loadFileStatSlim(filename, &fileStat)) {
+    if (!wasOpen) close();
+    LOG_ERR(TAG, "openItemStream: %s not in ZIP", filename);
+    return nullptr;
+  }
+
+  const long dataOffset = getDataOffset(fileStat);
+  if (dataOffset < 0) {
+    if (!wasOpen) close();
+    LOG_ERR(TAG, "openItemStream: invalid data offset for %s", filename);
+    return nullptr;
+  }
+
+  if (fileStat.method != ZIP_METHOD_STORED && fileStat.method != ZIP_METHOD_DEFLATED) {
+    if (!wasOpen) close();
+    LOG_ERR(TAG, "openItemStream: unsupported method %u for %s",
+            static_cast<unsigned>(fileStat.method), filename);
+    return nullptr;
+  }
+
+  // Build the reader.  Allocate the read buffer up front so we can fail
+  // cleanly if heap is tight (no half-constructed reader to clean up).
+  auto reader = std::unique_ptr<ZipItemReader>(new ZipItemReader());
+  auto& impl = *reader->impl_;
+
+  impl.readBuffer = static_cast<uint8_t*>(malloc(chunkSize));
+  if (!impl.readBuffer) {
+    if (!wasOpen) close();
+    LOG_ERR(TAG, "openItemStream: read buffer alloc failed (%u bytes, largest free=%u)",
+            static_cast<unsigned>(chunkSize),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    return nullptr;
+  }
+  impl.readBufferSize = chunkSize;
+
+  // Open a private file handle on the same path the parent ZipFile uses,
+  // seeked to the entry's data offset.  Independent of `this->file` so the
+  // reader survives parent ZipFile destruction.
+  if (!SdMan.openFileForRead("ZIP", filePath, impl.file)) {
+    free(impl.readBuffer);
+    impl.readBuffer = nullptr;
+    if (!wasOpen) close();
+    LOG_ERR(TAG, "openItemStream: failed to open ZIP file handle for %s", filePath.c_str());
+    return nullptr;
+  }
+  if (!impl.file.seek(dataOffset)) {
+    impl.file.close();
+    free(impl.readBuffer);
+    impl.readBuffer = nullptr;
+    if (!wasOpen) close();
+    LOG_ERR(TAG, "openItemStream: failed to seek to data offset for %s", filename);
+    return nullptr;
+  }
+
+  impl.method = fileStat.method;
+  impl.uncompressedSize = fileStat.uncompressedSize;
+
+  if (fileStat.method == ZIP_METHOD_STORED) {
+    impl.storedRemaining = fileStat.uncompressedSize;
+    // No InflateReader init needed for STORED.
+    if (!wasOpen) close();
+    return reader;
+  }
+
+  // DEFLATED — wire up uzlib + the read callback that pulls compressed
+  // bytes from impl.file via impl.ctx.{file,readBuf,...}.
+  impl.ctx.file = &impl.file;
+  impl.ctx.fileRemaining = fileStat.compressedSize;
+  impl.ctx.readBuf = impl.readBuffer;
+  impl.ctx.readBufSize = chunkSize;
+
+  if (!impl.ctx.reader.init(true, dictBuffer)) {
+    LOG_ERR(TAG, "openItemStream: InflateReader init failed for %s (largest free=%u)", filename,
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    impl.file.close();
+    free(impl.readBuffer);
+    impl.readBuffer = nullptr;
+    if (!wasOpen) close();
+    return nullptr;
+  }
+  impl.ctx.reader.setReadCallback(zipReadCallback);
+
+  if (!wasOpen) close();
+  return reader;
+}

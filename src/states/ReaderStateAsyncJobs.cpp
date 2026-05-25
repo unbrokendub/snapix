@@ -1,10 +1,10 @@
 #include "ReaderState.h"
 
+#include <Epub/PendingImageDecode.h>  // v2.0.83: async EPUB image decode queue
 #include <EpubChapterParser.h>
 #include <Fb2.h>
 #include <Fb2Parser.h>
 #include <GfxRenderer.h>
-#include <HtmlParser.h>
 #include <LittleFS.h>  // v2.0.61: anchors file moved to LittleFS
 #include <Logging.h>
 #include <MarkdownParser.h>
@@ -119,8 +119,12 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
 
         if (!parser_ || parserSpineIndex_ != activeSpineForCache) {
           if (!promoteLookaheadParser(activeSpineForCache)) {
-            parser_.reset(new EpubChapterParser(provider->getEpubShared(), activeSpineForCache, renderer_, config,
-                                               imageCachePath, true));
+            auto* epubParser = new EpubChapterParser(provider->getEpubShared(), activeSpineForCache, renderer_, config,
+                                                     imageCachePath, true);
+            // v2.0.131 — plumb real viewport margins so R4.c .idx
+            // build uses the same paginator config as the render path.
+            epubParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
+            parser_.reset(epubParser);
             parserSpineIndex_ = activeSpineForCache;
           }
         }
@@ -141,6 +145,8 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
         if (!parser_ || parserSpineIndex_ != activeSpineForCache) {
           auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset);
           if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+          // v2.0.131 — plumb real viewport margins (see EPUB site above).
+          fb2Parser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
           parser_.reset(fb2Parser);
           parserSpineIndex_ = activeSpineForCache;
         }
@@ -149,16 +155,19 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
         if (!parser_) {
           auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config);
           if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+          // v2.0.131 — plumb real viewport margins (see EPUB site above).
+          fb2Parser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
           parser_.reset(fb2Parser);
           parserSpineIndex_ = 0;
         }
       }
     } else if (type == ContentType::Html && !(shouldAbort && shouldAbort())) {
-      cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
-      if (!parser_) {
-        parser_.reset(new HtmlParser(contentPath_, coreRef.content.cacheDir(), renderer_, config));
-        parserSpineIndex_ = 0;
-      }
+      // v2.0.162 — standalone HTML reading deleted along with the
+      // legacy ChapterHtmlSlimParser pipeline.  Opening an .html file
+      // now results in no parser → no pages → reader error.  Was a
+      // niche feature; restoring it would require running the file
+      // through the markerize pipeline (HtmlStripper directly on the
+      // SD file instead of a ZIP stream).
     } else if (type == ContentType::Txt && !(shouldAbort && shouldAbort())) {
       cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
       if (!parser_) {
@@ -223,9 +232,10 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
       const bool currentCacheComplete = pageCache_ && pageCache_->path() == cachePath && !pageCache_->isPartial();
       if (currentCacheComplete) {
         didBackgroundWork =
+            // v2.0.131 — pass vp so lookahead parsers get real viewport margins.
             cacheController_.prefetchNextEpubSpineCache(coreRef, config, activeSpineForCache, request.position.hasCover,
                                                         request.position.textStartIndex, request.plan.allowFarSweep,
-                                                        shouldAbort) ||
+                                                        shouldAbort, vp) ||
             didBackgroundWork;
       } else {
         cacheController_.resetBackgroundPrefetchState();
@@ -289,6 +299,41 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
       }
     }
 
+    // v2.0.83: drain EPUB async-decode queue.  When the chapter parser was
+    // running in quick mode (background cache build / TOC-jump indexing)
+    // it deferred JPEG → BMP conversion via PendingImageDecode::enqueue
+    // and returned a synthetic success with peek-only dimensions.  Now
+    // that the page batch is committed, do the real decode work in the
+    // background.  Each completed BMP flips the global refresh signal so
+    // the foreground reader picks up the image on its next render pass.
+    //
+    // Yield between decodes so the abort callback can fire — each decode
+    // is 3-10 s and we don't want a button-press to wait that long.
+    if (type == ContentType::Epub && !(shouldAbort && shouldAbort())) {
+      const size_t pendingBefore = snapix::pendingImage::pendingCount();
+      if (pendingBefore > 0) {
+        LOG_INF(TAG, "[CACHE] draining %u pending EPUB image decode(s)",
+                static_cast<unsigned>(pendingBefore));
+        size_t drained = 0;
+        while (snapix::pendingImage::drainOne()) {
+          ++drained;
+          if (shouldAbort && shouldAbort()) break;
+          vTaskDelay(1);
+        }
+        if (drained > 0) {
+          didBackgroundWork = true;
+          pendingBackgroundEpubRefresh_ = true;
+          pendingBackgroundEpubRefreshSpine_ = request.position.currentSpineIndex;
+          pendingBackgroundEpubRefreshPage_ = request.position.currentSectionPage < 0
+                                                  ? 0
+                                                  : request.position.currentSectionPage;
+          LOG_INF(TAG, "[CACHE] drained %u image(s); scheduled repaint spine=%d page=%d",
+                  static_cast<unsigned>(drained), request.position.currentSpineIndex,
+                  request.position.currentSectionPage);
+        }
+      }
+    }
+
     workerDidBackgroundWork = didBackgroundWork;
   });
 
@@ -338,7 +383,52 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
     const std::string cachePath = epubSectionCachePath(epub->getCachePath(), request.targetSpine);
     const std::string imageCachePath = coreRef.settings.showImages ? (epub->getCachePath() + "/images") : "";
 
-    EpubChapterParser parser(epub, request.targetSpine, renderer_, config, imageCachePath, true);
+    // v2.0.105 (architectural — persistent parser state machine):
+    //
+    // Pre-fix, the TOC worker constructed a fresh `EpubChapterParser` on
+    // the stack each invocation.  When the worker returned (e.g. after
+    // signalling `pendingTocFirstPageReady_` so the main thread could
+    // surface page 0), the parser was destroyed.  A subsequent worker
+    // invocation built a brand-new parser starting from byte 0 of the
+    // chapter source — `canResume()` returned false, so `PageCache::extend`
+    // took the COLD path, throwing away the partial cache and re-parsing
+    // the entire chapter just to add 25 more pages.  Observed on the
+    // user's 56 KB Calibre chapter: a 1-page first batch took 1.8 s,
+    // then the second invocation paid 25 s on a full cold rebuild.
+    //
+    // The fix is the same pattern the foreground BG cache controller
+    // already uses (see ReaderCacheController::createOrExtendCache at
+    // line ~1003): persist the parser in `ReaderDocumentResources::State`
+    // keyed by spine.  Reuse when the spine matches and `canResume()`
+    // returns true; create new only on spine change or non-resumable
+    // state.  All TOC worker / BG cache / page-fill jobs run on the
+    // same ReaderAsync task so there's no concurrency concern — the
+    // session lock just makes the contract explicit.
+    auto session = cacheController_.resources().acquireWorker("toc-worker");
+    if (!session) {
+      LOG_ERR(TAG, "[ASYNC] TOC worker: could not acquire resources spine=%d", request.targetSpine);
+      return;
+    }
+    auto& state = session.state();
+
+    EpubChapterParser* parser = nullptr;
+    if (state.parser && state.parserSpineIndex == request.targetSpine &&
+        state.parser->canResume()) {
+      // Reuse the existing parser — its byte cursor + XML state still
+      // point at the next unread chunk of the chapter source.  Saves
+      // the full cold-rebuild on every TOC worker re-entry.
+      parser = static_cast<EpubChapterParser*>(state.parser.get());
+    } else {
+      state.parser.reset();
+      auto* epubParser = new EpubChapterParser(epub, request.targetSpine, renderer_, config, imageCachePath, true);
+      // v2.0.131 — plumb real viewport margins so R4.c .idx build uses
+      // the same paginator config as the render path.
+      epubParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
+      state.parser = std::unique_ptr<ContentParser>(epubParser);
+      state.parserSpineIndex = request.targetSpine;
+      parser = epubParser;
+    }
+
     PageCache cache(cachePath);
     bool cacheLoaded = cache.load(config);
     if (cacheLoaded && !LittleFS.exists((cachePath + ".anchors").c_str())) {
@@ -357,20 +447,109 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
       return;
     }
 
+    // v2.0.85: tiny first batch on fresh-spine TOC jumps so we can surface
+    // page 0 ASAP via the deferred-display path.
+    // v2.0.102: follow-up batches grow to 25 pages to amortize per-cycle
+    // overhead.  shouldAbort is checked per-line so user preempts within
+    // ~100 ms regardless of batch size.
+    // v2.0.105 (this commit): parser state persists across worker
+    // invocations.  After the first 1-page batch returns and the main
+    // thread fires deferred-display, the NEXT TOC worker invocation
+    // reuses the existing parser and calls `cache.extend(parser, 25)` —
+    // hot path with canResume=1, ~5 s instead of 25 s for a fresh
+    // 25-page extend on a heavy chapter.
+    // v2.0.110 (audit fix #3): TOC worker has a strict batch budget after
+    // deferred-display fires.  Pre-fix, the worker kept looping through
+    // 25-page batches searching for the anchor — but once page 0 has been
+    // surfaced to the user via deferred-display, finding the anchor isn't
+    // user-critical anymore.  If the chapter is large and the anchor is
+    // deep, the worker would grind for tens of seconds at priority=1,
+    // starving `loopTask` and making buttons unresponsive (Agent #4 root
+    // cause of "buttons stopped responding after first page shown").
+    //
+    // New rule: after the first batch surfaces page 0, the worker gets
+    // ONE more follow-up batch budget.  If the anchor isn't found by
+    // then, exit cleanly — the user has the page they need.  BG cache
+    // controller will resume extending in its own time at priority=0.
+    bool firstBatch = !cacheLoaded;
+    bool deferredDisplayFired = false;
+    uint8_t followUpBatchBudget = kEpubTocJumpFollowUpBatchBudget;
     while (!(shouldAbort && shouldAbort())) {
-      const bool success = cacheLoaded ? cache.extend(parser, PageCache::DEFAULT_CACHE_CHUNK, shouldAbort)
-                                       : cache.create(parser, config, PageCache::DEFAULT_CACHE_CHUNK, 0, shouldAbort);
+      const uint16_t batchSize = firstBatch ? kEpubTocJumpFirstBatchPages : kEpubTocJumpFollowUpBatchPages;
+      const uint16_t pagesBeforeBatch = cache.pageCount();
+      const bool success = cacheLoaded ? cache.extend(*parser, batchSize, shouldAbort)
+                                       : cache.create(*parser, config, batchSize, 0, shouldAbort);
       if (!success) {
         LOG_ERR(TAG, "[ASYNC] TOC worker failed spine=%d", request.targetSpine);
         break;
       }
 
-      saveAnchorMap(parser, cachePath);
+      // v2.0.104: signal main thread that the first page is on disk and the
+      // cache file is closed.  Main thread's processPendingTocJump picks
+      // this up on its next tick and does a one-shot reloadCacheFromDisk
+      // followed by the deferred-display upgrade.
+      if (firstBatch && cache.pageCount() > 0) {
+        asyncJobs_.setPendingTocFirstPageReady(true);
+        deferredDisplayFired = true;
+
+        // v2.0.110 (audit fix #2): once page 0 is on disk and the main
+        // thread can render it, this worker's remaining work — anchor
+        // search through the rest of the chapter — is no longer
+        // user-critical.  Drop our priority to 0 so `loopTask` (also
+        // priority 1) gets preferential scheduling.  Audit Agent #6
+        // confirmed equal-priority round-robin starves the UI for the
+        // duration of long entropy decode / hyphenation passes; this
+        // makes button input responsive within ~1 ms instead of waiting
+        // for the parser's coarse ~100-iteration `vTaskDelay(1)`.
+        vTaskPrioritySet(nullptr, 0);
+        LOG_INF(TAG, "[ASYNC] TOC worker dropped to priority=0 after deferred-display spine=%d",
+                request.targetSpine);
+      }
+
+      saveAnchorMap(*parser, cachePath);
       if (anchorResolved() || !cache.isPartial()) {
         break;
       }
 
+      // v2.0.106: zero-progress circuit breaker.  When the parser hits a
+      // permanent heap watermark (e.g. largest_free pinned at 7668 by
+      // accumulated mid-heap fragmentation from a prior FB2 image decode
+      // via JPEGDEC fallback), makePages aborts every layout attempt and
+      // produces zero pages.  Without this guard, the outer while-loop
+      // re-invokes the parser on the SAME unrecoverable state forever
+      // (observed in the user's spine=12 trace: ~50 STOP_TRACE retries
+      // over ~6 s with no page growth).  Break out cleanly so the
+      // outer pendingTocJump retry mechanism (capped at
+      // `kPendingTocJumpMaxRetries`) can decide whether to give up or
+      // wait for heap recovery.
+      if (cache.pageCount() == pagesBeforeBatch) {
+        LOG_INF(TAG, "[ASYNC] TOC worker no-progress spine=%d batch=%u (parser aborted, heap likely fragmented)",
+                request.targetSpine, static_cast<unsigned>(batchSize));
+        break;
+      }
+
       cacheLoaded = true;
+      firstBatch = false;
+
+      // v2.0.110 (audit fix #3): post-deferred-display batch budget.
+      // After page 0 is on disk and surfaced to the user, give the
+      // anchor search ONE more follow-up batch of work (25 more pages),
+      // then exit even if anchor still not found.  The user's
+      // background-cache controller will resume extending at priority=0
+      // — anchor will be discovered on its own timeline, or the user
+      // can re-issue the TOC jump if they actually need it.  This is
+      // the "stop being aggressive after the user already has their
+      // content" rule that the audit identified as the kill condition.
+      if (deferredDisplayFired) {
+        if (followUpBatchBudget == 0) {
+          LOG_INF(TAG,
+                  "[ASYNC] TOC worker exit after post-deferred-display budget spine=%d "
+                  "(page 0 shown, anchor not yet found — BG cache will continue)",
+                  request.targetSpine);
+          break;
+        }
+        --followUpBatchBudget;
+      }
       vTaskDelay(1 / portTICK_PERIOD_MS);
     }
     return;
@@ -514,8 +693,11 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
       if (isEpub && promoteLookaheadParser(request.targetSpine)) {
         // Promoted existing resumable parser for this spine.
       } else if (isEpub) {
-        parser_.reset(
-            new EpubChapterParser(provider->getEpubShared(), request.targetSpine, renderer_, config, imageCachePath, true));
+        auto* epubParser = new EpubChapterParser(provider->getEpubShared(), request.targetSpine, renderer_, config,
+                                                 imageCachePath, true);
+        // v2.0.131 — plumb real viewport margins (see background-cache site).
+        epubParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
+        parser_.reset(epubParser);
         parserSpineIndex_ = request.targetSpine;
       } else if (type == ContentType::Fb2) {
         auto* fb2Provider = coreRef.content.asFb2();
@@ -526,11 +708,15 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
                                      &startingSectionIndex, &endOffset)) {
           auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset);
           if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+          // v2.0.131 — plumb real viewport margins (see background-cache site).
+          fb2Parser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
           parser_.reset(fb2Parser);
           parserSpineIndex_ = request.targetSpine;
         } else {
           auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config);
           if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+          // v2.0.131 — plumb real viewport margins (see background-cache site).
+          fb2Parser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
           parser_.reset(fb2Parser);
           parserSpineIndex_ = 0;
         }
@@ -538,8 +724,8 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
         parser_.reset(new MarkdownParser(contentPath_, renderer_, config));
         parserSpineIndex_ = 0;
       } else if (type == ContentType::Html) {
-        parser_.reset(new HtmlParser(contentPath_, coreRef.content.cacheDir(), renderer_, config));
-        parserSpineIndex_ = 0;
+        // v2.0.162 — HtmlParser deleted; see comment in the analogous
+        // branch in scheduleBackgroundCacheJob above.
       } else if (type == ContentType::Txt) {
         parser_.reset(new PlainTextParser(contentPath_, renderer_, config));
         parserSpineIndex_ = 0;
@@ -568,8 +754,11 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
       }
       const int remainingPages = (request.targetPage + 1) - static_cast<int>(pageCache_->pageCount());
       if (isEpub) {
-        const int desiredPages =
-            std::max(1, remainingPages + static_cast<int>(reader::kEpubInteractivePageFillHeadroomPages));
+        const reader::HeapState heap = reader::readHeapState();
+        const int speculativeHeadroom = reader::isHeapTight(heap)
+                                            ? 0
+                                            : static_cast<int>(reader::kEpubInteractivePageFillHeadroomPages);
+        const int desiredPages = std::max(1, remainingPages + speculativeHeadroom);
         return static_cast<uint16_t>(std::min<int>(desiredPages, defaultBatch));
       }
       if (remainingPages <= 1) {

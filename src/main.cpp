@@ -895,10 +895,62 @@ void initReaderMode() {
   LOG_DBG(TAG, "[READER mode] After init - Free heap: %lu, Max block: %lu", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 }
 
+// =========================================================================
+// loopTask stack size override.
+//
+// Arduino-ESP32's framework declares `getArduinoLoopTaskStackSize` as
+// `__attribute__((weak))` returning ARDUINO_LOOP_STACK_SIZE (default 8 KB).
+// We override it here (strong symbol) when SmolJpeg or SmolPng is active
+// in the build, because the cover-gen call chain
+// (ReaderState → ContentHandle → Epub::generateCoverBmp → ZipFile extract
+//  → ImageConverter → SmolJpeg::decodeTo1BitBmp → parseMarkers →
+//  decodeBaselineStream → decodeBaselineBlock → idct) consumes ~12 KB
+// of stack at the worst point even after the v2.0.88 heap-allocation
+// pass moved BitReader / coef / pix / ws into OwnedArray.
+//
+// v2.0.150: bumped 16384 → 24576 (24 KB).  v3-streaming render path
+// runs from loopTask too (via tryFastTurn → renderCachedPage →
+// renderPageContents → renderMarkerizedPage).  That stack frame
+// adds ~7 KB on top of any cover-gen chain that already used
+// 12 KB — total ~19 KB blows the 16 KB limit.  Symptom: stack-
+// protection panic in loopTask right after `R3.6 paginator cfg`
+// log on first page-turn into an image-heavy FB2 chapter (with
+// the cumulative paginator growth in v2.0.140-2.0.146 making the
+// frame fatter).  +8 KB DRAM cost; same trade-off as ReaderAsync
+// in v2.0.149.
+//
+// v2.0.151: REVERTED back to 16384.  The +8 KB stack bump cost 8 KB
+// of heap that EPUB chapter prepare needed (ZIP deflate + HTML
+// normalize ~30 KB peak).  Symptom: chapter prepare aborted on every
+// retry with "heap dangerously low (8344 bytes free)" — page never
+// loaded.  Fix: heap-allocate StreamingPaginator's 2 KB
+// spilloverBuf_, dropping the streaming render stack frame back
+// under the original 16 KB limit without permanently reserving the
+// 8 KB for the unlikely path.
+//
+// `-DCONFIG_ARDUINO_LOOP_STACK_SIZE=16384` in platformio.ini doesn't
+// reliably override on this snapix toolchain (likely sdkconfig.h
+// pre-defines the macro), so we use the weak-symbol approach instead.
+// =========================================================================
+#if SNAPIX_SMOL_JPEG || SNAPIX_SMOL_PNG
+size_t getArduinoLoopTaskStackSize() {
+  return 16384;
+}
+#endif
+
 void setup() {
   // Early initialization (common to both modes)
   if (!earlyInit()) {
-    return;  // Critical failure
+    // Critical init failure (SD card missing/unformatted, LittleFS dead,
+    // etc.) — `showErrorScreen()` already painted the failure message.
+    // Halt setup so `loop()` never runs; otherwise the auto-sleep path
+    // there would call `stateMachine.init(StateId::Sleep)` against an
+    // empty state registry and flood the serial log with
+    // "No state registered for id 9" errors every loop iteration.
+    LOG_ERR(TAG, "Critical init failure — halting (see error screen)");
+    while (true) {
+      delay(1000);  // delay() yields to FreeRTOS so the watchdog stays happy
+    }
   }
 
   // Detect boot mode from RTC memory or settings

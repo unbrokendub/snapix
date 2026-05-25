@@ -1,0 +1,9 @@
+{
+  "name": "SmolPort",
+  "version": "0.1.0",
+  "description": "Embedded EPUB/FB2 reader primitives ported from smol-epub (MIT) — byte-marker styled text, integrated 1-bit image decoders, static-workspace parsers. Foundation for Snapix v3.0 refactor.",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

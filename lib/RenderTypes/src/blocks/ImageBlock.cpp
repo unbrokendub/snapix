@@ -65,11 +65,25 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
     return std::string{};
   };
 
-  // Resolve the highest-quality stage available — once per ImageBlock
-  // instance (page reloads via pendingBackgroundEpubRefresh_ rebuild
-  // ImageBlocks from cache, so a freshly-decoded full BMP gets picked up
-  // on the next render cycle when resolvedKind_ resets to Unresolved).
-  if (resolvedKind_ == ResolvedKind::Unresolved) {
+  // Resolve the highest-quality stage available.
+  //
+  // Original v2.0.70 design: resolve once per ImageBlock instance; page
+  // reloads via pendingBackgroundEpubRefresh_ rebuild ImageBlocks from
+  // cache so a freshly-decoded full BMP gets picked up next render when
+  // resolvedKind_ resets to Unresolved.  In practice the "refreshing
+  // current page after background cache rewrite" path uses the resident
+  // cache (page-load source=resident, see ReaderCacheController) so the
+  // ImageBlock instance survives with a stale resolvedKind_=None and the
+  // page stays on the "loading…" placeholder forever — observed on first
+  // open of a cover page where async JPEG decode finishes ~1-3 s after
+  // initial render.
+  //
+  // v2.0.88 fix: re-probe LittleFS whenever we have anything less than
+  // a Full match.  LittleFS.exists is a directory lookup (~1 ms), cheap
+  // compared to drawBitmap's row streaming, so the cost is in the noise.
+  // Once we've got a Full match resolvedKind_=Full sticks and re-probe
+  // is skipped.
+  if (resolvedKind_ != ResolvedKind::Full) {
     struct Candidate {
       ResolvedKind kind;
       std::string path;
@@ -116,6 +130,14 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
         LOG_ERR(TAG, "render: BMP size out of range (size=%u path=%s)", static_cast<unsigned>(fileSize),
                 resolvedRenderPath_.c_str());
         flashFile.close();
+        // v2.0.99: delete the corrupt BMP so the resolve / async-decode
+        // path doesn't keep finding it.  Without this, every subsequent
+        // page render re-hits the same dead file (cache lookup says
+        // "exists=1") and falls through to placeholder permanently.
+        // Caller's `PendingImageDecode` queue may also have already
+        // dropped the temp source, so the next attempt to render this
+        // image triggers a fresh fetch-and-decode cycle.
+        LittleFS.remove(resolvedRenderPath_.c_str());
       } else {
         Bitmap stageBitmap(flashFile, true);
         const BmpReaderError parseRc = stageBitmap.parseHeaders();
@@ -128,6 +150,11 @@ void ImageBlock::render(GfxRenderer& renderer, const int fontId, const int x, co
                 static_cast<unsigned>(parseRc), Bitmap::errorToString(parseRc),
                 resolvedRenderPath_.c_str());
         flashFile.close();
+        // v2.0.99: same cleanup as the size-out-of-range branch above —
+        // a BMP that opens but fails header parse is corrupt junk; if
+        // we leave it on disk the resolve path keeps "succeeding" on
+        // exists() and we render placeholders forever.
+        LittleFS.remove(resolvedRenderPath_.c_str());
       }
     }
     // Either the file vanished between resolve and read, or its header is

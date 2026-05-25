@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 class Page;
 
@@ -84,6 +85,133 @@ struct PendingRefreshState {
     active = false;
     spine = -1;
     page = -1;
+  }
+};
+
+enum class ReaderNavigationJobKind : uint8_t {
+  None,
+  TocJump,
+  PageLoad,
+};
+
+enum class ReaderNavigationJobVisibility : uint8_t {
+  BlockingOverlay,
+  DeferredDisplay,
+};
+
+enum class ReaderNavigationBlockReason : uint8_t {
+  None,
+  PageLoadNoProgress,
+};
+
+struct ReaderNavigationJob {
+  ReaderNavigationJobKind kind = ReaderNavigationJobKind::None;
+  ReaderNavigationJobVisibility visibility = ReaderNavigationJobVisibility::BlockingOverlay;
+
+  bool tocJumpActive = false;
+  bool tocJumpIndexingShown = false;
+  bool tocJumpDeferredDisplay = false;
+  int tocJumpTargetSpine = -1;
+  int tocJumpTargetPageHint = -1;
+  std::string tocJumpAnchor;
+  uint8_t tocJumpRetryCount = 0;
+  uint32_t tocJumpStartedMs = 0;
+  uint32_t tocJumpLastDiagMs = 0;
+  bool tocFirstPageReady = false;
+
+  bool pageLoadActive = false;
+  bool pageLoadMessageShown = false;
+  bool pageLoadRequireComplete = false;
+  bool pageLoadUseIndexingMessage = false;
+  int pageLoadTargetSpine = -1;
+  int pageLoadTargetPage = 0;
+  uint8_t pageLoadRetryCount = 0;
+  uint32_t pageLoadStartedMs = 0;
+  uint32_t pageLoadLastDiagMs = 0;
+  uint32_t pageLoadNextRetryMs = 0;
+
+  int queuedTurn = 0;
+  uint32_t queuedTurnQueuedMs = 0;
+  bool queuedTurnHasQueuedMs = false;
+  uint32_t lastCachePreemptRequestedMs = 0;
+  bool deferredTurnAwaitingWorkerIdle = false;
+  bool deferredTurnIdleLogged = false;
+
+  ReaderNavigationBlockReason blockedReason = ReaderNavigationBlockReason::None;
+  int blockedSpine = -1;
+  int blockedPage = -1;
+  uint8_t blockedFailures = 0;
+  uint32_t blockedAtMs = 0;
+
+  bool active() const { return kind != ReaderNavigationJobKind::None; }
+  bool blocksInput() const {
+    return kind == ReaderNavigationJobKind::TocJump && !tocJumpDeferredDisplay;
+  }
+  bool tocDeferredDisplay() const {
+    return kind == ReaderNavigationJobKind::TocJump && tocJumpDeferredDisplay;
+  }
+  bool blocksPageLoad(int spine, int page) const {
+    return blockedReason != ReaderNavigationBlockReason::None && blockedSpine == spine && blockedPage == page;
+  }
+
+  void clearTocJump() {
+    if (kind == ReaderNavigationJobKind::TocJump) {
+      kind = ReaderNavigationJobKind::None;
+      visibility = ReaderNavigationJobVisibility::BlockingOverlay;
+    }
+    tocJumpActive = false;
+    tocJumpIndexingShown = false;
+    tocJumpDeferredDisplay = false;
+    tocJumpTargetSpine = -1;
+    tocJumpTargetPageHint = -1;
+    tocJumpAnchor.clear();
+    tocJumpRetryCount = 0;
+    tocJumpStartedMs = 0;
+    tocJumpLastDiagMs = 0;
+    tocFirstPageReady = false;
+  }
+
+  void clearPageLoad() {
+    if (kind == ReaderNavigationJobKind::PageLoad) {
+      kind = ReaderNavigationJobKind::None;
+      visibility = ReaderNavigationJobVisibility::BlockingOverlay;
+    }
+    pageLoadActive = false;
+    pageLoadMessageShown = false;
+    pageLoadRequireComplete = false;
+    pageLoadUseIndexingMessage = false;
+    pageLoadTargetSpine = -1;
+    pageLoadTargetPage = 0;
+    pageLoadRetryCount = 0;
+    pageLoadStartedMs = 0;
+    pageLoadLastDiagMs = 0;
+    pageLoadNextRetryMs = 0;
+  }
+
+  void clearQueuedTurn() {
+    queuedTurn = 0;
+    queuedTurnQueuedMs = 0;
+    queuedTurnHasQueuedMs = false;
+    lastCachePreemptRequestedMs = 0;
+    deferredTurnAwaitingWorkerIdle = false;
+    deferredTurnIdleLogged = false;
+  }
+
+  void clearBlocked() {
+    blockedReason = ReaderNavigationBlockReason::None;
+    blockedSpine = -1;
+    blockedPage = -1;
+    blockedFailures = 0;
+    blockedAtMs = 0;
+  }
+
+  void clear() {
+    clearTocJump();
+    clearPageLoad();
+    clearQueuedTurn();
+    clearBlocked();
+    kind = ReaderNavigationJobKind::None;
+    visibility = ReaderNavigationJobVisibility::BlockingOverlay;
   }
 };
 

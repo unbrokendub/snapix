@@ -50,8 +50,16 @@ class InflateReader {
   // Returns false only in streaming mode if the ring buffer allocation fails.
   bool init(bool streaming = false);
 
-  // Initialise with an externally-owned ring buffer (must be >= 32KB).
-  // The caller is responsible for the buffer's lifetime. deinit() will not free it.
+  // v2.0.178 — streaming-mode init: heap first, externalBuffer as fallback.
+  // (v2.0.177 added a 32 KB BSS scratch as the primary path; reverted in
+  // v2.0.178 — see InflateReader.cpp for why.)  The implementation tries
+  // malloc(32 KB) first; on success the heap buffer is owned (freed in
+  // deinit()).  If malloc fails, it falls back to externalBuffer (must be
+  // >= 32 KB, caller-owned lifetime, not freed in deinit()).  Callers
+  // typically pass renderer.getFrameBuffer() via Epub's
+  // sharedZipDictBuffer() so chapter parses can still proceed when heap
+  // is too fragmented to provide 32 KB contiguous — at the cost of a
+  // possible display-corruption glitch (see Epub.cpp comments).
   bool init(bool streaming, uint8_t* externalBuffer);
 
   // Release the ring buffer (if owned) and reset internal state.
@@ -86,4 +94,7 @@ class InflateReader {
   uzlib_uncomp decomp = {};
   uint8_t* ringBuffer = nullptr;
   bool ownsRingBuffer = false;
+  // v2.0.178 — removed v2.0.177's `usingBssScratch` flag and the
+  // associated BSS scratch buffer; reverted to v2.0.176's heap-first/
+  // externalBuffer-fallback strategy.  See InflateReader.cpp top comment.
 };

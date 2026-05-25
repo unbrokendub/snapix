@@ -9,6 +9,7 @@
 
 #include <expat.h>
 
+#include <algorithm>
 #include <climits>
 #include <cstdint>
 #include <functional>
@@ -84,7 +85,37 @@ class Fb2 {
   // Built during the initial XML parse and persisted in meta.bin.  Lets the
   // chapter parser jump directly to a referenced <image l:href="#id"/> at
   // render time without re-scanning the whole file.
-  std::unordered_map<std::string, BinaryEntry> binaryIndex_;
+  //
+  // v2.0.179 — replaced std::unordered_map with a sorted std::vector.  For a
+  // typical FB2 (~30 embedded images, occasionally up to ~100), the vector
+  // drops ~1-4 KB of hash-bucket overhead per book load.  Build phase
+  // appends entries unsorted; first lookup sorts once, subsequent lookups
+  // are O(log N) via binary_search.  Iteration (during meta.bin save) is
+  // order-independent so no sort needed for that path.
+  using BinaryIndexEntry = std::pair<std::string, BinaryEntry>;
+  // mutable: lazy-sort runs inside const lookup paths (cacheImage,
+  // peekImageDims, decodeImageDirect).  The vector's CONTENT is logically
+  // immutable after the build phase — only the iteration order changes
+  // when the first lookup triggers the one-time sort.
+  mutable std::vector<BinaryIndexEntry> binaryIndex_;
+  mutable bool binaryIndexSorted_ = true;  // empty vector is trivially sorted
+
+  void binaryIndexInsert(std::string id, const BinaryEntry& entry) {
+    binaryIndex_.emplace_back(std::move(id), entry);
+    binaryIndexSorted_ = false;
+  }
+  const BinaryEntry* binaryIndexFind(const std::string& id) const {
+    if (!binaryIndexSorted_) {
+      std::sort(binaryIndex_.begin(), binaryIndex_.end(),
+                [](const BinaryIndexEntry& a, const BinaryIndexEntry& b) { return a.first < b.first; });
+      binaryIndexSorted_ = true;
+    }
+    auto it = std::lower_bound(
+        binaryIndex_.begin(), binaryIndex_.end(), id,
+        [](const BinaryIndexEntry& entry, const std::string& key) { return entry.first < key; });
+    if (it != binaryIndex_.end() && it->first == id) return &it->second;
+    return nullptr;
+  }
 
   // In-memory list of binary ids whose `cacheImage[fast]` base64 stream was
   // aborted mid-flight (typically because the user pressed page-turn while
@@ -104,8 +135,18 @@ class Fb2 {
   // cacheImage[fast]'s pump-based peek path.  Reading the JPEG SOF marker
   // requires opening the FB2 source and decoding ~1 KB of base64; caching
   // the result lets repeat `peekImageDims` calls (parser sometimes asks for
-  // the same binary twice during hot-extend) be a free hash-map lookup.
-  mutable std::unordered_map<std::string, std::pair<uint16_t, uint16_t>> peekedSourceDims_;
+  // the same binary twice during hot-extend) be a free vector lookup.
+  //
+  // v2.0.179 — replaced std::unordered_map with linear-scan vector.  This
+  // cache is small (~5-15 entries per book, one per uniquely-peeked image),
+  // so the linear scan is faster in practice than hashing + bucket walk.
+  // Saves the ~40 B/entry hash overhead — modest but free.
+  struct PeekedDimsEntry {
+    std::string id;
+    uint16_t width;
+    uint16_t height;
+  };
+  mutable std::vector<PeekedDimsEntry> peekedSourceDims_;
 
   // In-memory queue of binary ids whose JPEG BMP has not yet been
   // materialised on disk.  Populated by cacheImage[fast] (as the parser
@@ -220,10 +261,8 @@ class Fb2 {
   TocItem getTocItem(uint16_t index) const;
 
   // Binary (image) index access — returns nullptr if id not found.
-  const BinaryEntry* findBinary(const std::string& id) const {
-    auto it = binaryIndex_.find(id);
-    return (it != binaryIndex_.end()) ? &it->second : nullptr;
-  }
+  // v2.0.179 — delegates to the sorted-vector lookup helper.
+  const BinaryEntry* findBinary(const std::string& id) const { return binaryIndexFind(id); }
   size_t binaryCount() const { return binaryIndex_.size(); }
 
   /**

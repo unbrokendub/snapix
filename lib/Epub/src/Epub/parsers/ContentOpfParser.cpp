@@ -183,7 +183,9 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
           LOG_ERR(TAG, "Failed to read manifest item from temp store");
           break;
         }
-        self->manifestIndex[itemId] = href;
+        // v2.0.179 — sorted-vector replacement for unordered_map; append
+        // here and sort lazily on first lookup in the spine pass.
+        self->manifestInsert(std::move(itemId), std::move(href));
       }
       self->tempItemStore.close();
     }
@@ -271,9 +273,12 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       for (int i = 0; atts[i]; i += 2) {
         if (strcmp(atts[i], "idref") == 0) {
           const std::string idref = atts[i + 1];
-          auto it = self->manifestIndex.find(idref);
-          if (it != self->manifestIndex.end()) {
-            self->cache->createSpineEntry(it->second);
+          // v2.0.179 — sorted-vector lookup (binary search after one-time
+          // lazy sort).  Same O(log N) lookup as the prior hash map but
+          // without the ~40 B/entry bucket overhead.
+          const std::string* href = self->manifestFind(idref);
+          if (href != nullptr) {
+            self->cache->createSpineEntry(*href);
           }
         }
       }

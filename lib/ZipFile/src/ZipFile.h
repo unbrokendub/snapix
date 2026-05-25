@@ -2,9 +2,61 @@
 #include <SdFat.h>
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+class ZipFile;
+
+// v2.0.159 — streaming reader for a single ZIP entry.  Returned by
+// `ZipFile::openItemStream()`.  Self-contained: owns its own FsFile handle
+// (seeked to the entry's data offset), uzlib InflateReader (with a 32 KB
+// dict), and an 8 KB SD read buffer.  Outlives the ZipFile that created it.
+//
+// Use this instead of `readFileToStream{Detailed}` when the consumer wants
+// to pull bytes lazily — eliminates the need for a temp file to hold the
+// fully-extracted content.  Primary use case: markerize-from-ZIP (see
+// EpubChapterParser::tryMarkerizeChapter) which avoids the 50 KB transient
+// heap peak + ~10 s wall time of the old extract-to-LittleFS path.
+//
+// Heap cost: 32 KB dict (or caller-provided buffer) + 8 KB SD read buf,
+// freed when the reader is destroyed.  No I/O until `read()` is called.
+class ZipItemReader {
+ public:
+  ~ZipItemReader();
+
+  ZipItemReader(const ZipItemReader&) = delete;
+  ZipItemReader& operator=(const ZipItemReader&) = delete;
+  ZipItemReader(ZipItemReader&&) noexcept;
+  ZipItemReader& operator=(ZipItemReader&&) noexcept;
+
+  // Read up to `maxLen` bytes of decompressed content into `buf`.  Returns:
+  //   * positive N → N bytes written to buf[0..N)
+  //   * zero        → EOF reached (clean end of stream)
+  //   * negative    → I/O or decompression error (reader is invalidated)
+  int read(uint8_t* buf, size_t maxLen);
+
+  // Total uncompressed size of the entry (from the ZIP central directory).
+  // Available immediately after construction, before any read() call.
+  uint32_t totalUncompressedSize() const;
+
+  // Bytes produced so far across all read() calls.
+  uint32_t bytesProduced() const;
+
+  // True once read() has reached the clean end of the stream.
+  bool isEof() const;
+
+  // True if a previous read() returned an error.
+  bool hasError() const;
+
+ private:
+  friend class ZipFile;
+  ZipItemReader();
+
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
 
 class ZipFile {
  public:
@@ -95,4 +147,14 @@ class ZipFile {
                                             const std::function<bool()>& shouldAbort = nullptr);
   bool readFileToStream(const char* filename, Print& out, size_t chunkSize, uint8_t* dictBuffer = nullptr,
                         const std::function<bool()>& shouldAbort = nullptr);
+
+  // v2.0.159 — open a ZIP entry for lazy streaming reads.  See ZipItemReader.
+  // `chunkSize` is the SD read buffer the reader uses for compressed-data
+  // pulls (8 KB matches `LARGE_ZIP_STREAM_CHUNK` in EpubChapterParser).
+  // `dictBuffer` is optional; nullptr → InflateReader heap-allocates 32 KB.
+  // Returns a non-null unique_ptr on success, nullptr on any failure
+  // (open, lookup, allocation).  The returned reader OUTLIVES this ZipFile
+  // — it opens its own FsFile handle to the same path during construction.
+  std::unique_ptr<ZipItemReader> openItemStream(const char* filename, size_t chunkSize = 8192,
+                                                uint8_t* dictBuffer = nullptr);
 };

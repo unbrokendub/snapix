@@ -1,0 +1,9 @@
+{
+  "name": "SmolJpeg",
+  "version": "0.1.0",
+  "description": "Minimal baseline JPEG decoder producing 1-bit Floyd-Steinberg dithered bitmaps directly. Y-channel only (chrominance Huffman-skipped). Ported from hansmrtn/smol-epub jpeg.rs (MIT/Apache-2.0) for Snapix v3.0.",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

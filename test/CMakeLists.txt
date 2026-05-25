@@ -306,6 +306,63 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${CMAKE_CURRENT_SOURCE_DIR}/unit/logging
       ${PROJECT_ROOT}/lib/Logging/src
     )
+  elseif(TEST_NAME STREQUAL "StreamingPaginatorTest")
+    # v2.0.115 Phase R1 — event-driven layouter (host-side, no Arduino deps).
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/StreamingPaginator.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
+  elseif(TEST_NAME STREQUAL "MarkerizeChapterTest")
+    # v2.0.116 Phase R2 — markerize side-channel.  Drives HtmlStripper over
+    # an HTML/FB2 byte stream via callback I/O so the same code path runs
+    # on host (in-memory vectors) and firmware (LittleFS).
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
+  elseif(TEST_NAME STREQUAL "MarkerizedPageRenderTest")
+    # v2.0.121 Phase R3.4 — page-targeted streaming render.  Composes
+    # markerize + chapter renderer + paginator with a draw-suppression
+    # gate to render arbitrary pages of a marker stream.
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizedPageRender.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/StreamingChapterRenderer.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/StreamingPaginator.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerStream.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
+  elseif(TEST_NAME STREQUAL "StreamingChapterRendererTest")
+    # v2.0.119 Phase R3.1 — chapter render orchestrator + full pipeline test.
+    # Pulls in markerize + HtmlStripper + MarkerStream + StreamingPaginator
+    # to exercise the full markers→events→layout round-trip on host without
+    # any GfxRenderer / Arduino dependency.
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/StreamingChapterRenderer.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/StreamingPaginator.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerStream.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
   else()
     add_executable(${TEST_NAME} ${TEST_SRC} ${TEST_HELPERS})
   endif()

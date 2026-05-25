@@ -1,0 +1,15 @@
+{
+  "name": "SnapixCache",
+  "version": "1.0.0",
+  "description": "Unified single .bin per-book cache format — replaces v2's per-section .bin + .anchors + images/ tree with one file containing a chapter table, anchor table, image table, and concatenated blob region. Phase 5 of the snapix v3 refactor; activates under SNAPIX_UNIFIED_CACHE.",
+  "dependencies": {},
+  "platforms": "espressif32",
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <Hyphenation.h>
+#include <LittleFS.h>
 #include <Logging.h>
 #include <Utf8.h>
 
@@ -9,6 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <vector>
 
@@ -16,6 +20,8 @@
 constexpr float INFINITY_PENALTY = 10000.0f;
 constexpr float LINE_PENALTY = 50.0f;
 constexpr size_t MAX_GREEDY_WORDS_PER_LINE = 64;
+constexpr size_t SPILL_WORD_THRESHOLD = 96;
+constexpr uint16_t SPILL_MAGIC = 0x5054;  // "PT"
 
 // Soft hyphen (U+00AD) as UTF-8 bytes
 constexpr unsigned char SOFT_HYPHEN_BYTE1 = 0xC2;
@@ -189,6 +195,341 @@ float calculateDemerits(float badness, bool isLastLine) {
 
 }  // namespace
 
+ParsedText::~ParsedText() { cleanupSpill(); }
+
+void ParsedText::cleanupSpill() {
+  if (spillAppendFile_) {
+    spillAppendFile_.close();
+  }
+  if (!spillPath_.empty()) {
+    LittleFS.remove(spillPath_.c_str());
+    spillPath_.clear();
+  }
+  spillReadOffset_ = 0;
+  spillWords_ = 0;
+  spillWriteFailed_ = false;
+}
+
+bool ParsedText::appendSpillWord(const std::string& word, const EpdFontFamily::Style fontStyle) {
+  if (word.size() > UINT16_MAX) {
+    return false;
+  }
+
+  if (spillPath_.empty()) {
+    static uint16_t nextSpillId = 0;
+    char path[40];
+    std::snprintf(path, sizeof(path), "/pt_%08lx_%04x.bin",
+                  static_cast<unsigned long>(reinterpret_cast<uintptr_t>(this)),
+                  static_cast<unsigned>(++nextSpillId));
+    spillPath_ = path;
+    spillReadOffset_ = 0;
+    LittleFS.remove(spillPath_.c_str());
+    LOG_DBG(TAG, "[SPILL] ParsedText spilling after %u RAM words to %s",
+            static_cast<unsigned>(words.size()), spillPath_.c_str());
+  }
+
+  // v2.0.110 (ChatGPT-audit perf fix): persistent append handle.  Pre-fix
+  // opened+closed the spill file PER WORD — at ~5 ms/open × 96 words per
+  // spill burst = ~500 ms of pure filesystem overhead.  Keep one handle
+  // open in "a" mode for the duration of the parse phase; close in
+  // layoutSpilledGreedy (before read-open) and in cleanupSpill.
+  if (!spillAppendFile_) {
+    spillAppendFile_ = LittleFS.open(spillPath_.c_str(), "a");
+    if (!spillAppendFile_) {
+      LOG_ERR(TAG, "[SPILL] failed to open %s for append", spillPath_.c_str());
+      return false;
+    }
+  }
+
+  const uint16_t magic = SPILL_MAGIC;
+  const uint16_t len = static_cast<uint16_t>(word.size());
+  const uint8_t styleByte = static_cast<uint8_t>(fontStyle);
+  bool ok = true;
+  ok = ok && spillAppendFile_.write(reinterpret_cast<const uint8_t*>(&magic), sizeof(magic)) == sizeof(magic);
+  ok = ok && spillAppendFile_.write(reinterpret_cast<const uint8_t*>(&len), sizeof(len)) == sizeof(len);
+  ok = ok && spillAppendFile_.write(&styleByte, sizeof(styleByte)) == sizeof(styleByte);
+  if (len > 0) {
+    ok = ok && spillAppendFile_.write(reinterpret_cast<const uint8_t*>(word.data()), len) == len;
+  }
+  // Don't flush/close per word — that would defeat the optimization.  The
+  // handle stays open; LittleFS buffers writes internally and the layout-
+  // phase flush+close (below) drains them before read-open.
+
+  if (!ok) {
+    LOG_ERR(TAG, "[SPILL] failed to append word to %s", spillPath_.c_str());
+    return false;
+  }
+
+  ++spillWords_;
+  return true;
+}
+
+bool ParsedText::storeWord(std::string word, const EpdFontFamily::Style fontStyle) {
+  if (word.empty()) {
+    return true;
+  }
+
+  if (!spillWriteFailed_ && (spillWords_ > 0 || words.size() >= SPILL_WORD_THRESHOLD)) {
+    if (appendSpillWord(word, fontStyle)) {
+      return true;
+    }
+    spillWriteFailed_ = true;
+  }
+
+  words.push_back({std::move(word), fontStyle});
+  return true;
+}
+
+bool ParsedText::readSpillWord(File& file, WordEntry& out) {
+  uint16_t magic = 0;
+  uint16_t len = 0;
+  uint8_t styleByte = 0;
+
+  if (file.read(reinterpret_cast<uint8_t*>(&magic), sizeof(magic)) != static_cast<int>(sizeof(magic))) {
+    return false;
+  }
+  if (magic != SPILL_MAGIC) {
+    LOG_ERR(TAG, "[SPILL] invalid record magic in %s at %lu", spillPath_.c_str(),
+            static_cast<unsigned long>(file.position()));
+    return false;
+  }
+  if (file.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != static_cast<int>(sizeof(len))) {
+    return false;
+  }
+  if (file.read(&styleByte, sizeof(styleByte)) != static_cast<int>(sizeof(styleByte))) {
+    return false;
+  }
+
+  std::string word;
+  word.resize(len);
+  if (len > 0 &&
+      file.read(reinterpret_cast<uint8_t*>(&word[0]), len) != static_cast<int>(len)) {
+    return false;
+  }
+
+  out.word = std::move(word);
+  out.style = static_cast<EpdFontFamily::Style>(styleByte);
+  return true;
+}
+
+bool ParsedText::layoutSpilledGreedy(const GfxRenderer& renderer, const int fontId, const int pageWidth,
+                                     const int spaceWidth,
+                                     const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
+                                     const bool includeLastLine, const AbortCallback& shouldAbort) {
+  // v2.0.110: close any open append handle before reopening for read.
+  // appendSpillWord keeps the file open in "a" mode for the duration of
+  // the parse phase (to avoid per-word open/close overhead); we must
+  // flush/close it before opening for read or recent writes won't be
+  // visible.  LittleFS doesn't share state between independent handles.
+  if (spillAppendFile_) {
+    spillAppendFile_.flush();
+    spillAppendFile_.close();
+  }
+
+  File spillFile;
+  bool spillEof = spillPath_.empty();
+  if (!spillPath_.empty()) {
+    spillFile = LittleFS.open(spillPath_.c_str(), "r");
+    if (!spillFile) {
+      LOG_ERR(TAG, "[SPILL] failed to open %s for layout", spillPath_.c_str());
+      return false;
+    }
+    if (spillReadOffset_ > 0 && !spillFile.seek(spillReadOffset_)) {
+      LOG_ERR(TAG, "[SPILL] failed to seek %s to %lu", spillPath_.c_str(),
+              static_cast<unsigned long>(spillReadOffset_));
+      spillFile.close();
+      return false;
+    }
+  }
+
+  if (!indentApplied && indentLevel > 0 && style != TextBlock::CENTER_ALIGN) {
+    if (!words.empty()) {
+      std::string& firstWord = words.front().word;
+      switch (indentLevel) {
+        case 2:
+          firstWord.insert(0, "\xe2\x80\x83");
+          break;
+        case 3:
+          firstWord.insert(0, "\xe2\x80\x83\xe2\x80\x82");
+          break;
+        default:
+          firstWord.insert(0, "\xe2\x80\x82");
+          break;
+      }
+      indentApplied = true;
+    }
+  }
+
+  std::deque<WordEntry> lineWords;
+  std::deque<uint16_t> lineWidths;
+  lineWords.clear();
+  lineWidths.clear();
+  int lineWidth = -spaceWidth;
+
+  auto restoreLineToFront = [&]() {
+    while (!lineWords.empty()) {
+      words.push_front(std::move(lineWords.back()));
+      lineWords.pop_back();
+      lineWidths.pop_back();
+    }
+    lineWidth = -spaceWidth;
+  };
+
+  auto emitLine = [&](const bool isLastLine) {
+    if (lineWords.empty()) {
+      lineWidth = -spaceWidth;
+      return;
+    }
+
+    int lineWordWidthSum = 0;
+    int naturalGapWidthSum = 0;
+    size_t actualGapCount = 0;
+    EpdFontFamily::Style previousStyle = EpdFontFamily::REGULAR;
+    gapWidthsPool_.assign(lineWords.size(), 0);
+
+    for (size_t wordIdx = 0; wordIdx < lineWords.size(); ++wordIdx) {
+      lineWordWidthSum += lineWidths[wordIdx];
+      if (wordIdx > 0 && !isAttachingPunctuationWord(lineWords[wordIdx].word)) {
+        const uint16_t gapWidth =
+            static_cast<uint16_t>(std::max(renderer.getSpaceWidth(fontId, previousStyle),
+                                           renderer.getSpaceWidth(fontId, lineWords[wordIdx].style)));
+        gapWidthsPool_[wordIdx] = gapWidth;
+        naturalGapWidthSum += gapWidth;
+        ++actualGapCount;
+      }
+      previousStyle = lineWords[wordIdx].style;
+    }
+
+    const int contentWidth = lineWordWidthSum + naturalGapWidthSum;
+    const int spareSpace = std::max(0, pageWidth - contentWidth);
+    const bool isJustifiedLine = style == TextBlock::JUSTIFIED && !isLastLine && actualGapCount >= 1;
+    const int justifyExtraPerGap = isJustifiedLine ? spareSpace / static_cast<int>(actualGapCount) : 0;
+    int justifyExtraRemainder = isJustifiedLine ? spareSpace % static_cast<int>(actualGapCount) : 0;
+    const auto effectiveStyle = (isRtl && style == TextBlock::LEFT_ALIGN) ? TextBlock::RIGHT_ALIGN : style;
+
+    std::vector<TextBlock::WordInput> lineData;
+    lineData.reserve(lineWords.size());
+
+    if (isRtl) {
+      int xpos = pageWidth;
+      if (effectiveStyle == TextBlock::CENTER_ALIGN) {
+        xpos = pageWidth - (spareSpace / 2);
+      }
+
+      for (size_t wordIdx = 0; wordIdx < lineWords.size(); ++wordIdx) {
+        const uint16_t currentWordWidth = lineWidths[wordIdx];
+        xpos -= currentWordWidth;
+        lineData.push_back({replaceTrailingSoftHyphen(std::move(lineWords[wordIdx].word)),
+                            static_cast<uint16_t>(std::max(0, xpos)), lineWords[wordIdx].style});
+        if (wordIdx + 1 < lineWords.size()) {
+          int gapWidth = gapWidthsPool_[wordIdx + 1];
+          if (isJustifiedLine && gapWidth > 0) {
+            gapWidth += justifyExtraPerGap;
+            if (justifyExtraRemainder > 0) {
+              ++gapWidth;
+              --justifyExtraRemainder;
+            }
+          }
+          xpos -= gapWidth;
+        }
+      }
+    } else {
+      int xpos = 0;
+      if (effectiveStyle == TextBlock::RIGHT_ALIGN) {
+        xpos = spareSpace;
+      } else if (effectiveStyle == TextBlock::CENTER_ALIGN) {
+        xpos = spareSpace / 2;
+      }
+
+      for (size_t wordIdx = 0; wordIdx < lineWords.size(); ++wordIdx) {
+        const uint16_t currentWordWidth = lineWidths[wordIdx];
+        lineData.push_back({replaceTrailingSoftHyphen(std::move(lineWords[wordIdx].word)),
+                            static_cast<uint16_t>(std::max(0, xpos)), lineWords[wordIdx].style});
+        xpos += currentWordWidth;
+        if (wordIdx + 1 < lineWords.size()) {
+          int gapWidth = gapWidthsPool_[wordIdx + 1];
+          if (isJustifiedLine && gapWidth > 0) {
+            gapWidth += justifyExtraPerGap;
+            if (justifyExtraRemainder > 0) {
+              ++gapWidth;
+              --justifyExtraRemainder;
+            }
+          }
+          xpos += gapWidth;
+        }
+      }
+    }
+
+    lineWords.clear();
+    lineWidths.clear();
+    lineWidth = -spaceWidth;
+    processLine(TextBlock::fromWords(lineData, effectiveStyle));
+  };
+
+  auto nextWord = [&](WordEntry& out) -> bool {
+    if (!words.empty()) {
+      out = std::move(words.front());
+      words.pop_front();
+      return true;
+    }
+    if (spillEof || !spillFile) {
+      return false;
+    }
+    const uint32_t before = spillFile.position();
+    if (!readSpillWord(spillFile, out)) {
+      spillFile.seek(before);
+      spillEof = true;
+      return false;
+    }
+    spillReadOffset_ = spillFile.position();
+    return true;
+  };
+
+  while (true) {
+    if (shouldAbort && shouldAbort()) {
+      restoreLineToFront();
+      if (spillFile) {
+        spillFile.close();
+      }
+      return false;
+    }
+
+    WordEntry current;
+    if (!nextWord(current)) {
+      if (!includeLastLine && !lineWords.empty()) {
+        restoreLineToFront();
+      } else {
+        emitLine(true);
+      }
+      if (spillEof && words.empty() && lineWords.empty()) {
+        if (spillFile) {
+          spillFile.close();
+        }
+        cleanupSpill();
+      } else if (spillFile) {
+        spillFile.close();
+      }
+      return true;
+    }
+
+    if (containsSoftHyphen(current.word)) {
+      current.word = stripSoftHyphens(current.word);
+    }
+
+    const int wordWidth = renderer.getTextAdvanceWidth(fontId, current.word.c_str(), current.style);
+    if (!lineWords.empty() &&
+        (lineWidth + wordWidth + spaceWidth > pageWidth || lineWords.size() >= MAX_GREEDY_WORDS_PER_LINE)) {
+      words.push_front(std::move(current));
+      emitLine(false);
+      continue;
+    }
+
+    lineWidth += wordWidth + spaceWidth;
+    lineWords.push_back(std::move(current));
+    lineWidths.push_back(static_cast<uint16_t>(std::max(0, wordWidth)));
+  }
+}
+
 void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle) {
   if (word.empty()) return;
 
@@ -229,7 +570,7 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle)
 
   if (!hasCjk) {
     // No CJK - keep as single word (Latin, accented Latin, Cyrillic, etc.)
-    words.push_back({std::move(word), fontStyle});
+    storeWord(std::move(word), fontStyle);
     return;
   }
 
@@ -241,7 +582,7 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle)
     if (isCjkCodepoint(cp)) {
       // CJK character - flush non-CJK buffer first, then add this char alone
       if (!nonCjkBuf.empty()) {
-        words.push_back({std::move(nonCjkBuf), fontStyle});
+        storeWord(std::move(nonCjkBuf), fontStyle);
         nonCjkBuf.clear();
       }
 
@@ -257,7 +598,7 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle)
         buf += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
         buf += static_cast<char>(0x80 | (cp & 0x3F));
       }
-      words.push_back({std::move(buf), fontStyle});
+      storeWord(std::move(buf), fontStyle);
     } else {
       // Non-CJK character - accumulate into buffer
       if (cp < 0x80) {
@@ -280,7 +621,7 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle)
 
   // Flush any remaining non-CJK buffer
   if (!nonCjkBuf.empty()) {
-    words.push_back({std::move(nonCjkBuf), fontStyle});
+    storeWord(std::move(nonCjkBuf), fontStyle);
   }
 }
 
@@ -318,7 +659,7 @@ std::string ParsedText::previewText(size_t maxWords, size_t maxChars) const {
 bool ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fontId, const uint16_t viewportWidth,
                                        const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
                                        const bool includeLastLine, const AbortCallback& shouldAbort) {
-  if (words.empty()) {
+  if (words.empty() && spillWords_ == 0) {
     return true;
   }
 
@@ -329,6 +670,10 @@ bool ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
 
   const int pageWidth = viewportWidth;
   const int spaceWidth = renderer.getSpaceWidth(fontId);
+
+  if (spillWords_ > 0) {
+    return layoutSpilledGreedy(renderer, fontId, pageWidth, spaceWidth, processLine, includeLastLine, shouldAbort);
+  }
 
   // Rejoin words that were split by a previous interrupted greedy layout pass.
   // Split prefixes are marked with trailing U+00AD; rejoin with the following suffix word.
@@ -354,9 +699,31 @@ bool ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
   }
 
   auto wordWidths = calculateWordWidths(renderer, fontId);
+
+  // v2.0.114 — defensive cap on Knuth-Plass paragraph size.
+  //
+  // The DP variant of line-breaking (`computeLineBreaks`) allocates two
+  // O(n) tables on the heap: `minDemerits` (4 B/word) and `prevBreak`
+  // (4 B/word).  For Calibre-style EPUBs with multi-thousand-word
+  // paragraphs that lands a single 25-30 KB contiguous heap allocation
+  // mid-parse — exactly where the audit identified `make_shared<TextBlock>`
+  // throwing `std::bad_alloc` on a fragmented heap and the runtime then
+  // failing to construct the exception object → __terminate.
+  //
+  // Default is `useGreedyBreaking=true` (set in the ParsedText ctor and
+  // never flipped on the hot path), so this guard is normally a no-op.
+  // But if a user setting (or a future code path) ever flips to non-greedy
+  // for a long paragraph, fall back to greedy here so the worst-case
+  // heap allocation stays under ~4 KB regardless of paragraph length.
+  // The visual difference for >512-word paragraphs is invisible —
+  // Knuth-Plass mainly helps short, tightly-constrained paragraphs.
+  constexpr size_t kKnuthPlassMaxWords = 512;
+  const bool useGreedyForThisParagraph =
+      useGreedyBreaking || wordWidths.size() > kKnuthPlassMaxWords;
   const auto lineBreakIndices =
-      useGreedyBreaking ? computeLineBreaksGreedy(renderer, fontId, pageWidth, spaceWidth, wordWidths, shouldAbort)
-                        : computeLineBreaks(pageWidth, spaceWidth, wordWidths, shouldAbort);
+      useGreedyForThisParagraph
+          ? computeLineBreaksGreedy(renderer, fontId, pageWidth, spaceWidth, wordWidths, shouldAbort)
+          : computeLineBreaks(pageWidth, spaceWidth, wordWidths, shouldAbort);
 
   // Check if we were aborted during line break computation
   if (shouldAbort && shouldAbort()) {
@@ -660,10 +1027,10 @@ void ParsedText::extractLine(const GfxRenderer& renderer, const int fontId, cons
 
 bool ParsedText::preSplitOversizedWords(const GfxRenderer& renderer, const int fontId, const int pageWidth,
                                         const AbortCallback& shouldAbort) {
-  std::vector<WordEntry> pendingWords;
-  std::vector<WordEntry> newWords;
+  // v2.0.107: locals match the deque type of `words` (Phase 4c).
+  std::deque<WordEntry> pendingWords;
+  std::deque<WordEntry> newWords;
   pendingWords.swap(words);
-  newWords.reserve(pendingWords.size());  // At least as many words as input
 
   size_t readIdx = 0;
 

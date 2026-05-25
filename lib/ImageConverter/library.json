@@ -6,7 +6,9 @@
     "JpegToBmpConverter": "*",
     "PngToBmpConverter": "*",
     "FsHelpers": "*",
-    "SDCardManager": "*"
+    "SDCardManager": "*",
+    "SmolJpeg": "*",
+    "SmolPng": "*"
   },
   "platforms": "espressif32",
   "frameworks": [

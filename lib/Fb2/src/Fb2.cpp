@@ -16,6 +16,10 @@
 #include <Logging.h>
 #include <PngToBmpConverter.h>
 
+#if SNAPIX_SMOL_JPEG
+#include <SmolJpeg.h>
+#endif
+
 #define TAG "FB2"
 #include <SDCardManager.h>
 #include <Serialization.h>
@@ -37,6 +41,72 @@ void closeFileProtected(FsFile& file) {
   snapix::spi::SharedBusLock lk;
   file.close();
 }
+
+#if SNAPIX_SMOL_JPEG
+// ---------------------------------------------------------------------------
+// Base64JpegPump → SmolJpeg::InputStream adapter.  Bridges the forward-only
+// base64-decoder pump used by Fb2::decodeImageDirect onto the random-access
+// interface SmolJpeg expects.
+//
+// SmolJpeg reads mostly forward (HeaderReader's sliding window scans
+// markers in order; decodeBaselineStream's BitReader walks the
+// entropy-coded scan from `scanStart` linearly).  Backward seeks happen
+// only when SmolJpeg rewinds for restart markers — vanishingly rare on
+// the EPUB / FB2 corpus.  We handle them by rewinding the underlying
+// pump and replaying past bytes through `produceBytes` into a throwaway
+// stack buffer.
+//
+// v2.0.95 (Phase 4d — FB2 image decode through SmolJpeg): same
+// motivation as the v2.0.89 EPUB inline-image fix.  The legacy FB2
+// path went `Fb2::decodeImageDirect` → `JpegToBmpConverter::jpegStreamToBmp`
+// → JPEGDEC's pre-allocated ~25 KB workspace + per-decode ~12-15 KB
+// scratch arena.  On a tight heap (chapter parse interleaved with UI
+// render) those two contiguous blocks couldn't co-exist and the decode
+// reported `JPEGDEC: OOM allocating shared workspace` or `JPEG OOM
+// allocating decode scratch`.  Reroute to SmolJpeg (BSS-pooled
+// JpegState + ~15 KB transient yRow only) so the JPEGDEC two-tier
+// allocation pressure goes away.
+// ---------------------------------------------------------------------------
+class Base64PumpInputStream : public snapix::smoljpeg::InputStream {
+ public:
+  explicit Base64PumpInputStream(Base64JpegPump& p) : pump_(p) {}
+
+  uint32_t length() const override { return pump_.logicalSize(); }
+
+  int read(uint32_t offset, uint8_t* buf, size_t len) override {
+    if (offset < pump_.logicalPos()) {
+      // Backward seek — rewind the pump and replay forward.  Rare in
+      // practice (SmolJpeg's HeaderReader / BitReader almost never
+      // seek backward past their internal 256-byte window).
+      pump_.rewind();
+    }
+    // Forward-skip the gap between current pos and requested offset.
+    uint8_t throwaway[128];
+    while (pump_.logicalPos() < offset) {
+      const size_t want = std::min<size_t>(sizeof(throwaway),
+                                            offset - pump_.logicalPos());
+      const size_t got = pump_.produceBytes(throwaway, want);
+      if (got == 0) return -1;  // EOS while skipping
+    }
+    if (len == 0) return 0;
+    return static_cast<int>(pump_.produceBytes(buf, len));
+  }
+
+ private:
+  Base64JpegPump& pump_;
+};
+
+class PrintOutputStream : public snapix::smoljpeg::OutputStream {
+ public:
+  explicit PrintOutputStream(Print& p) : print_(p) {}
+  bool write(const uint8_t* data, size_t len) override {
+    return print_.write(data, len) == len;
+  }
+
+ private:
+  Print& print_;
+};
+#endif  // SNAPIX_SMOL_JPEG
 
 // Base64 alphabet decode table.  Returns -1 for non-base64 / whitespace,
 // -2 for the '=' padding character, [0..63] for valid base64 chars.
@@ -533,7 +603,8 @@ void XMLCALL Fb2::endElement(void* userData, const XML_Char* name) {
         entry.fileOffset = self->currentBinaryStart_;
         entry.byteLength = static_cast<uint32_t>(byteIndex) - self->currentBinaryStart_;
         entry.mimeType = self->currentBinaryMime_;
-        self->binaryIndex_[self->currentBinaryId_] = entry;
+        // v2.0.179 — sorted-vector replacement for unordered_map (see Fb2.h).
+        self->binaryIndexInsert(self->currentBinaryId_, entry);
       }
     }
     self->currentBinaryId_.clear();
@@ -742,6 +813,42 @@ void Fb2::setupCacheDir() const {
   if (!ensureFlashDir(sectionsDir)) {
     LOG_ERR(TAG, "Failed to create sections dir: %s", sectionsDir.c_str());
   }
+
+  // v2.0.167 one-shot orphan-cleanup pass for upgraders from <=2.0.165.
+  // Removes the legacy `markers/` subtree — markers + idx now live as
+  // UnifiedCache segments in `streaming.cache`.  Same rmtree pattern
+  // Epub::setupCacheDir uses.
+  std::function<bool(const std::string&)> rmTree = [&](const std::string& p) -> bool {
+    if (!LittleFS.exists(p.c_str())) return true;
+    File dir = LittleFS.open(p.c_str(), "r");
+    if (!dir) return false;
+    if (!dir.isDirectory()) {
+      dir.close();
+      return LittleFS.remove(p.c_str());
+    }
+    File entry = dir.openNextFile();
+    while (entry) {
+      const std::string entryPath = p + "/" + entry.name();
+      const bool isDir = entry.isDirectory();
+      entry.close();
+      if (isDir) {
+        if (!rmTree(entryPath)) {
+          dir.close();
+          return false;
+        }
+      } else {
+        LittleFS.remove(entryPath.c_str());
+      }
+      entry = dir.openNextFile();
+    }
+    dir.close();
+    return LittleFS.rmdir(p.c_str());
+  };
+  const std::string markersDir = cachePath + "/markers";
+  if (LittleFS.exists(markersDir.c_str()) && rmTree(markersDir)) {
+    LOG_INF(TAG, "[CONTENT][FB2] cleanup: removed legacy markers/ dir from %s (migrated to UnifiedCache)",
+            cachePath.c_str());
+  }
 }
 
 std::string Fb2::getCoverBmpPath() const { return cachePath + "/cover.bmp"; }
@@ -906,12 +1013,13 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
                      int maxBoxWidth, int maxBoxHeight, bool fastMode,
                      const std::function<bool()>& shouldAbort) const {
   if (binaryId.empty()) return false;
-  auto it = binaryIndex_.find(binaryId);
-  if (it == binaryIndex_.end()) {
+  // v2.0.179 — sorted-vector lookup (was unordered_map.find).
+  const BinaryEntry* entryPtr = binaryIndexFind(binaryId);
+  if (entryPtr == nullptr) {
     LOG_DBG(TAG, "cacheImage: binary id not in index: %s", binaryId.c_str());
     return false;
   }
-  const BinaryEntry& entry = it->second;
+  const BinaryEntry& entry = *entryPtr;
   // mimeType: 0 = JPEG, 1 = PNG, 2+ = unsupported.  Anything else is rejected.
   if (entry.byteLength == 0 || entry.mimeType >= 2) {
     return false;
@@ -1159,18 +1267,21 @@ bool Fb2::peekImageDims(const std::string& binaryId, uint16_t& outSrcW, uint16_t
   outSrcW = 0;
   outSrcH = 0;
   if (binaryId.empty()) return false;
-  auto it = binaryIndex_.find(binaryId);
-  if (it == binaryIndex_.end()) return false;
-  const BinaryEntry& entry = it->second;
+  // v2.0.179 — sorted-vector lookup (was unordered_map.find).
+  const BinaryEntry* entryPtr = binaryIndexFind(binaryId);
+  if (entryPtr == nullptr) return false;
+  const BinaryEntry& entry = *entryPtr;
   if (entry.byteLength == 0 || entry.mimeType >= 2) return false;
   if (entry.mimeType == 1) return false;  // PNG: peek not implemented (rare for inline FB2 figs)
 
+  // v2.0.179 — linear-scan lookup of small peekedSourceDims_ cache (was map.find).
   // Cache hit?  We already peeked this binary earlier in the session.
-  auto cachedIt = peekedSourceDims_.find(binaryId);
-  if (cachedIt != peekedSourceDims_.end()) {
-    outSrcW = cachedIt->second.first;
-    outSrcH = cachedIt->second.second;
-    return outSrcW > 0 && outSrcH > 0;
+  for (const auto& cached : peekedSourceDims_) {
+    if (cached.id == binaryId) {
+      outSrcW = cached.width;
+      outSrcH = cached.height;
+      return outSrcW > 0 && outSrcH > 0;
+    }
   }
 
   FsFile src;
@@ -1196,16 +1307,18 @@ bool Fb2::peekImageDims(const std::string& binaryId, uint16_t& outSrcW, uint16_t
 
   outSrcW = w;
   outSrcH = h;
-  peekedSourceDims_[binaryId] = {w, h};
+  // v2.0.179 — append to linear-scan cache (was map.operator[]).
+  peekedSourceDims_.push_back({binaryId, w, h});
   return true;
 }
 
 bool Fb2::decodeImageDirect(const std::string& binaryId, int targetMaxWidth, int targetMaxHeight,
                             const std::function<bool()>& shouldAbort) const {
   if (binaryId.empty()) return false;
-  auto it = binaryIndex_.find(binaryId);
-  if (it == binaryIndex_.end()) return false;
-  const BinaryEntry& entry = it->second;
+  // v2.0.179 — sorted-vector lookup (was unordered_map.find).
+  const BinaryEntry* entryPtr = binaryIndexFind(binaryId);
+  if (entryPtr == nullptr) return false;
+  const BinaryEntry& entry = *entryPtr;
   if (entry.byteLength == 0 || entry.mimeType >= 2) return false;
   if (entry.mimeType == 1) {
     // PNG fallthrough: pngle has no equivalent stream-pump interface in this
@@ -1248,9 +1361,47 @@ bool Fb2::decodeImageDirect(const std::string& binaryId, int targetMaxWidth, int
     return false;
   }
 
-  const bool ok = JpegToBmpConverter::jpegStreamToBmp(
+  bool ok = false;
+
+#if SNAPIX_SMOL_JPEG
+  // v2.0.108 (one-decoder discipline — JPEGDEC fallback chain removed):
+  // SmolJpeg is the only decoder when the flag is on.  Pre-fix, an
+  // `invalid-jpeg` from SmolJpeg fell back to JPEGDEC which
+  // instantiated a ~25 KB workspace + ~7 KB arena, fragmenting the
+  // heap permanently to largest_free ~5-9 KB for the rest of the
+  // session and triggering cascading cold-rebuild livelocks observed
+  // in v2.0.107 trace.  Rust-firmware "one decoder, fail explicitly"
+  // — when SmolJpeg can't handle a JPEG, return failure and let the
+  // caller decide (placeholder), don't silently switch to a heavier
+  // alternative that wrecks the heap for everyone else.
+  //
+  // The v2.0.108 SmolJpeg restart-marker fix
+  // (SmolJpegDecode.cpp::decodeBaselineStream) eliminates the
+  // "bad restart marker=0x00" failures that this fallback existed
+  // to mask.  If SmolJpeg fails NOW, it's a genuine unsupported
+  // feature (progressive, non-4:2:0 chroma) that JPEGDEC also
+  // couldn't usefully render to e-paper.
+  {
+    Base64PumpInputStream sin(pump);
+    PrintOutputStream     sout(dst);
+    const auto status = snapix::smoljpeg::decodeTo1BitBmp(
+        sin, sout, targetMaxWidth, targetMaxHeight, nullptr /* shouldAbort thunk — TODO */);
+    if (status == snapix::smoljpeg::Status::Ok) {
+      ok = true;
+    } else {
+      LOG_INF(TAG, "SmolJpeg(FB2) decode failed (%s) — no fallback (one-decoder discipline)",
+              snapix::smoljpeg::statusToString(status));
+      // dst has a partial 1-bit BMP header; tail will clean up via
+      // LittleFS.remove(tmpPath).  No JPEGDEC instantiation, heap stays clean.
+    }
+  }
+#else
+  // SNAPIX_SMOL_JPEG=0 (default env): legacy JPEGDEC path remains for
+  // bit-identical compatibility until SmolJpeg lands in default.
+  ok = JpegToBmpConverter::jpegStreamToBmp(
       Base64JpegPump::pfnRead, Base64JpegPump::pfnSeek, Base64JpegPump::pfnClose, &pump,
       static_cast<int32_t>(pump.logicalSize()), dst, targetMaxWidth, targetMaxHeight, shouldAbort);
+#endif
 
   dst.close();
   src.close();
@@ -1617,8 +1768,11 @@ bool Fb2::loadMetaCache() {
     }
   }
 
-  // Binary (image) index — added in meta v5.  Read into the in-memory map.
+  // Binary (image) index — added in meta v5.  Read into the in-memory vector.
+  // v2.0.179 — vector replaces unordered_map.  emplace_back is O(1); the
+  // first lookup in binaryIndexFind() sorts the whole vector once.
   binaryIndex_.clear();
+  binaryIndexSorted_ = true;  // empty is sorted
   uint16_t binaryCount = 0;
   if (serialization::readPodChecked(file, binaryCount)) {
     binaryIndex_.reserve(binaryCount);
@@ -1633,7 +1787,8 @@ bool Fb2::loadMetaCache() {
         break;
       }
       if (!id.empty()) {
-        binaryIndex_.emplace(std::move(id), entry);
+        binaryIndex_.emplace_back(std::move(id), entry);
+        binaryIndexSorted_ = false;
       }
     }
   }
@@ -1675,6 +1830,8 @@ bool Fb2::saveMetaCache() const {
 
   // Binary (image) index — meta v5.  Written immediately after the TOC so
   // the on-disk layout matches loadMetaCache's read order.
+  // v2.0.179 — iterate over the vector directly (order doesn't matter, the
+  // load-side rebuilds the vector and lazily sorts on first lookup).
   const uint16_t binaryCount = static_cast<uint16_t>(std::min<size_t>(binaryIndex_.size(), 0xFFFFu));
   serialization::writePod(file, binaryCount);
   uint16_t written = 0;

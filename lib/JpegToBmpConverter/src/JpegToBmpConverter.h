@@ -9,6 +9,10 @@ class FsFile;
 class Print;
 class ZipFile;
 
+namespace fs {
+class File;
+}  // namespace fs
+
 class JpegToBmpConverter {
   static unsigned char jpegReadCallback(unsigned char* pBuf, unsigned char buf_size,
                                         unsigned char* pBytes_actually_read, void* pCallback_data);
@@ -79,6 +83,22 @@ class JpegToBmpConverter {
                               Print& bmpOut, int targetMaxWidth, int targetMaxHeight,
                               const std::function<bool()>& shouldAbort = nullptr);
 
+  // v2.0.79: LittleFS-backed input.  EPUB chapter inline images and EPUB
+  // cover/thumb temp files extract to /cache/epub_<hash>/... on internal
+  // flash since v2.0.73; the SD-only entry points above can't reach them.
+  // Pipeline and output format are identical to jpegFileToBmpStreamWithSize
+  // — only the input file handle type differs.  Internally uses the same
+  // decodeImplCallbacks workhorse via an fs::File pump.
+  static bool jpegLittleFsFileToBmpStreamWithSize(fs::File& jpegFile, Print& bmpOut,
+                                                   int targetMaxWidth, int targetMaxHeight,
+                                                   const std::function<bool()>& shouldAbort = nullptr);
+
+  // v2.0.83: header-only peek on a LittleFS-backed JPEG.  Mirrors the FsFile
+  // peekDimensions; used by the chapter parser's async-decode mode so it can
+  // know image dimensions for page layout without paying the full decode
+  // cost upfront.  See JpegToBmpConverter.cpp for cost analysis.
+  static bool peekDimensionsLittleFs(fs::File& jpegFile, int& outWidth, int& outHeight);
+
   // -------------------------------------------------------------------------
   // Persistent decode-arena lending (v2.0.59)
   //
@@ -120,4 +140,22 @@ class JpegToBmpConverter {
   // Pass a smaller arenaBytes if memory is tight; the arena will still grow
   // on demand.  Pass 0 to skip the arena (only allocates JPEGDEC).
   static void warmup(size_t arenaBytes = 32 * 1024);
+
+  // v2.0.81: defragment-on-demand release.  Frees the persistent JPEGDEC
+  // instance (~25 KB) and the decode arena (~7-20 KB depending on the largest
+  // image decoded this session).  Combined, that's ~30-45 KB returned to one
+  // contiguous block in the heap — enough to unblock cold-rebuild paths that
+  // get stuck when `largest` plateaus around 23 KB.
+  //
+  // Cost: next image decode pays one re-allocation each (~10 ms for JPEGDEC,
+  // ~1-3 ms for the arena).  Total cost over a long reading session is in
+  // the low hundreds of milliseconds — negligible vs. the alternative of a
+  // permanently stuck cache extender.
+  //
+  // Safe to call from any task as long as no JPEG decode is in flight; the
+  // PageCache cold-rebuild path that calls this already holds the
+  // ReaderDocumentResources lock so a parallel decode can't sneak in.
+  static void releaseDecodeArena();
+  static void releaseSharedInstance();
+  static void releaseAllPersistent();
 };

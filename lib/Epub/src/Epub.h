@@ -12,6 +12,7 @@
 #include "Epub/css/CssParser.h"
 
 class ZipFile;
+class ZipItemReader;
 
 class Epub {
   // the ncx file (EPUB 2)
@@ -78,6 +79,13 @@ class Epub {
   bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize,
                                 uint8_t* dictBuffer = nullptr,
                                 const std::function<bool()>& shouldAbort = nullptr) const;
+  // v2.0.159 — open a manifest item for lazy streaming reads (chapter HTML,
+  // images, etc.) without the temp-file/extract-to-memory round-trip.  Heap
+  // cost: 32 KB uzlib dict + ~8 KB SD read buffer, freed when the returned
+  // reader is destroyed.  See ZipItemReader for the read() API.  Returns
+  // nullptr if the href is empty, not found in the ZIP, or alloc/I/O failed.
+  std::unique_ptr<ZipItemReader> openItemStream(const std::string& itemHref, size_t chunkSize = 8192,
+                                                uint8_t* dictBuffer = nullptr) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
   BookMetadataCache::SpineEntry getSpineItem(int spineIndex) const;
   BookMetadataCache::TocEntry getTocItem(int tocIndex) const;
