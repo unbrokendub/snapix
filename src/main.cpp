@@ -928,13 +928,37 @@ void initReaderMode() {
 // under the original 16 KB limit without permanently reserving the
 // 8 KB for the unlikely path.
 //
+// v2.0.184: RE-BUMPED to 24576 (24 KB).  Hardware repro showed a
+// recurring stack-protection panic on a NEW book (Yandex_Kniga.epub,
+// inline title.jpg in spine=1) during cold-extend rebuild:
+//   Guru Meditation Error: Core 0 panic'ed (Stack protection fault).
+//   Detected in task "loopTask" at 0x420b260a
+//   Stack pointer: 0x3fcbfa50  Stack bounds: 0x3fcc0374 - 0x3fcc4370
+// Used 18.7 KB of 16 KB allotment (2.3 KB overflow).  Crash address
+// resolved to EpdFontLoader::loadForStreaming via addr2line —
+// deepest call frame at the bottom of a render → cacheImageForStreaming
+// → JPEG-pump → font-warm chain that v2.0.151's per-call refactors
+// did not fully tame for the cold-extend-with-image case.
+//
+// Why the +8 KB heap cost is now affordable (vs v2.0.151's revert):
+// v2.0.180 proactive JPEGDEC release on book exit (~25 KB recovered
+// per book switch) and v2.0.183 lifecycle hygiene (ImageRenderCache,
+// font bitmap cache, width cache cleared on exit; another ~6-23 KB)
+// together gave the heap ~30-48 KB more headroom on book #2+.
+// Paying 8 KB of that back for stack safety still leaves a net
+// 20-40 KB improvement vs the pre-180/183 baseline that v2.0.151
+// was sized against.  Chapter prepare's "30 KB peak" mentioned in
+// the v2.0.151 note has also dropped to ~16-18 KB post-R-series
+// streaming refactor (no more whole-chapter HTML normalize buffer),
+// so the workload that v2.0.151 was protecting no longer exists.
+//
 // `-DCONFIG_ARDUINO_LOOP_STACK_SIZE=16384` in platformio.ini doesn't
 // reliably override on this snapix toolchain (likely sdkconfig.h
 // pre-defines the macro), so we use the weak-symbol approach instead.
 // =========================================================================
 #if SNAPIX_SMOL_JPEG || SNAPIX_SMOL_PNG
 size_t getArduinoLoopTaskStackSize() {
-  return 16384;
+  return 24576;  // v2.0.184: was 16384; see comment above
 }
 #endif
 
