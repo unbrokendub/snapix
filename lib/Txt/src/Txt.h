@@ -22,6 +22,15 @@ class Txt {
   size_t fileSize;
   bool loaded;
 
+  // v2.0.187 — when the source file is Windows-1251, load() generates
+  // a UTF-8 cache file on LittleFS and routes readContent() through it.
+  // `effectiveContentPath_` is the path actually used for reads:
+  //   * For UTF-8/ASCII source: same as `filepath` (SD card).
+  //   * For cp1251 source: cachePath + "/utf8.txt" (LittleFS).
+  // `useLittleFsForContent_` selects the right FS adapter in readContent().
+  std::string effectiveContentPath_;
+  bool useLittleFsForContent_ = false;
+
  public:
   explicit Txt(std::string filepath, const std::string& cacheDir);
   ~Txt() = default;
