@@ -1094,6 +1094,46 @@ void ReaderState::exit(Core& core) {
   // free the instance.
   JpegToBmpConverter::releaseAllPersistent();
 
+  // v2.0.183 — PROACTIVE LIFECYCLE HYGIENE on book exit (combined release
+  // of three more session-scoped caches that, like the JPEGDEC instance
+  // above, were previously only freed REACTIVELY when heap pressure
+  // tripped a critical threshold).  Pre-fix these accumulated state
+  // throughout a reading session and stayed pinned across book switches,
+  // shrinking the next book's effective heap budget.
+  //
+  // 1. ImageRenderCache (renderer_.imageCache(), backed by an
+  //    unordered_map<string, Entry>).  Each cached entry can be ~3-10 KB
+  //    of decoded bitmap data; per the v2.0.52 comment at line 2982 the
+  //    cache can pin "30+ KB of contiguous heap" once an image-bearing
+  //    book has been read.  Existing reactive clear at line 2999 fires
+  //    only when isHeapCritical() trips inside the BG worker — too late
+  //    for the NEXT book's chapter parse, which already inherited the
+  //    fragmented heap.
+  //
+  // 2. Font streaming bitmap caches (FONT_MANAGER.clearStreamingBitmapCaches).
+  //    Per-glyph bitmap cache for the open .epdfont reader.  Existing
+  //    reactive call at ReaderStateOverlays.cpp:740 (page-fill trim)
+  //    fires per chapter parse; the entry-time call at line 820 (in
+  //    enter()) re-clears before each book's first render.  Adding it
+  //    here on exit ensures the bitmaps don't pin heap during the FB2
+  //    cold-extend window between books, before enter() has a chance to
+  //    clear them.
+  //
+  // Combined estimated win: ~5-20 KB recovered per book switch, on top
+  // of v2.0.180's 25 KB from JpegToBmpConverter::releaseAllPersistent().
+  // All three calls are no-ops when the underlying cache is empty —
+  // safe to call unconditionally.
+  //
+  // ZipFile::fileStatSlimCache was considered but skipped: ZipFile is
+  // already constructed transiently (`ZipFile zip(filepath)` at each
+  // openItemStream / readItemContentsToStream callsite — see
+  // Epub.cpp:605, :820, :1014).  The cache dies with its enclosing
+  // ZipFile instance on every operation; no persistent state survives
+  // between book sessions to clean up.
+  renderer_.imageCache().clear();
+  FONT_MANAGER.clearStreamingBitmapCaches();
+  renderer_.clearWidthCache();
+
   // Keep the active .epdfont reader family loaded across UI transitions.
   // Several UI surfaces reuse theme.readerFontId directly, so unloading the
   // family here leaves stale font IDs in the renderer path and causes

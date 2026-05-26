@@ -25,3 +25,4 @@ tools/monitor/build/
 tools/reader-test/build/
 /monitor
 .worktrees/
+release-assets/
