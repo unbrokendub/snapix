@@ -194,13 +194,33 @@ bool convertCp1251FileToUtf8(const std::string& srcPath, const std::string& dstP
     return false;
   }
 
-  // 8 KB read buffer, 16 KB write buffer (worst case: every input byte
-  // expands to 3 UTF-8 bytes, but in practice ~1.5-2x for Cyrillic
-  // text — 16 KB has comfortable margin).
+  // v2.0.188 — HEAP-allocate the I/O buffers instead of putting them on
+  // the stack.  v2.0.187 used `uint8_t inBuf[8192]; uint8_t outBuf[24576]`
+  // — 32 KB of stack arrays on top of the caller's frame.  loopTask's
+  // stack is 24 KB (v2.0.184), so a single conversion guaranteed an
+  // overflow: hardware repro showed SP 9.8 KB below the lower bound
+  // during the very first cp1251 conversion on the user's Asimov TXT.
+  //
+  // Heap alloc per-call is fine here — conversion runs once per cp1251
+  // file load (not per chunk, not per page), and the 32 KB free at
+  // function exit.  malloc/free are ~µs each; the conversion itself
+  // takes 100-300 ms for typical book sizes, so the alloc overhead
+  // is in the noise.  The two buffers stay allocated together for the
+  // duration of the conversion, then both freed in lockstep.
   constexpr std::size_t kReadChunk = 8192;
   constexpr std::size_t kWriteChunk = kReadChunk * 3;
-  uint8_t inBuf[kReadChunk];
-  uint8_t outBuf[kWriteChunk];
+  uint8_t* inBuf = static_cast<uint8_t*>(malloc(kReadChunk));
+  uint8_t* outBuf = static_cast<uint8_t*>(malloc(kWriteChunk));
+  if (!inBuf || !outBuf) {
+    LOG_ERR(TAG, "convert: failed to allocate %zu+%zu bytes heap for conversion buffers",
+            kReadChunk, kWriteChunk);
+    if (inBuf) free(inBuf);
+    if (outBuf) free(outBuf);
+    src.close();
+    dst.close();
+    LittleFS.remove(dstPath.c_str());
+    return false;
+  }
 
   std::size_t srcTotal = 0;
   std::size_t dstTotal = 0;
@@ -240,6 +260,10 @@ bool convertCp1251FileToUtf8(const std::string& srcPath, const std::string& dstP
   dst.flush();
   dst.close();
   src.close();
+
+  // v2.0.188 — release heap buffers regardless of outcome.
+  free(inBuf);
+  free(outBuf);
 
   if (!ioOk) {
     LittleFS.remove(dstPath.c_str());
