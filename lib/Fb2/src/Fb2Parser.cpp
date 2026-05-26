@@ -112,7 +112,7 @@ bool Fb2Parser::tryMarkerizeSection() {
   // <fb2CachePath>/streaming.cache, keyed by sectionIndex.
   auto cache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
   size_t existingSize = 0;
-  if (cache->segmentSize(snapix::unifiedcache::Kind::Markers,
+  if (cache.segmentSize(snapix::unifiedcache::Kind::Markers,
                          static_cast<uint16_t>(startingSectionIndex_), &existingSize)) {
     LOG_INF(TAG, "[CONTENT][FB2] markerize cache hit section=%d (UnifiedCache::Markers size=%zu)",
             startingSectionIndex_, existingSize);
@@ -141,7 +141,7 @@ bool Fb2Parser::tryMarkerizeSection() {
 
   snapix::smolport::MarkerizeStats stats{};
   snapix::smolport::MarkerizeStatus status = snapix::smolport::MarkerizeStatus::ReadError;
-  const bool ok = cache->writeSegmentStreamingDeferred(
+  const bool ok = cache.writeSegmentStreamingDeferred(
       snapix::unifiedcache::Kind::Markers, static_cast<uint16_t>(startingSectionIndex_),
       [&](File& outFile) -> bool {
         auto readFn = [&srcFile, &bytesRemaining](uint8_t* buf, size_t bufSize) -> int {
@@ -394,13 +394,13 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       // v2.0.167 — markers + idx in UnifiedCache (per book streaming.cache).
       auto ucache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
       do {
-        if (ucache->segmentSize(snapix::unifiedcache::Kind::Idx,
+        if (ucache.segmentSize(snapix::unifiedcache::Kind::Idx,
                                 static_cast<uint16_t>(startingSectionIndex_), nullptr)) {
           break;  // R4.b will handle existing idx
         }
         File mf;
         size_t markersStreamSize = 0;
-        if (!ucache->openSegmentReader(snapix::unifiedcache::Kind::Markers,
+        if (!ucache.openSegmentReader(snapix::unifiedcache::Kind::Markers,
                                         static_cast<uint16_t>(startingSectionIndex_), mf,
                                         &markersStreamSize)) {
           break;  // markerize hasn't produced markers yet
@@ -526,7 +526,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
         if (wrote == 0) break;
 
         // v2.0.167 — write idx as UnifiedCache::Idx segment.
-        if (!ucache->writeSegment(snapix::unifiedcache::Kind::Idx,
+        if (!ucache.writeSegment(snapix::unifiedcache::Kind::Idx,
                                   static_cast<uint16_t>(startingSectionIndex_), serdebuf, wrote)) {
           LOG_ERR(TAG, "[CONTENT][FB2] [STREAM] idx write to UnifiedCache failed section=%d",
                   startingSectionIndex_);
@@ -553,7 +553,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       do {
         File idxF;
         size_t idxSegSize = 0;
-        if (!ucache->openSegmentReader(snapix::unifiedcache::Kind::Idx,
+        if (!ucache.openSegmentReader(snapix::unifiedcache::Kind::Idx,
                                         static_cast<uint16_t>(startingSectionIndex_), idxF,
                                         &idxSegSize)) {
           break;

@@ -10,7 +10,7 @@
 
 namespace snapix::unifiedcache {
 
-std::shared_ptr<UnifiedCache> UnifiedCache::shared(const std::string& bookCachePath) {
+UnifiedCache UnifiedCache::shared(const std::string& bookCachePath) {
   // v2.0.173 — REVERTED v2.0.170/171/172 instance caching.  Each call now
   // creates a fresh instance whose lifetime is bound to the caller's
   // shared_ptr (function scope in practice).  When the caller's scope
@@ -54,7 +54,9 @@ std::shared_ptr<UnifiedCache> UnifiedCache::shared(const std::string& bookCacheP
   // sequential callers in the same operation) without any global
   // registry, without any mutex, and without keeping state alive
   // across operations.  Out of scope for this hotfix.
-  return std::make_shared<UnifiedCache>(bookCachePath);
+  // v2.0.186 — return by value (RVO/NRVO elision); see header note for
+  // rationale.  Was `return std::make_shared<UnifiedCache>(bookCachePath);`.
+  return UnifiedCache(bookCachePath);
 }
 
 namespace {

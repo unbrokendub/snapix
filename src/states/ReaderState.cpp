@@ -251,7 +251,7 @@ bool ReaderState::loadGlobalPageMetricsFromDisk(const std::string& bookCachePath
   // upgraders don't lose their cached metrics on the first open.
   auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
   std::vector<uint8_t> payload;
-  const bool loadedFromUnified = cache->readSegment(
+  const bool loadedFromUnified = cache.readSegment(
       snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey, payload);
   if (!loadedFromUnified) {
     // Legacy fallback: pre-v2.0.166 metrics.bin file
@@ -329,8 +329,8 @@ void ReaderState::saveGlobalPageMetricsToDisk(const std::string& bookCachePath, 
   }
 
   auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
-  cache->writeSegment(snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey,
-                      payload.data(), payload.size());
+  cache.writeSegment(snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey,
+                     payload.data(), payload.size());
 }
 
 void ReaderState::initializeGlobalPageMetrics(Core& core, const int currentSectionTotalPages,
@@ -1035,7 +1035,7 @@ void ReaderState::exit(Core& core) {
         // v2.0.167 — UnifiedCache::Idx segment write replaces the legacy
         // .work + rename atomic-publish.
         auto ucache = snapix::unifiedcache::UnifiedCache::shared(streamOffsetCacheBookPath_);
-        if (ucache->writeSegment(snapix::unifiedcache::Kind::Idx,
+        if (ucache.writeSegment(snapix::unifiedcache::Kind::Idx,
                                   static_cast<uint16_t>(streamOffsetCacheKey_), serdebuf, wrote)) {
           LOG_INF(TAG, "[STREAM] idx saved (exit) spine=%d entries=%u (UnifiedCache::Idx)",
                   streamOffsetCacheSpine_,
@@ -2397,7 +2397,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
     auto ucache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
     File mf;
     size_t markersSegSize = 0;
-    if (ucache->openSegmentReader(snapix::unifiedcache::Kind::Markers,
+    if (ucache.openSegmentReader(snapix::unifiedcache::Kind::Markers,
                                    static_cast<uint16_t>(markersKey), mf, &markersSegSize)) {
       // The file is positioned at the segment's payload start.  Capture
       // the base offset so any `mf.seek(byteOffset)` for resume below
@@ -2616,7 +2616,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
                   // v2.0.167 — write idx to UnifiedCache::Idx segment instead
                   // of separate .idx file with .work + rename dance.
                   auto prevCache = snapix::unifiedcache::UnifiedCache::shared(streamOffsetCacheBookPath_);
-                  if (prevCache->writeSegment(snapix::unifiedcache::Kind::Idx,
+                  if (prevCache.writeSegment(snapix::unifiedcache::Kind::Idx,
                                               static_cast<uint16_t>(streamOffsetCacheKey_),
                                               serdebuf, wrote)) {
                     LOG_INF(TAG, "[STREAM] idx saved spine=%d entries=%u (UnifiedCache::Idx key=%d)",
@@ -2640,7 +2640,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
             streamOffsetCacheKey_ = markersKey;
             // v2.0.167 — read idx from UnifiedCache::Idx segment.
             std::vector<uint8_t> idxPayload;
-            if (ucache->readSegment(snapix::unifiedcache::Kind::Idx,
+            if (ucache.readSegment(snapix::unifiedcache::Kind::Idx,
                                      static_cast<uint16_t>(markersKey), idxPayload)) {
               if (idxPayload.size() > 0 && idxPayload.size() <= 4096 &&
                   snapix::smolport::deserializePageIndex(idxPayload.data(), idxPayload.size(),
@@ -2650,7 +2650,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
                         static_cast<unsigned>(streamOffsetCache_.size()));
               } else {
                 // Stale (config mismatch) or corrupt — tombstone + start fresh.
-                ucache->removeSegment(snapix::unifiedcache::Kind::Idx,
+                ucache.removeSegment(snapix::unifiedcache::Kind::Idx,
                                        static_cast<uint16_t>(markersKey));
                 streamOffsetCache_.clear();
                 LOG_INF(TAG, "[STREAM] idx stale/corrupt spine=%d (removed)", currentSpineIndex_);

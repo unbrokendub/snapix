@@ -86,7 +86,7 @@ void EpubChapterParser::reset() {
   initialized_ = false;
   hasMore_ = true;
   chapterBasePath_.clear();
-  anchorMap_.clear();
+  // v2.0.186 — anchorMap_.clear() removed alongside the field; see header.
   // v2.0.132 — drop any in-flight short-circuit state too.
   shortCircuitActive_ = false;
   shortCircuitTotalPages_ = 0;
@@ -106,12 +106,8 @@ bool EpubChapterParser::canResume() const {
   return shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_;
 }
 
-const std::vector<std::pair<std::string, uint16_t>>& EpubChapterParser::getAnchorMap() const {
-  // v2.0.161 — always empty; HtmlStripper emits anchor markers but the
-  // streaming render path doesn't (yet) capture them into a navigable
-  // map.  In-spine TOC anchor jumps no-op gracefully on empty.
-  return anchorMap_;
-}
+// v2.0.186 — getAnchorMap() override deleted; inherits ContentParser's
+// default empty-static return.  See header for rationale.
 
 // =============================================================================
 // v2.0.161 — `prepareChapterHtml` is deleted.  See file-scope changelog for
@@ -142,7 +138,7 @@ bool EpubChapterParser::tryMarkerizeChapter() {
   // files.  Cache-hit check: ask UnifiedCache for the segment size.
   auto cache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
   size_t existingSize = 0;
-  if (cache->segmentSize(snapix::unifiedcache::Kind::Markers,
+  if (cache.segmentSize(snapix::unifiedcache::Kind::Markers,
                          static_cast<uint16_t>(spineIndex_), &existingSize)) {
     LOG_INF(TAG, "[CONTENT][EPUB] markerize cache hit spine=%d (UnifiedCache::Markers size=%zu)",
             spineIndex_, existingSize);
@@ -192,7 +188,7 @@ bool EpubChapterParser::tryMarkerizeChapter() {
 
   snapix::smolport::MarkerizeStats stats{};
   snapix::smolport::MarkerizeStatus status = snapix::smolport::MarkerizeStatus::ReadError;
-  const bool ok = cache->writeSegmentStreamingDeferred(
+  const bool ok = cache.writeSegmentStreamingDeferred(
       snapix::unifiedcache::Kind::Markers, static_cast<uint16_t>(spineIndex_),
       [&](File& outFile) -> bool {
         auto readFn = [&zipStream](uint8_t* buf, size_t bufSize) -> int {
@@ -341,17 +337,17 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // exist AND idx doesn't (idx is built once per (spine,config) tuple).
     auto ucache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
     size_t markersSize = 0;
-    if (!ucache->segmentSize(snapix::unifiedcache::Kind::Markers,
+    if (!ucache.segmentSize(snapix::unifiedcache::Kind::Markers,
                              static_cast<uint16_t>(spineIndex_), &markersSize)) {
       break;  // markerize failed earlier
     }
-    if (ucache->segmentSize(snapix::unifiedcache::Kind::Idx,
+    if (ucache.segmentSize(snapix::unifiedcache::Kind::Idx,
                             static_cast<uint16_t>(spineIndex_), nullptr)) {
       break;  // R4.b will handle the existing idx
     }
     File mf;
     size_t markersStreamSize = 0;
-    if (!ucache->openSegmentReader(snapix::unifiedcache::Kind::Markers,
+    if (!ucache.openSegmentReader(snapix::unifiedcache::Kind::Markers,
                                     static_cast<uint16_t>(spineIndex_), mf, &markersStreamSize)) {
       break;
     }
@@ -501,7 +497,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
 
     // v2.0.167 — write idx as a UnifiedCache::Idx segment.  No more
     // .work + rename — UnifiedCache append is atomic at the frame level.
-    if (!ucache->writeSegment(snapix::unifiedcache::Kind::Idx,
+    if (!ucache.writeSegment(snapix::unifiedcache::Kind::Idx,
                               static_cast<uint16_t>(spineIndex_), serdebuf, wrote)) {
       LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] idx write to UnifiedCache failed spine=%d", spineIndex_);
       break;
@@ -545,7 +541,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     auto ucache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
     File idxF;
     size_t idxSegSize = 0;
-    if (!ucache->openSegmentReader(snapix::unifiedcache::Kind::Idx,
+    if (!ucache.openSegmentReader(snapix::unifiedcache::Kind::Idx,
                                     static_cast<uint16_t>(spineIndex_), idxF, &idxSegSize)) {
       break;
     }

@@ -51,12 +51,20 @@ class EpubChapterParser : public ContentParser {
   uint16_t pagesCreated_ = 0;
   bool hitMaxPages_ = false;
 
-  // v2.0.161 — anchorMap stays as a field but is never populated since
-  // the legacy parser was removed.  HtmlStripper emits anchor markers
-  // (kAnchor) which the streaming render path COULD capture but
-  // currently doesn't — left as future work.  `getAnchorMap()` returns
-  // this empty vector, so in-spine TOC anchor jumps no-op gracefully.
-  std::vector<std::pair<std::string, uint16_t>> anchorMap_;
+  // v2.0.186 — anchorMap_ field removed.  In v2.0.161 the legacy parser
+  // was deleted but the (now-permanently-empty) anchorMap_ vector stayed
+  // as a class member with an explicit getAnchorMap() override that
+  // returned it.  ContentParser's default getAnchorMap() ALREADY returns
+  // a reference to a static empty vector — the override added zero
+  // semantic value, just a per-instance 24-byte vector struct + a 24-byte
+  // override slot in vtable.  Inheriting the default frees that storage
+  // and removes a misleading member that suggested EPUB anchor support
+  // exists when it doesn't.
+  //
+  // When/if streaming-render anchor capture is wired up (the "future
+  // work" the original comment mentioned), the right place is to override
+  // getAnchorMap() again at that point — not to keep a vestigial field
+  // in the meantime.
 
   // v2.0.118 Phase R2.8 — markerize one-shot guard.  Set on first
   // tryMarkerizeChapter call regardless of outcome (success, write
@@ -132,7 +140,8 @@ class EpubChapterParser : public ContentParser {
   bool hasMoreContent() const override { return hasMore_; }
   bool canResume() const override;
   void reset() override;
-  const std::vector<std::pair<std::string, uint16_t>>& getAnchorMap() const override;
+  // v2.0.186 — getAnchorMap() override removed; inherits ContentParser's
+  // default empty-static return.  See header note on anchorMap_ removal.
 
   // v2.0.131 — caller (ReaderStateAsyncJobs) plumbs the actual reader
   // viewport margins here right after construction so the R4.c upfront

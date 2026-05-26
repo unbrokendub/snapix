@@ -67,28 +67,29 @@ struct DirectoryEntry {
 
 class UnifiedCache {
  public:
-  // v2.0.173 — factory that creates a fresh UnifiedCache instance bound
-  // to `bookCachePath`.  The returned shared_ptr is the only handle to
-  // that instance; when the caller's scope ends, the instance destructs
-  // and all its state (directory_ vector, path string, shared_ptr
-  // control block) is freed.
+  // v2.0.186 — factory returns UnifiedCache by VALUE (was shared_ptr).
+  // Drops the ~16 B shared_ptr struct + ~16-32 B control block that
+  // every callsite paid as transient heap.  Across the 12 callsites in
+  // a typical chapter render that's ~400-600 B of fragmentation
+  // avoided (modest but free).  RVO/NRVO elides the move on every
+  // compiler we support; the returned instance lives in the caller's
+  // automatic storage.
   //
-  // Despite the name, this does NOT cache instances across calls.  The
-  // v2.0.170/171/172 attempt to cache instances (first an unbounded
-  // registry, then LRU-size-1) broke EPUB reading after FB2 sessions
-  // because the cached instance's per-instance state — particularly the
-  // std::mutex's FreeRTOS semaphore handle — pinned heap fragments at
-  // exactly the wrong time, dropping the largest free block below the
-  // 32 KB needed by InflateReader's uzlib ring buffer.  See platformio
-  // .ini v2.0.173 changelog for full reproduction + analysis.
+  // Caller pattern changes from arrow to dot:
+  //   auto cache = UnifiedCache::shared(path);
+  //   cache->segmentSize(...)   →   cache.segmentSize(...)
+  // 12 callsites updated (EpubChapterParser, Fb2Parser, ReaderState).
   //
-  // The function name is retained for API compatibility — all 11 call
-  // sites (EpubChapterParser, Fb2Parser, ReaderState) keep working
-  // unchanged.  A future rework can rename to `make()` and add a
-  // separate caching layer (probably via passing UnifiedCache& by
-  // reference through the parser call stack rather than a global
-  // registry) if the redundant-scan cost becomes a problem.
-  static std::shared_ptr<UnifiedCache> shared(const std::string& bookCachePath);
+  // Pre-v2.0.186 history (kept for context):
+  //   v2.0.173 — factory creates a fresh instance per call (no caching).
+  //     v2.0.170/171/172 attempted instance caching (first an unbounded
+  //     registry, then LRU-size-1) and broke EPUB reading after FB2
+  //     sessions because the cached instance's per-instance state
+  //     (especially the std::mutex FreeRTOS semaphore handle) pinned
+  //     heap fragments at the wrong moment.  Reverted to per-call
+  //     instances; v2.0.186 just drops the shared_ptr indirection on
+  //     top of that.
+  static UnifiedCache shared(const std::string& bookCachePath);
 
   // Direct constructor — kept public for unit tests and for callers that
   // explicitly want an isolated instance (e.g., one-shot diagnostics).
