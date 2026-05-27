@@ -1094,41 +1094,79 @@ void ReaderState::exit(Core& core) {
   // free the instance.
   JpegToBmpConverter::releaseAllPersistent();
 
-  // v2.0.185 — REVERTED v2.0.183 lifecycle hygiene cache clears.
+  // v2.0.190 — RE-INTRODUCING v2.0.183 lifecycle hygiene cache clears
+  // now that v2.0.189 has eliminated the latent TXT/ParsedText heap
+  // corruption these clears originally exposed.
   //
-  // Hardware repro on the TXT-after-EPUB workflow (Yandex_Kniga.epub
-  // → Asimov human-brain TXT) triggered a `multi_heap_free` poisoning
-  // assert in `std::basic_string::_M_create` during the TXT cold-extend
-  // rebuild's ParsedText spill path:
-  //   assert failed: multi_heap_free multi_heap_poisoning.c:279
-  //   (head != NULL)
-  // Heap poison byte mismatch = some earlier write corrupted the next
-  // block's metadata.  Crash detected at realloc time during the spill
-  // buffer growth.
+  // BACKGROUND — the v2.0.183 → 185 → 189 → 190 arc:
+  //   * v2.0.183 added these three unconditional clears to recover an
+  //     additional ~6-23 KB per book switch, on top of v2.0.180's JPEG
+  //     release.
+  //   * v2.0.185 reverted them after a `multi_heap_free` poisoning
+  //     assert in the TXT cold-extend ParsedText spill path
+  //     (multi_heap_poisoning.c:279 (head != NULL)).  The crash was
+  //     in code v2.0.183 didn't touch, but the new clears changed the
+  //     allocator's free-block layout enough to make a pre-existing
+  //     latent bug fatal.
+  //   * v2.0.189 traced the root cause: PlainTextParser was reading
+  //     the original cp1251 SD source directly (bypassing the
+  //     v2.0.187 UTF-8 cache) and feeding the resulting invalid
+  //     UTF-8 stream into `utf8NormalizeNfc()`.  NFC normalization
+  //     walks the input as UTF-8 codepoints and writes
+  //     contraction/decomposition results back to the same buffer;
+  //     malformed continuation byte sequences caused it to walk past
+  //     the buffer end and overwrite the next heap block's metadata.
+  //     With v2.0.189 the parser reads the validated UTF-8 cache
+  //     and the normalization stays within bounds.
+  //   * v2.0.190 — root cause gone → re-add the v2.0.183 clears.
+  //     Hardware verification on the same Asimov TXT (royallib.ru
+  //     cp1251, 14 pages read) showed zero `multi_heap_free` asserts
+  //     after v2.0.189.
   //
-  // The crash is in code that v2.0.183 didn't touch (TXT pipeline,
-  // ParsedText spill), but my three unconditional cache clears on
-  // book exit may have exposed a latent dangling-pointer bug
-  // elsewhere by changing the allocator's free-block layout for the
-  // next book's session.  Each of imageCache.clear() / font bitmap
-  // clear / width cache clear had a pre-existing reactive callsite
-  // (line 2999, ReaderStateOverlays.cpp:740, line 820) — adding
-  // additional unconditional calls on every book exit changed the
-  // timing/layout that previously kept the latent bug harmless.
+  // The three caches being cleared (rationale unchanged from v2.0.183):
   //
-  // Reverting these three calls restores the v2.0.180 behavior
-  // (JpegToBmpConverter::releaseAllPersistent stays — it's the
-  // proven safe one).  The v2.0.183 win was ~6-23 KB heap recovery
-  // per book switch; reverting takes us back to v2.0.180's 25 KB
-  // from JPEG-only, which still leaves us substantially ahead of
-  // the pre-180 baseline that caused the original FB2-after-EPUB
-  // OOM cascade.
+  //   1. ImageRenderCache (renderer_.imageCache(), unordered_map<string,
+  //      Entry>).  Each entry is ~3-10 KB of decoded bitmap; v2.0.52
+  //      comment at line ~3030 notes the cache can pin "30+ KB of
+  //      contiguous heap" after image-bearing books.  Reactive clear
+  //      at line ~3035 fires only when isHeapCritical() trips in the
+  //      BG worker — too late for the NEXT book's first parse, which
+  //      already inherited the fragmented heap.
   //
-  // The underlying TXT/ParsedText heap corruption is a pre-existing
-  // latent bug — it should be diagnosed and fixed in a separate
-  // patch (likely requires instrumented heap-tracking build to
-  // localize).  v2.0.185 just removes my v2.0.183 trigger so the
-  // bug stays dormant as before.
+  //   2. Font streaming bitmap caches
+  //      (FONT_MANAGER.clearStreamingBitmapCaches()).  Per-glyph
+  //      bitmap pool for the open .epdfont reader.  Reactive call at
+  //      ReaderStateOverlays.cpp:740 fires on page-fill trim; the
+  //      entry-time call at line ~820 (enter()) re-clears before each
+  //      book's first render.  Adding it here on exit ensures the
+  //      bitmaps don't pin heap during the FB2 cold-extend window
+  //      between books, before enter() has a chance to clear them.
+  //
+  //   3. Glyph advance-width cache (renderer_.clearWidthCache()).
+  //      String→advance memoization built up during text layout.
+  //      Reactive call at line ~821 (next-book entry-time) re-clears
+  //      it, but the cache stays heap-resident during the exit-to-
+  //      entry transition.
+  //
+  // Combined estimated win: ~5-20 KB recovered per book switch, on
+  // top of v2.0.180's 25 KB from JpegToBmpConverter::releaseAllPersistent
+  // — total ~31-49 KB per book-switch recovery vs the pre-v2.0.180
+  // baseline.  All three calls are no-ops when the underlying cache
+  // is empty, so safe to call unconditionally on every book exit.
+  //
+  // ZipFile::fileStatSlimCache was considered but skipped: ZipFile is
+  // already constructed transiently (`ZipFile zip(filepath)` at each
+  // openItemStream / readItemContentsToStream callsite — see
+  // Epub.cpp:605, :820, :1014).  The cache dies with its enclosing
+  // ZipFile instance on every operation; no persistent state survives
+  // between book sessions to clean up.
+  //
+  // Safety: ReaderState::exit() runs AFTER asyncJobs_.stopWorker()
+  // above, so no concurrent reader/parser/render is in flight when
+  // these clears execute.
+  renderer_.imageCache().clear();
+  FONT_MANAGER.clearStreamingBitmapCaches();
+  renderer_.clearWidthCache();
 
   // Keep the active .epdfont reader family loaded across UI transitions.
   // Several UI surfaces reuse theme.readerFontId directly, so unloading the
