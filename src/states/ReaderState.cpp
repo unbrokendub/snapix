@@ -2983,9 +2983,31 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   const int bannerH    = contentH + padV * 2;
   const int bannerX    = (renderer_.getScreenWidth() - bannerW) / 2;
   const int bannerY    = (renderer_.getScreenHeight() - bannerH) / 2;
-  const int spinnerX   = bannerX + (bannerW - spinnerW) / 2;
+
+  // v2.0.197 — snap spinnerX to an 8-pixel byte boundary BEFORE deriving textX.
+  // GfxRenderer::drawImage is byte-copy (no per-pixel bit-shift), so a non-
+  // 8-aligned x makes the bitmap render shifted by `x % 8` pixels relative
+  // to where the pixel-math says it should be.  v2.0.196 calculated spinnerX
+  // as raw `bannerX + (bannerW - spinnerW) / 2`, which for typical banner
+  // widths landed at e.g. x=207 → byte=25, bit=7 → spinner displaced 7 px
+  // left from "true centre".  Worse, textX was centered on bannerW (not on
+  // the snapped spinner), so text and spinner drifted apart visibly.
+  //
+  // Fix: compute the desired centre X for the spinner, snap it to the
+  // nearest 8-pixel boundary, then anchor textX on the snapped spinner
+  // centre.  This keeps spinner & text on the same vertical axis even
+  // when bannerW isn't a multiple of 16.
+  const int desiredSpinnerX = bannerX + (bannerW - spinnerW) / 2;
+  // Round to nearest 8-pixel boundary (+4 then mask).  Bounded by
+  // bannerX + padH (left margin) and bannerX + bannerW - padH - spinnerW
+  // (right margin) — both within screen, so the snap can't push the
+  // spinner off the banner.
+  const int spinnerX   = (desiredSpinnerX + 4) & ~7;
   const int spinnerY   = bannerY + padV;
-  const int textX      = bannerX + (bannerW - textWidth) / 2;
+  // Text is centered on the SPINNER axis (not the banner axis) so they
+  // always line up vertically.
+  const int spinnerCenterX = spinnerX + spinnerW / 2;
+  const int textX      = spinnerCenterX - textWidth / 2;
   const int textY      = spinnerY + spinnerH + iconGap;
 
   // Draw overlay banner on top of existing framebuffer content — no clearScreen,

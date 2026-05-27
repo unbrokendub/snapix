@@ -28,6 +28,8 @@
 #include <algorithm>
 #include <cstring>
 #include <functional>  // v2.0.60: std::function for recursive rmTree lambda in clearCache
+#include <new>         // v2.0.197: std::bad_alloc for parseXmlStream try/catch
+#include <stdexcept>   // v2.0.197: std::length_error, std::exception
 #include <memory>
 
 namespace {
@@ -697,23 +699,49 @@ bool Fb2::parseXmlStream() {
   uint8_t buffer[kChunkSize];
   bool success = true;
 
-  while (true) {
-    int bytesRead = 0;
-    int done = 0;
-    {
-      snapix::spi::SharedBusLock lk;
-      if (file.available() <= 0) break;
-      bytesRead = file.read(buffer, kChunkSize);
-      if (bytesRead <= 0) break;
-      done = (file.available() == 0) ? 1 : 0;
-    }
+  // v2.0.197 — wrap the parse loop in try/catch so a heap-OOM during a
+  // callback's vector::push_back / std::string append (TocItem accumulation,
+  // binary index, currentSectionTitle_ concatenation) becomes a graceful
+  // load failure instead of `abort()` via the C++ unwind machinery.
+  //
+  // Backstory: v2.0.196 hardware repro crashed at:
+  //   Fb2::endElement → std::vector<TocItem>::push_back → _M_realloc_append
+  //   → __throw_length_error/bad_alloc → propagates through expat's C
+  //   callback dispatch → no catch in parseXmlStream → terminate → abort
+  // The unwind machinery shows up in the panic backtrace
+  // (__cxa_call_terminate, _Unwind_RaiseException_Phase2 etc.).  Local
+  // catch here intercepts BEFORE it crosses into expat's C frames again.
+  try {
+    while (true) {
+      int bytesRead = 0;
+      int done = 0;
+      {
+        snapix::spi::SharedBusLock lk;
+        if (file.available() <= 0) break;
+        bytesRead = file.read(buffer, kChunkSize);
+        if (bytesRead <= 0) break;
+        done = (file.available() == 0) ? 1 : 0;
+      }
 
-    if (XML_Parse(xmlParser_, reinterpret_cast<const char*>(buffer), bytesRead, done) ==
-        XML_STATUS_ERROR) {
-      LOG_ERR(TAG, "XML parse error: %s", XML_ErrorString(XML_GetErrorCode(xmlParser_)));
-      success = false;
-      break;
+      if (XML_Parse(xmlParser_, reinterpret_cast<const char*>(buffer), bytesRead, done) ==
+          XML_STATUS_ERROR) {
+        LOG_ERR(TAG, "XML parse error: %s", XML_ErrorString(XML_GetErrorCode(xmlParser_)));
+        success = false;
+        break;
+      }
     }
+  } catch (const std::bad_alloc& e) {
+    LOG_ERR(TAG, "XML parse OOM (heap exhausted growing toc/binary/title): %s", e.what());
+    success = false;
+  } catch (const std::length_error& e) {
+    LOG_ERR(TAG, "XML parse length_error (vector size limit): %s", e.what());
+    success = false;
+  } catch (const std::exception& e) {
+    LOG_ERR(TAG, "XML parse exception: %s", e.what());
+    success = false;
+  } catch (...) {
+    LOG_ERR(TAG, "XML parse: unknown exception");
+    success = false;
   }
 
   closeFileProtected(file);
