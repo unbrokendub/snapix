@@ -57,6 +57,7 @@
 #include "../ui/Elements.h"
 #include "../ui/views/ReaderViews.h"
 #include "ThemeManager.h"
+#include "reader/LoadingAnimation.h"  // v2.0.196 — 10-frame spinner bitmaps for the centred-status banner
 #include "reader/ReaderStateInternal.h"
 #include "reader/ReaderSupport.h"
 
@@ -1491,6 +1492,10 @@ void ReaderState::render(Core& core) {
       renderCenteredStatusMessage(core, "Indexing...");
       pendingTocJumpIndexingShown_ = true;
     }
+    // v2.0.196 — animate the spinner while the TOC jump is in flight.
+    // tickLoadingAnimation is rate-limited (≥500 ms) so calling it on
+    // every render() iteration costs ~µs when no refresh is due.
+    tickLoadingAnimation(core);
   } else if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_) {
     // v2.0.84: optimistic TOC navigation — render the target spine's page
     // 0 (or current target page) right away while processPendingTocJump
@@ -1508,6 +1513,8 @@ void ReaderState::render(Core& core) {
       renderCenteredStatusMessage(core, pendingEpubPageLoadUseIndexingMessage_ ? "Indexing..." : "Loading...");
       pendingEpubPageLoadMessageShown_ = true;
     }
+    // v2.0.196 — animate spinner during page-load wait (see comment above).
+    tickLoadingAnimation(core);
   } else if (menuMode_) {
     const Theme& theme = THEME_MANAGER.current();
     ui::render(renderer_, theme, menuView_);
@@ -2904,6 +2911,14 @@ void ReaderState::displayWithRefresh(Core& core) {
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
   const int pagesPerRefreshValue = core.settings.getPagesPerRefreshValue();
 
+  // v2.0.196 — any full-frame display update (the page render path that
+  // follows a successful pendingEpubPageLoad resolution) wipes the
+  // spinner banner along with the rest of the framebuffer.  Clear the
+  // overlay-active flag so the next async wait knows to start fresh from
+  // frame 0 (it gets re-set by renderCenteredStatusMessage on its first
+  // call).
+  loadingOverlayActive_ = false;
+
   // After an overlay banner (displayWindow), the RED RAM baseline is stale.
   // Drive-all refresh writes the inverted framebuffer to RED RAM so every
   // pixel is explicitly driven to its target state — no ghosting, no flash.
@@ -2940,38 +2955,58 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
   const int fontId = fontIdOverride ? fontIdOverride : core.settings.getReaderFontId(theme);
 
-  // Calculate compact overlay banner dimensions (centered on screen).
-  constexpr int padH = 24;  // horizontal padding inside banner
-  constexpr int padV = 16;  // vertical padding inside banner
-  constexpr int iconW = 14;
-  constexpr int iconH = 20;
-  constexpr int iconGap = 10;
-  const int textWidth = renderer_.getTextWidth(fontId, message, EpdFontFamily::BOLD);
+  // v2.0.196 — banner now centres a 64x64 spinner ABOVE the status text
+  // (was a static 14x20 box icon to the LEFT of the text).  Layout:
+  //
+  //   +---- bannerW ---------+
+  //   |                      |
+  //   |     [spinner 64x64]  |
+  //   |                      |
+  //   |    Loading...        |
+  //   |                      |
+  //   +----------------------+
+  //
+  // The spinner is animated by tickLoadingAnimation() which redraws ONLY
+  // the 64x64 spinner area via a fast partial-window refresh.  Saved
+  // coords (loadingSpinnerX_/Y_) let the tick path skip layout recompute.
+  constexpr int padH    = 24;  // horizontal padding inside banner
+  constexpr int padV    = 16;  // vertical padding inside banner
+  constexpr int iconGap = 12;  // vertical gap between spinner and text
+  constexpr int spinnerW = snapix::loading::kFrameWidth;   // 64
+  constexpr int spinnerH = snapix::loading::kFrameHeight;  // 64
+
+  const int textWidth  = renderer_.getTextWidth(fontId, message, EpdFontFamily::BOLD);
   const int lineHeight = renderer_.getLineHeight(fontId);
-  const int contentW = iconW + iconGap + textWidth;
-  const int contentH = std::max(iconH, lineHeight);
-  const int bannerW = contentW + padH * 2;
-  const int bannerH = contentH + padV * 2;
-  const int bannerX = (renderer_.getScreenWidth() - bannerW) / 2;
-  const int bannerY = (renderer_.getScreenHeight() - bannerH) / 2;
-  const int iconX = bannerX + padH;
-  const int iconY = bannerY + padV + (contentH - iconH) / 2;
-  const int textX = iconX + iconW + iconGap;
-  const int textY = bannerY + padV + (contentH - lineHeight) / 2;
+  const int contentW   = std::max(spinnerW, textWidth);
+  const int contentH   = spinnerH + iconGap + lineHeight;
+  const int bannerW    = contentW + padH * 2;
+  const int bannerH    = contentH + padV * 2;
+  const int bannerX    = (renderer_.getScreenWidth() - bannerW) / 2;
+  const int bannerY    = (renderer_.getScreenHeight() - bannerH) / 2;
+  const int spinnerX   = bannerX + (bannerW - spinnerW) / 2;
+  const int spinnerY   = bannerY + padV;
+  const int textX      = bannerX + (bannerW - textWidth) / 2;
+  const int textY      = spinnerY + spinnerH + iconGap;
 
   // Draw overlay banner on top of existing framebuffer content — no clearScreen,
   // so the previous page / file-list stays visible behind the banner.
   renderer_.fillRect(bannerX, bannerY, bannerW, bannerH, !theme.primaryTextBlack);
-  renderer_.drawRect(iconX, iconY, iconW, iconH, theme.primaryTextBlack);
-  renderer_.drawLine(iconX + 2, iconY + 2, iconX + iconW - 3, iconY + iconH / 2, theme.primaryTextBlack);
-  renderer_.drawLine(iconX + iconW - 3, iconY + 2, iconX + 2, iconY + iconH / 2, theme.primaryTextBlack);
-  renderer_.drawLine(iconX + 2, iconY + iconH - 3, iconX + iconW - 3, iconY + iconH / 2,
-                     theme.primaryTextBlack);
-  renderer_.drawLine(iconX + iconW - 3, iconY + iconH - 3, iconX + 2, iconY + iconH / 2,
-                     theme.primaryTextBlack);
-  renderer_.fillRect(iconX + iconW / 2 - 1, iconY + iconH / 2 - 1, 3, 3, theme.primaryTextBlack);
+  // Spinner: frame 0 (rotation starts when tickLoadingAnimation fires).
+  // drawImage memcpy's 1-bit packed bytes straight into the framebuffer
+  // (bit=1 white, bit=0 black, MSB = leftmost pixel) — see EInkDisplay::
+  // drawImage / generate_spinner.py for the format spec.
+  loadingAnimationFrame_ = 0;
+  renderer_.drawImage(snapix::loading::kFrames[loadingAnimationFrame_], spinnerX, spinnerY,
+                      spinnerW, spinnerH);
   renderer_.drawText(fontId, textX, textY, message, theme.primaryTextBlack, EpdFontFamily::BOLD);
   renderer_.drawRect(bannerX + 3, bannerY + 3, bannerW - 6, bannerH - 6, theme.primaryTextBlack);
+
+  // Save spinner coords so tickLoadingAnimation can redraw without
+  // recomputing the layout (and without needing the message string).
+  loadingSpinnerX_ = spinnerX;
+  loadingSpinnerY_ = spinnerY;
+  loadingOverlayActive_ = true;
+  loadingAnimationLastTickMs_ = millis();
 
   // Use drive-all refresh for the full screen so every pixel — including the
   // file-list / page behind the banner — is actively driven to its correct
@@ -2991,6 +3026,54 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   // content).  Keep the flag so that transition also uses drive-all for a
   // crisp first page without ghosting from the banner.
   forceCleanRefreshOnNext_ = true;
+}
+
+void ReaderState::tickLoadingAnimation(Core& core) {
+  // Guard 1: overlay must be visible.  renderCenteredStatusMessage sets
+  // `loadingOverlayActive_` true; the next full page render (which replaces
+  // the framebuffer entirely) doesn't clear it explicitly — but `needsRender_`
+  // becoming true means the overlay is about to be wiped anyway, so the
+  // animation tick is wasted work.  Skipping when needsRender_ is set
+  // avoids a wasted partial-window refresh right before the full page
+  // render's drive-all wipes everything.
+  if (!loadingOverlayActive_ || needsRender_) {
+    return;
+  }
+
+  // Guard 2: rate-limit to one tick per ~500 ms.  E-ink fast partial
+  // refresh takes ~450 ms (per `Wait complete: fast (423 ms)` in the
+  // monitor log), so faster ticks queue up refreshes and waste CPU.
+  // 500 ms = 2 fps gives the user a clear "device is working" signal
+  // without exceeding the panel's refresh cadence.
+  const uint32_t nowMs = millis();
+  constexpr uint32_t kTickIntervalMs = 500;
+  if (nowMs - loadingAnimationLastTickMs_ < kTickIntervalMs) {
+    return;
+  }
+
+  // Advance frame index (wraps at kFrameCount=10).  Frame 0 was drawn
+  // by renderCenteredStatusMessage; frame 1 fires on the first tick
+  // ~500 ms after the banner appears, then 2,3,...,9,0,1,... rotating.
+  loadingAnimationFrame_ = static_cast<uint8_t>((loadingAnimationFrame_ + 1) % snapix::loading::kFrameCount);
+
+  // Redraw the spinner bitmap at the saved coords.  `drawImage` memcpy's
+  // 64x64 packed bytes (512 B) straight into the framebuffer — no per-
+  // pixel work, ~µs.  The text + border around the spinner are untouched.
+  renderer_.drawImage(snapix::loading::kFrames[loadingAnimationFrame_], loadingSpinnerX_,
+                      loadingSpinnerY_, snapix::loading::kFrameWidth, snapix::loading::kFrameHeight);
+
+  // Fast partial-window refresh: only the 64x64 spinner region updates.
+  // `displayWindow` (in GfxRenderer) handles byte-alignment internally —
+  // physX is rounded down to the nearest 8-pixel boundary, physW expanded
+  // up to the next.  Effective refresh region is ≤80x64 (one byte slack
+  // on either side); still tiny vs the full 480x800 panel.  Wall time:
+  // ~50 ms SPI write + ~420 ms e-ink scan = ~470 ms per frame.
+  const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
+  renderer_.displayWindow(loadingSpinnerX_, loadingSpinnerY_, snapix::loading::kFrameWidth,
+                          snapix::loading::kFrameHeight, turnOffScreen);
+  core.display.markDirty();
+
+  loadingAnimationLastTickMs_ = nowMs;
 }
 
 ReaderState::Viewport ReaderState::getReaderViewport(bool showStatusBar) const {

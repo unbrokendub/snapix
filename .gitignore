@@ -26,3 +26,7 @@ tools/reader-test/build/
 /monitor
 .worktrees/
 release-assets/
+# v2.0.196 — loading-spinner generation scratch.  The generated header
+# lives at src/states/reader/LoadingAnimation.h and is tracked; the
+# source GIF + intermediate PNGs + generator script stay local.
+load_animation/
