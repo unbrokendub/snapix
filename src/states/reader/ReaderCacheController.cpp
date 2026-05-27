@@ -14,6 +14,11 @@
 #include <Serialization.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>  // v2.0.80: mutex serialising .anchors save/load
+
+// v2.0.195 — escalation in prefetchAdjacentPage needs FONT_MANAGER access
+// to drop the streaming bitmap caches when heap-critical hits the prefetch
+// path (parallel to the v2.0.194 escalation in the BG worker).
+#include "../../FontManager.h"
 #include <freertos/semphr.h>
 
 #include <new>
@@ -321,13 +326,55 @@ void ReaderCacheController::prefetchAdjacentPage(Core& core) {
   if (pageCount <= 1) return;
 
   const ContentType type = core.content.metadata().type;
-  const HeapState heap = readHeapState();
-  const bool allowEpubNearPrefetch = (type == ContentType::Epub) ? canRunEpubNearPrefetch(heap) : !isHeapCritical(heap);
+  HeapState heap = readHeapState();
+  bool allowEpubNearPrefetch = (type == ContentType::Epub) ? canRunEpubNearPrefetch(heap) : !isHeapCritical(heap);
   if (!allowEpubNearPrefetch) {
+    // v2.0.195 — escalation parallel to the v2.0.194 escalation in the
+    // BG worker (tryScheduleBackgroundCacheTask).  The v2.0.194 hardware
+    // log showed heap-critical firing in the PREFETCH path, not the BG
+    // worker path — so my escalation never ran.  This branch is reached
+    // on every page-turn when heap is fragmented, so it's the right
+    // place to attempt one-shot hygiene before degrading to no-prefetch.
+    //
+    // Same cascade as BG worker:
+    //   1. drop resident pages (existing — was the only action pre-v2.0.195)
+    //   2. drop image cache
+    //   3. drop font streaming bitmap caches
+    //   4. drop width cache
+    //   5. drop bitmap row buffers
+    //   6. re-check heap; if still critical, proceed with skip
+    //
+    // Cost when none of these caches are populated: a few µs of no-op
+    // checks.  Cost when they ARE populated: 5-30 KB recovered + a
+    // ~µs realloc each on the next render that touches them.
+    const HeapState heapBeforeEscalation = heap;
     state.pageCache->clearResidentPages();
-    perfLog(TAG, "reader-prefetch-skip", perfMsNow(), "(reason=heap-critical free=%u largest=%u)",
-            static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlock));
-    return;
+    auto& gfx = resources_.renderer();
+    if (gfx.imageCache().totalBytes() > 0) {
+      gfx.imageCache().clear();
+    }
+    FONT_MANAGER.clearStreamingBitmapCaches();
+    gfx.clearWidthCache();
+    gfx.freeBitmapRowBuffers();
+    heap = readHeapState();
+    if (heap.freeBytes != heapBeforeEscalation.freeBytes ||
+        heap.largestBlock != heapBeforeEscalation.largestBlock) {
+      LOG_INF(TAG,
+              "[PREFETCH] heap-critical escalation: dropped resident + image + "
+              "font bitmaps + width + bitmap rows (free=%u->%u largest=%u->%u)",
+              static_cast<unsigned>(heapBeforeEscalation.freeBytes),
+              static_cast<unsigned>(heap.freeBytes),
+              static_cast<unsigned>(heapBeforeEscalation.largestBlock),
+              static_cast<unsigned>(heap.largestBlock));
+    }
+    // Re-evaluate gating with the freshly-cleaned heap.  If now passable,
+    // fall through to the normal prefetch path; otherwise log + skip.
+    allowEpubNearPrefetch = (type == ContentType::Epub) ? canRunEpubNearPrefetch(heap) : !isHeapCritical(heap);
+    if (!allowEpubNearPrefetch) {
+      perfLog(TAG, "reader-prefetch-skip", perfMsNow(), "(reason=heap-critical free=%u largest=%u)",
+              static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlock));
+      return;
+    }
   }
 
   int direction = 1;
