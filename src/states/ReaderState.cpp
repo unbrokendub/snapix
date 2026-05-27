@@ -3116,21 +3116,21 @@ void ReaderState::tickLoadingAnimation(Core& core) {
     return;
   }
 
-  // v2.0.199 — rate-limit BACKED OFF to 1500 ms (was 500 ms in v2.0.196-198).
-  // The v2.0.198 hardware repro showed the animation tick monopolising the
-  // SPI bus + CPU enough to functionally HALT the BG worker — `Page pending
-  // elapsed` grew 19 sec with cache=1 pages=0 partial=0 unchanged, meaning
-  // the worker got essentially no CPU.  ESP32-C3 is single-core, and even
-  // though the e-ink refresh wait uses vTaskDelay, the 200-300 ms SPI writes
-  // before each refresh starve any task that needs the bus (LittleFS reads
-  // for page cache).
+  // v2.0.201 — interval bumped 1500 → 2500 ms so the WHOLE-SCREEN refresh
+  // below stays within budget.  Partial-window refresh (v2.0.199/200) left
+  // the surrounding screen content (chapters menu, file list) drifting
+  // because cross-talk from the per-tick partial refresh disturbed
+  // neighbouring pixels without re-driving them.  User explicitly asked
+  // for "take what's on screen, overlay spinner, send it again" — that
+  // means full-screen refresh per tick.
   //
-  // 1500 ms = 0.67 fps.  Slower visible rotation but the BG worker now
-  // has ~70% of the second to make progress between ticks instead of ~5%.
-  // Trade-off worth it: a working spinner that lets the book load > a
-  // smooth spinner that prevents it from loading.
+  // Bus duty cycle: 96 KB SPI write + 420 ms refresh ≈ 830 ms per tick.
+  // At 2500 ms interval = 33 % duty cycle.  BG worker has 67 % of every
+  // 2.5 sec to make LittleFS progress.  Tradeoff: slower rotation (~25 sec
+  // per full circle vs 15 sec) but everything behind the banner stays
+  // crisp.
   const uint32_t nowMs = millis();
-  constexpr uint32_t kTickIntervalMs = 1500;
+  constexpr uint32_t kTickIntervalMs = 2500;
   if (nowMs - loadingAnimationLastTickMs_ < kTickIntervalMs) {
     return;
   }
@@ -3152,22 +3152,22 @@ void ReaderState::tickLoadingAnimation(Core& core) {
                     loadingSpinnerY_, snapix::loading::kFrameWidth, snapix::loading::kFrameHeight,
                     theme.primaryTextBlack);
 
-  // v2.0.200 — fast-refresh the WHOLE banner rectangle (not just the
-  // spinner area + margin like v2.0.199).  The v2.0.199 96x96 region
-  // left a visible shade boundary on the e-ink: the freshly-driven
-  // spinner area was crisp, while the rest of the banner (border,
-  // text) was drawn ONCE by the initial drive-all and slowly drifted
-  // — making a visible "box" outline around the spinner.
+  // v2.0.201 — FULL-SCREEN fast refresh (was partial-banner displayWindow
+  // in v2.0.200).  User screenshot showed the surrounding UI (chapters
+  // menu / file list) fading to black behind the banner over multiple
+  // ticks — repeated partial refresh of the banner region disturbed
+  // neighbouring pixels via cross-talk, and without their own drive
+  // voltage they drifted toward random states.
   //
-  // Refreshing the full banner per tick keeps every banner pixel at
-  // its target state, so border + text + spinner appear as one
-  // crisp rectangle.  Bus impact: typical 160x140 banner = ~2.8 KB
-  // per tick (vs 1.4 KB for v2.0.199's 96x96, vs 96 KB for v2.0.198's
-  // full-screen).  Still negligible — 30% duty cycle on the 1500 ms
-  // tick budget, BG worker keeps its share of the bus.
+  // displayBuffer(FAST_REFRESH) re-drives EVERY pixel each tick.  The
+  // framebuffer already contains the previous-state content (we never
+  // cleared it — only painted the banner on top), so the chapters menu
+  // / file list / page text behind the banner gets refreshed back to
+  // crisp every tick.  Same approach v2.0.198 used; the problem there
+  // was a 500 ms tick interval; v2.0.201 keeps it at 2500 ms above so
+  // bus duty cycle drops to ~33 % and the BG worker keeps its share.
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
-  renderer_.displayWindow(loadingBannerX_, loadingBannerY_, loadingBannerW_, loadingBannerH_,
-                          turnOffScreen);
+  renderer_.displayBuffer(EInkDisplay::FAST_REFRESH, turnOffScreen);
   core.display.markDirty();
 
   loadingAnimationLastTickMs_ = nowMs;
