@@ -20,7 +20,21 @@
 constexpr float INFINITY_PENALTY = 10000.0f;
 constexpr float LINE_PENALTY = 50.0f;
 constexpr size_t MAX_GREEDY_WORDS_PER_LINE = 64;
-constexpr size_t SPILL_WORD_THRESHOLD = 96;
+// v2.0.191 — bumped from 96 to 200 to halve LittleFS spill IO for typical
+// book paragraphs.  Russian/English book paragraphs average 50-150 words;
+// at the old 96 threshold most paragraphs hit the spill path and paid a
+// ~100-400 ms write-stall per ParsedText.  At 200 most paragraphs fit
+// entirely in RAM and skip the spill path altogether.
+//
+// Cost: +~3 KB peak RAM per active ParsedText instance (104 extra
+// WordEntry × ~28 bytes each).  Typically 1-2 ParsedText in flight at a
+// time → +~6 KB worst case during cold-extend.  Acceptable because the
+// spill itself transiently allocates file buffers / LittleFS metadata,
+// so eliminating the spill often saves comparable transient memory.
+//
+// Long paragraphs (200+ words) still spill — the algorithm degrades
+// gracefully, just at a higher threshold.
+constexpr size_t SPILL_WORD_THRESHOLD = 200;
 constexpr uint16_t SPILL_MAGIC = 0x5054;  // "PT"
 
 // Soft hyphen (U+00AD) as UTF-8 bytes
