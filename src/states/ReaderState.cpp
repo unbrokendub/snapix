@@ -2044,12 +2044,25 @@ void ReaderState::renderCurrentPage(Core& core) {
                      pendingTocJumpRetryCount_);
   }
 
-  // Always clear screen first (prevents previous content from showing through)
-  renderer_.clearScreen(theme.backgroundColor);
+  // v2.0.202 — clearScreen MOVED INTO each render-bearing branch below.
+  // Previously eager clearScreen at function entry wiped the framebuffer
+  // unconditionally — including in the page-load-deferred paths that
+  // return early without rendering anything.  This left a blank
+  // framebuffer for the subsequent renderCenteredStatusMessage banner
+  // overlay, defeating its "overlay on previous content" design (user
+  // saw banner on blank white instead of banner over the TOC/file
+  // browser that was visible just before).
+  //
+  // New rule: only clear when we're committed to actually drawing a
+  // full-screen frame.  Deferred paths leave the framebuffer alone so
+  // the previous content (TOC menu, file browser, page) stays under
+  // the loading banner that the render() loop draws next.
 
   // Cover page: spineIndex=0, sectionPage=-1 (only when showImages enabled)
   if (currentSpineIndex_ == 0 && currentSectionPage_ == -1) {
     if (core.settings.showImages) {
+      // Cover render takes over the full screen — clear before drawing.
+      renderer_.clearScreen(theme.backgroundColor);
       if (renderCoverPage(core)) {
         hasCover_ = true;
         core.display.markDirty();
@@ -2115,6 +2128,11 @@ void ReaderState::renderCachedPage(Core& core) {
     auto epub = provider->getEpubShared();
     if (currentSpineIndex_ < 0) currentSpineIndex_ = 0;
     if (currentSpineIndex_ >= static_cast<int>(epub->getSpineItemsCount())) {
+      // v2.0.202 — "End of book" needs an explicit clearScreen now that
+      // renderCurrentPage no longer eagerly clears.  Without it the
+      // text would draw over the previous framebuffer content (TOC,
+      // file list, etc.).
+      renderer_.clearScreen(theme.backgroundColor);
       renderer_.drawCenteredText(core.settings.getReaderFontId(theme), 300, "End of book", theme.primaryTextBlack,
                                  BOLD);
       renderer_.displayBuffer();
@@ -2935,6 +2953,12 @@ void ReaderState::renderXtcPage(Core& core) {
   }
 
   const Theme& theme = THEME_MANAGER.current();
+
+  // v2.0.202 — explicit clearScreen (renderCurrentPage no longer
+  // eagerly clears; only render-bearing branches do).  XTC takes
+  // over the full screen via xtcRenderer_.render, so a clean
+  // background is required.
+  renderer_.clearScreen(theme.backgroundColor);
 
   auto result = xtcRenderer_.render(provider->getParser(), currentPage_, [this, &core]() { displayWithRefresh(core); });
 
