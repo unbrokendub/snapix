@@ -3140,21 +3140,19 @@ void ReaderState::tickLoadingAnimation(Core& core) {
     return;
   }
 
-  // v2.0.201 — interval bumped 1500 → 2500 ms so the WHOLE-SCREEN refresh
-  // below stays within budget.  Partial-window refresh (v2.0.199/200) left
-  // the surrounding screen content (chapters menu, file list) drifting
-  // because cross-talk from the per-tick partial refresh disturbed
-  // neighbouring pixels without re-driving them.  User explicitly asked
-  // for "take what's on screen, overlay spinner, send it again" — that
-  // means full-screen refresh per tick.
+  // v2.0.203 — back to 1500 ms ticks with small partial refresh per tick.
+  // v2.0.201's full-screen displayBuffer per tick blocked the SPI bus for
+  // ~500 ms per tick (BW+RED write = 96 KB at ~250 KB/s).  Worker can't
+  // read SD/LittleFS while display task holds the bus.  Hardware repro
+  // showed 70-74 sec cold-parse on 300+ KB FB2 sections — ~3x slower
+  // than expected.
   //
-  // Bus duty cycle: 96 KB SPI write + 420 ms refresh ≈ 830 ms per tick.
-  // At 2500 ms interval = 33 % duty cycle.  BG worker has 67 % of every
-  // 2.5 sec to make LittleFS progress.  Tradeoff: slower rotation (~25 sec
-  // per full circle vs 15 sec) but everything behind the banner stays
-  // crisp.
+  // v2.0.203 uses displayWindow (banner area only, ~2.8 KB write = ~10 ms
+  // bus held) most ticks.  Every Nth tick does a full drive-all refresh
+  // so the surrounding chapters menu / file list gets re-driven and
+  // doesn't drift to black over long waits.  See below.
   const uint32_t nowMs = millis();
-  constexpr uint32_t kTickIntervalMs = 2500;
+  constexpr uint32_t kTickIntervalMs = 1500;
   if (nowMs - loadingAnimationLastTickMs_ < kTickIntervalMs) {
     return;
   }
@@ -3176,22 +3174,40 @@ void ReaderState::tickLoadingAnimation(Core& core) {
                     loadingSpinnerY_, snapix::loading::kFrameWidth, snapix::loading::kFrameHeight,
                     theme.primaryTextBlack);
 
-  // v2.0.201 — FULL-SCREEN fast refresh (was partial-banner displayWindow
-  // in v2.0.200).  User screenshot showed the surrounding UI (chapters
-  // menu / file list) fading to black behind the banner over multiple
-  // ticks — repeated partial refresh of the banner region disturbed
-  // neighbouring pixels via cross-talk, and without their own drive
-  // voltage they drifted toward random states.
+  // v2.0.203 — hybrid refresh strategy that keeps both the spinner crisp
+  // AND the BG worker fed:
   //
-  // displayBuffer(FAST_REFRESH) re-drives EVERY pixel each tick.  The
-  // framebuffer already contains the previous-state content (we never
-  // cleared it — only painted the banner on top), so the chapters menu
-  // / file list / page text behind the banner gets refreshed back to
-  // crisp every tick.  Same approach v2.0.198 used; the problem there
-  // was a 500 ms tick interval; v2.0.201 keeps it at 2500 ms above so
-  // bus duty cycle drops to ~33 % and the BG worker keeps its share.
+  // *  MOST ticks (9 of every 10): partial displayWindow over the banner
+  //    region only.  ~2.8 KB SPI write → ~10 ms bus held + ~420 ms
+  //    refresh wait (yields via vTaskDelay, worker can use bus during
+  //    the wait).  Effective bus block per tick: ~10 ms / 1500 ms ≈ 1 %.
+  //
+  // *  EVERY 10th tick (~every 15 sec): full drive-all refresh.  Re-
+  //    drives EVERY pixel (chapters menu / file list / page text under
+  //    the banner) so they don't drift to mid-gray over long waits via
+  //    cross-talk from the partial-refresh waveform.  ~500 ms bus block
+  //    but happens rarely enough that worker still gets the lion's
+  //    share of the bus.
+  //
+  // Combined: worker bus availability ~95-99 % on average, surrounding
+  // UI gets a clean re-drive every ~15 sec.  Hardware repro with
+  // v2.0.201's pure displayBuffer (500 ms bus block every 2500 ms tick)
+  // showed 70+ sec cold-parse on 312 KB FB2 sections — bus contention
+  // was the dominant cost.  v2.0.203 should bring that back closer to
+  // the native parse speed.
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
-  renderer_.displayBuffer(EInkDisplay::FAST_REFRESH, turnOffScreen);
+  constexpr uint8_t kFullRefreshEveryNTicks = 10;
+  static uint8_t tickCounter = 0;
+  ++tickCounter;
+  if (tickCounter >= kFullRefreshEveryNTicks) {
+    tickCounter = 0;
+    // Re-drive everything (chapters menu + banner) to prevent drift.
+    renderer_.displayBufferDriveAll(turnOffScreen);
+  } else {
+    // Fast partial refresh of just the banner rectangle.
+    renderer_.displayWindow(loadingBannerX_, loadingBannerY_, loadingBannerW_, loadingBannerH_,
+                            turnOffScreen);
+  }
   core.display.markDirty();
 
   loadingAnimationLastTickMs_ = nowMs;
