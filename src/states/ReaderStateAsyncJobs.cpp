@@ -781,7 +781,21 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
         return defaultBatch;
       }
       const int remainingPages = (request.targetPage + 1) - static_cast<int>(pageCache_->pageCount());
-      if (isEpub) {
+      // v2.0.193 — extend EPUB-style speculative headroom to TXT and
+      // Markdown.  Pre-v2.0.193 these formats always asked for exactly
+      // `remainingPages` (typically 1 for cold-extend), forcing each
+      // page-turn to trigger a fresh cache-create cycle: open file,
+      // parse paragraphs, layout, persist 1 page, close.  The log
+      // shows ~2.2 sec per cold-extend (paginate + write + close).
+      // With speculative headroom, the cold-extend asks for 1+2=3
+      // pages in one pass — amortising the parser warmup over multiple
+      // page outputs.
+      //
+      // Same heap-tight guard as EPUB: skip the headroom when free
+      // heap is below the threshold so we don't OOM during cold-extend
+      // on memory-constrained TXT sessions (which is the very scenario
+      // where `Min Free 4568 bytes` appears in v2.0.190 logs).
+      if (isEpub || type == ContentType::Txt || type == ContentType::Markdown) {
         const reader::HeapState heap = reader::readHeapState();
         const int speculativeHeadroom = reader::isHeapTight(heap)
                                             ? 0
