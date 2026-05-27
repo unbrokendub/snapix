@@ -3067,10 +3067,20 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   renderer_.drawText(fontId, textX, textY, message, theme.primaryTextBlack, EpdFontFamily::BOLD);
   renderer_.drawRect(bannerX + 3, bannerY + 3, bannerW - 6, bannerH - 6, theme.primaryTextBlack);
 
-  // Save spinner coords so tickLoadingAnimation can redraw without
-  // recomputing the layout (and without needing the message string).
+  // Save spinner + banner coords so tickLoadingAnimation can redraw
+  // without recomputing the layout (and without needing the message
+  // string).  v2.0.200 also saves the banner rect — the tick now
+  // fast-refreshes the WHOLE banner area, not just the spinner box,
+  // so the freshly-driven region covers the border + text + spinner
+  // as one rectangle.  Avoids the "lighter square inside darker
+  // banner" partial-refresh shade boundary visible in the v2.0.199
+  // hardware photo.
   loadingSpinnerX_ = spinnerX;
   loadingSpinnerY_ = spinnerY;
+  loadingBannerX_ = bannerX;
+  loadingBannerY_ = bannerY;
+  loadingBannerW_ = bannerW;
+  loadingBannerH_ = bannerH;
   loadingOverlayActive_ = true;
   loadingAnimationLastTickMs_ = millis();
 
@@ -3142,30 +3152,22 @@ void ReaderState::tickLoadingAnimation(Core& core) {
                     loadingSpinnerY_, snapix::loading::kFrameWidth, snapix::loading::kFrameHeight,
                     theme.primaryTextBlack);
 
-  // v2.0.199 — reverted from displayBuffer (full-screen) back to
-  // displayWindow (partial-region) because the v2.0.198 hardware
-  // repro showed full-screen tick refresh was monopolising the SPI
-  // bus and starving the BG worker.  Full-screen refresh writes
-  // 96 KB to display RAM per tick (BW + RED); partial-window writes
-  // only the spinner region (~1 KB).  ~95 KB SPI traffic difference
-  // per tick = ~400 ms of bus contention with LittleFS reads (the
-  // BG worker's page cache loads).
+  // v2.0.200 — fast-refresh the WHOLE banner rectangle (not just the
+  // spinner area + margin like v2.0.199).  The v2.0.199 96x96 region
+  // left a visible shade boundary on the e-ink: the freshly-driven
+  // spinner area was crisp, while the rest of the banner (border,
+  // text) was drawn ONCE by the initial drive-all and slowly drifted
+  // — making a visible "box" outline around the spinner.
   //
-  // To compensate for the ghosting that originally drove the v2.0.198
-  // switch, the partial-window region is now SLIGHTLY LARGER than
-  // the spinner itself: 16 px margin on each side gives the
-  // surrounding pixels their drive voltage too, settling them back
-  // toward white instead of accumulating drift.  Effective window
-  // = 96x96 = ~1.4 KB SPI per tick + ~420 ms refresh = ~470 ms.
-  //
-  // Plus the v2.0.199 tick interval bumped to 1500 ms (was 500 ms),
-  // so even if some ghosting still accumulates, the BG worker gets
-  // ~1 sec of clear bus between ticks to make progress.
+  // Refreshing the full banner per tick keeps every banner pixel at
+  // its target state, so border + text + spinner appear as one
+  // crisp rectangle.  Bus impact: typical 160x140 banner = ~2.8 KB
+  // per tick (vs 1.4 KB for v2.0.199's 96x96, vs 96 KB for v2.0.198's
+  // full-screen).  Still negligible — 30% duty cycle on the 1500 ms
+  // tick budget, BG worker keeps its share of the bus.
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
-  constexpr int kMargin = 16;
-  renderer_.displayWindow(loadingSpinnerX_ - kMargin, loadingSpinnerY_ - kMargin,
-                          snapix::loading::kFrameWidth + 2 * kMargin,
-                          snapix::loading::kFrameHeight + 2 * kMargin, turnOffScreen);
+  renderer_.displayWindow(loadingBannerX_, loadingBannerY_, loadingBannerW_, loadingBannerH_,
+                          turnOffScreen);
   core.display.markDirty();
 
   loadingAnimationLastTickMs_ = nowMs;

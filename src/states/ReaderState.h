@@ -257,6 +257,18 @@ class ReaderState : public State {
   uint32_t loadingAnimationLastTickMs_ = 0;
   int      loadingSpinnerX_ = 0;
   int      loadingSpinnerY_ = 0;
+  // v2.0.200 — save the FULL banner rect (not just the spinner box) so
+  // tickLoadingAnimation can fast-refresh the entire banner instead of
+  // just the 96x96 around the spinner.  The v2.0.199 partial-window
+  // approach left a visible shade boundary between the freshly-refreshed
+  // spinner region and the rest of the banner (drive-all'd ONCE at
+  // banner appearance, then drifting).  Refreshing the whole banner
+  // per tick keeps the border + text crisp without monopolising the bus
+  // — banner is ~160x140 ≈ 2.8 KB per tick vs full-screen 48 KB.
+  int      loadingBannerX_ = 0;
+  int      loadingBannerY_ = 0;
+  int      loadingBannerW_ = 0;
+  int      loadingBannerH_ = 0;
   bool     loadingOverlayActive_ = false;
   Viewport getReaderViewport(bool showStatusBar) const;
   bool isWorkerRunning() const;
