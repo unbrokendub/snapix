@@ -1537,7 +1537,10 @@ void ReaderState::render(Core& core) {
 
   if (pendingTocJumpActive_ && !pendingTocJumpDeferredDisplay_) {
     if (!pendingTocJumpIndexingShown_) {
-      renderCenteredStatusMessage(core, "Indexing...");
+      // v2.0.199 — unified status banner uses "Loading..." for every
+      // wait state.  Previously this branch showed "Indexing..." for the
+      // TOC-jump path; user preferred a single label.
+      renderCenteredStatusMessage(core, "Loading...");
       pendingTocJumpIndexingShown_ = true;
     }
     // v2.0.196 — animate the spinner while the TOC jump is in flight.
@@ -1558,7 +1561,8 @@ void ReaderState::render(Core& core) {
     }
   } else if (pendingEpubPageLoadActive_) {
     if (!pendingEpubPageLoadMessageShown_) {
-      renderCenteredStatusMessage(core, pendingEpubPageLoadUseIndexingMessage_ ? "Indexing..." : "Loading...");
+      // v2.0.199 — unified "Loading..." (was conditional Indexing/Loading).
+      renderCenteredStatusMessage(core, "Loading...");
       pendingEpubPageLoadMessageShown_ = true;
     }
     // v2.0.196 — animate spinner during page-load wait (see comment above).
@@ -3102,13 +3106,21 @@ void ReaderState::tickLoadingAnimation(Core& core) {
     return;
   }
 
-  // Guard 2: rate-limit to one tick per ~500 ms.  E-ink fast partial
-  // refresh takes ~450 ms (per `Wait complete: fast (423 ms)` in the
-  // monitor log), so faster ticks queue up refreshes and waste CPU.
-  // 500 ms = 2 fps gives the user a clear "device is working" signal
-  // without exceeding the panel's refresh cadence.
+  // v2.0.199 — rate-limit BACKED OFF to 1500 ms (was 500 ms in v2.0.196-198).
+  // The v2.0.198 hardware repro showed the animation tick monopolising the
+  // SPI bus + CPU enough to functionally HALT the BG worker — `Page pending
+  // elapsed` grew 19 sec with cache=1 pages=0 partial=0 unchanged, meaning
+  // the worker got essentially no CPU.  ESP32-C3 is single-core, and even
+  // though the e-ink refresh wait uses vTaskDelay, the 200-300 ms SPI writes
+  // before each refresh starve any task that needs the bus (LittleFS reads
+  // for page cache).
+  //
+  // 1500 ms = 0.67 fps.  Slower visible rotation but the BG worker now
+  // has ~70% of the second to make progress between ticks instead of ~5%.
+  // Trade-off worth it: a working spinner that lets the book load > a
+  // smooth spinner that prevents it from loading.
   const uint32_t nowMs = millis();
-  constexpr uint32_t kTickIntervalMs = 500;
+  constexpr uint32_t kTickIntervalMs = 1500;
   if (nowMs - loadingAnimationLastTickMs_ < kTickIntervalMs) {
     return;
   }
@@ -3130,22 +3142,30 @@ void ReaderState::tickLoadingAnimation(Core& core) {
                     loadingSpinnerY_, snapix::loading::kFrameWidth, snapix::loading::kFrameHeight,
                     theme.primaryTextBlack);
 
-  // v2.0.198 — switch from displayWindow (fast partial refresh of just
-  // the 64x64 region) to displayBuffer (full-screen fast refresh).
-  // displayWindow caused visible cross-talk ghosting in the v2.0.197
-  // hardware repro: the spinner region refreshed cleanly but adjacent
-  // banner pixels (border, text) accumulated artefacts over a few
-  // ticks, and even pixels far from the spinner (file-list text
-  // behind the banner) bled through.  This is standard e-ink behaviour
-  // — fast partial refresh drive voltage affects neighbouring pixels'
-  // electrophoretic state.
+  // v2.0.199 — reverted from displayBuffer (full-screen) back to
+  // displayWindow (partial-region) because the v2.0.198 hardware
+  // repro showed full-screen tick refresh was monopolising the SPI
+  // bus and starving the BG worker.  Full-screen refresh writes
+  // 96 KB to display RAM per tick (BW + RED); partial-window writes
+  // only the spinner region (~1 KB).  ~95 KB SPI traffic difference
+  // per tick = ~400 ms of bus contention with LittleFS reads (the
+  // BG worker's page cache loads).
   //
-  // displayBuffer drives every pixel to its target state each tick.
-  // ~10 ms SPI write + ~420 ms scan = ~430 ms total (vs ~470 ms for
-  // displayWindow), so this is actually slightly FASTER on top of
-  // being artefact-free.
+  // To compensate for the ghosting that originally drove the v2.0.198
+  // switch, the partial-window region is now SLIGHTLY LARGER than
+  // the spinner itself: 16 px margin on each side gives the
+  // surrounding pixels their drive voltage too, settling them back
+  // toward white instead of accumulating drift.  Effective window
+  // = 96x96 = ~1.4 KB SPI per tick + ~420 ms refresh = ~470 ms.
+  //
+  // Plus the v2.0.199 tick interval bumped to 1500 ms (was 500 ms),
+  // so even if some ghosting still accumulates, the BG worker gets
+  // ~1 sec of clear bus between ticks to make progress.
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
-  renderer_.displayBuffer(EInkDisplay::FAST_REFRESH, turnOffScreen);
+  constexpr int kMargin = 16;
+  renderer_.displayWindow(loadingSpinnerX_ - kMargin, loadingSpinnerY_ - kMargin,
+                          snapix::loading::kFrameWidth + 2 * kMargin,
+                          snapix::loading::kFrameHeight + 2 * kMargin, turnOffScreen);
   core.display.markDirty();
 
   loadingAnimationLastTickMs_ = nowMs;

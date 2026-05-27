@@ -803,7 +803,8 @@ void ReaderState::processPendingEpubPageLoad(Core& core) {
   const uint32_t nowMs = millis();
   if (!pendingEpubPageLoadMessageShown_ && pendingEpubPageLoadStartedMs_ != 0 &&
       (nowMs - pendingEpubPageLoadStartedMs_) >= reader::kPendingPageLoadOverlayDelayMs) {
-    renderCenteredStatusMessage(core, pendingEpubPageLoadUseIndexingMessage_ ? "Indexing..." : "Loading...");
+    // v2.0.199 — unified "Loading..." (was conditional Indexing/Loading).
+    renderCenteredStatusMessage(core, "Loading...");
     pendingEpubPageLoadMessageShown_ = true;
   }
 
