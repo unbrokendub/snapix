@@ -61,6 +61,54 @@
 #include "reader/ReaderStateInternal.h"
 #include "reader/ReaderSupport.h"
 
+namespace {
+// v2.0.198 — pixel-by-pixel 1-bit bitmap blit that works regardless of
+// destination alignment OR display orientation.
+//
+// v2.0.196/197 used GfxRenderer::drawImage which does a row-by-row memcpy
+// of packed bytes into the framebuffer.  Problem: drawImage's destination
+// X must be a multiple of 8 for the byte copy to land on the correct
+// pixel column.  AND in Portrait orientation the renderer rotates
+// coordinates — logical Y becomes physical X, so even an 8-aligned
+// LOGICAL X can land on a non-aligned PHYSICAL X.  Result: spinner
+// rendered displaced by `(physX % 8)` pixels, visibly off-centre
+// relative to text below it.
+//
+// drawPixel handles arbitrary bit positions via the (frameBuffer[byte]
+// AND/OR bit-mask) path, so calling it per pixel sidesteps the alignment
+// issue entirely.  Cost: 64x64 = 4096 drawPixel calls ≈ 4 ms per blit.
+// Negligible vs the ~470 ms e-ink refresh that follows.
+//
+// Bitmap format (matches LoadingAnimation.h):
+//   * Row-major, packed.  Bytes per row = (width + 7) / 8.
+//   * MSB = leftmost pixel of the byte's 8-pixel group.
+//   * Bit value: 1 = WHITE (paper, "off"), 0 = BLACK (ink, "on").
+//     Matches EInkDisplay's framebuffer convention.
+void drawAlignedBitmap(GfxRenderer& renderer, const uint8_t* bitmap, int x, int y, int width,
+                       int height, bool blackPixelsOn = true) {
+  const int bytesPerRow = (width + 7) / 8;
+  for (int row = 0; row < height; ++row) {
+    const uint8_t* rowBase = bitmap + row * bytesPerRow;
+    for (int col = 0; col < width; ++col) {
+      const uint8_t byte = rowBase[col >> 3];
+      const uint8_t bit  = 7 - (col & 7);
+      const bool whitePixel = (byte >> bit) & 1;
+      // White pixel → DON'T draw (transparent over background).  Black
+      // pixel → draw in `blackPixelsOn` (true = on/ink).  Transparency
+      // matters because the spinner has lots of white pixels inside
+      // its bounding box; we'd erase the banner background underneath
+      // if we always wrote both colours.  Actually for the spinner
+      // case the banner background was already painted white by
+      // fillRect, so transparent-white is functionally identical to
+      // explicit-white.  Either way is fine.
+      if (!whitePixel) {
+        renderer.drawPixel(x + col, y + row, blackPixelsOn);
+      }
+    }
+  }
+}
+}  // namespace
+
 #define TAG "READER"
 
 namespace snapix {
@@ -2984,42 +3032,34 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   const int bannerX    = (renderer_.getScreenWidth() - bannerW) / 2;
   const int bannerY    = (renderer_.getScreenHeight() - bannerH) / 2;
 
-  // v2.0.197 — snap spinnerX to an 8-pixel byte boundary BEFORE deriving textX.
-  // GfxRenderer::drawImage is byte-copy (no per-pixel bit-shift), so a non-
-  // 8-aligned x makes the bitmap render shifted by `x % 8` pixels relative
-  // to where the pixel-math says it should be.  v2.0.196 calculated spinnerX
-  // as raw `bannerX + (bannerW - spinnerW) / 2`, which for typical banner
-  // widths landed at e.g. x=207 → byte=25, bit=7 → spinner displaced 7 px
-  // left from "true centre".  Worse, textX was centered on bannerW (not on
-  // the snapped spinner), so text and spinner drifted apart visibly.
-  //
-  // Fix: compute the desired centre X for the spinner, snap it to the
-  // nearest 8-pixel boundary, then anchor textX on the snapped spinner
-  // centre.  This keeps spinner & text on the same vertical axis even
-  // when bannerW isn't a multiple of 16.
-  const int desiredSpinnerX = bannerX + (bannerW - spinnerW) / 2;
-  // Round to nearest 8-pixel boundary (+4 then mask).  Bounded by
-  // bannerX + padH (left margin) and bannerX + bannerW - padH - spinnerW
-  // (right margin) — both within screen, so the snap can't push the
-  // spinner off the banner.
-  const int spinnerX   = (desiredSpinnerX + 4) & ~7;
-  const int spinnerY   = bannerY + padV;
-  // Text is centered on the SPINNER axis (not the banner axis) so they
-  // always line up vertically.
+  // v2.0.198 — straightforward centre calculation.  v2.0.197's 8-pixel
+  // snap was a workaround for the alignment issue in drawImage, but it
+  // didn't help in Portrait orientation where the renderer rotates
+  // logical X→Y/Y→X internally (so the SCREEN-X snap landed at a non-
+  // aligned PHYSICAL X anyway).  drawAlignedBitmap (above) handles any
+  // alignment correctly via per-pixel drawPixel, so we can compute the
+  // logical centres directly and trust the math.
+  const int spinnerX       = bannerX + (bannerW - spinnerW) / 2;
+  const int spinnerY       = bannerY + padV;
   const int spinnerCenterX = spinnerX + spinnerW / 2;
-  const int textX      = spinnerCenterX - textWidth / 2;
-  const int textY      = spinnerY + spinnerH + iconGap;
+  // Text centered on the spinner axis (same as banner centre, since
+  // spinner is now exactly centred).
+  const int textX          = spinnerCenterX - textWidth / 2;
+  const int textY          = spinnerY + spinnerH + iconGap;
 
   // Draw overlay banner on top of existing framebuffer content — no clearScreen,
   // so the previous page / file-list stays visible behind the banner.
   renderer_.fillRect(bannerX, bannerY, bannerW, bannerH, !theme.primaryTextBlack);
   // Spinner: frame 0 (rotation starts when tickLoadingAnimation fires).
-  // drawImage memcpy's 1-bit packed bytes straight into the framebuffer
-  // (bit=1 white, bit=0 black, MSB = leftmost pixel) — see EInkDisplay::
-  // drawImage / generate_spinner.py for the format spec.
+  // v2.0.198 — use drawAlignedBitmap (per-pixel drawPixel under the
+  // hood) instead of renderer_.drawImage.  drawImage memcpy's packed
+  // bytes which require the destination X to be 8-aligned AFTER the
+  // orientation rotation — in Portrait mode that's effectively a Y
+  // alignment requirement which the layout math has no easy way to
+  // enforce.  drawAlignedBitmap handles any alignment correctly.
   loadingAnimationFrame_ = 0;
-  renderer_.drawImage(snapix::loading::kFrames[loadingAnimationFrame_], spinnerX, spinnerY,
-                      spinnerW, spinnerH);
+  drawAlignedBitmap(renderer_, snapix::loading::kFrames[loadingAnimationFrame_], spinnerX, spinnerY,
+                    spinnerW, spinnerH, theme.primaryTextBlack);
   renderer_.drawText(fontId, textX, textY, message, theme.primaryTextBlack, EpdFontFamily::BOLD);
   renderer_.drawRect(bannerX + 3, bannerY + 3, bannerW - 6, bannerH - 6, theme.primaryTextBlack);
 
@@ -3078,21 +3118,34 @@ void ReaderState::tickLoadingAnimation(Core& core) {
   // ~500 ms after the banner appears, then 2,3,...,9,0,1,... rotating.
   loadingAnimationFrame_ = static_cast<uint8_t>((loadingAnimationFrame_ + 1) % snapix::loading::kFrameCount);
 
-  // Redraw the spinner bitmap at the saved coords.  `drawImage` memcpy's
-  // 64x64 packed bytes (512 B) straight into the framebuffer — no per-
-  // pixel work, ~µs.  The text + border around the spinner are untouched.
-  renderer_.drawImage(snapix::loading::kFrames[loadingAnimationFrame_], loadingSpinnerX_,
-                      loadingSpinnerY_, snapix::loading::kFrameWidth, snapix::loading::kFrameHeight);
+  // v2.0.198 — first paint the white background under the spinner
+  // (otherwise OR'ing the new frame on top of the previous frame
+  // accumulates black pixels — segments stack instead of rotating).
+  // Then draw the new frame's black pixels via drawAlignedBitmap
+  // (handles any X/Y alignment + orientation rotation correctly).
+  const Theme& theme = THEME_MANAGER.current();
+  renderer_.fillRect(loadingSpinnerX_, loadingSpinnerY_, snapix::loading::kFrameWidth,
+                     snapix::loading::kFrameHeight, !theme.primaryTextBlack);
+  drawAlignedBitmap(renderer_, snapix::loading::kFrames[loadingAnimationFrame_], loadingSpinnerX_,
+                    loadingSpinnerY_, snapix::loading::kFrameWidth, snapix::loading::kFrameHeight,
+                    theme.primaryTextBlack);
 
-  // Fast partial-window refresh: only the 64x64 spinner region updates.
-  // `displayWindow` (in GfxRenderer) handles byte-alignment internally —
-  // physX is rounded down to the nearest 8-pixel boundary, physW expanded
-  // up to the next.  Effective refresh region is ≤80x64 (one byte slack
-  // on either side); still tiny vs the full 480x800 panel.  Wall time:
-  // ~50 ms SPI write + ~420 ms e-ink scan = ~470 ms per frame.
+  // v2.0.198 — switch from displayWindow (fast partial refresh of just
+  // the 64x64 region) to displayBuffer (full-screen fast refresh).
+  // displayWindow caused visible cross-talk ghosting in the v2.0.197
+  // hardware repro: the spinner region refreshed cleanly but adjacent
+  // banner pixels (border, text) accumulated artefacts over a few
+  // ticks, and even pixels far from the spinner (file-list text
+  // behind the banner) bled through.  This is standard e-ink behaviour
+  // — fast partial refresh drive voltage affects neighbouring pixels'
+  // electrophoretic state.
+  //
+  // displayBuffer drives every pixel to its target state each tick.
+  // ~10 ms SPI write + ~420 ms scan = ~430 ms total (vs ~470 ms for
+  // displayWindow), so this is actually slightly FASTER on top of
+  // being artefact-free.
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
-  renderer_.displayWindow(loadingSpinnerX_, loadingSpinnerY_, snapix::loading::kFrameWidth,
-                          snapix::loading::kFrameHeight, turnOffScreen);
+  renderer_.displayBuffer(EInkDisplay::FAST_REFRESH, turnOffScreen);
   core.display.markDirty();
 
   loadingAnimationLastTickMs_ = nowMs;
