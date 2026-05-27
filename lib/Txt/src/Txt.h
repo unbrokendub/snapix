@@ -56,6 +56,21 @@ class Txt {
   const std::string& getCachePath() const { return cachePath; }
   const std::string& getPath() const { return filepath; }
 
+  // v2.0.189 — content-read routing for cp1251 sources.  load() may
+  // route reads through a UTF-8 cache file on LittleFS when the SD
+  // source is Windows-1251.  Downstream paginators (PlainTextParser)
+  // need both the effective path AND the FS choice so they read the
+  // SAME byte stream that load() will report via getFileSize().
+  //
+  // For pure UTF-8/ASCII sources these return `filepath` + `false`
+  // (i.e. read from SD as before), so callers can use the same code
+  // path regardless of encoding.  Safe to call before load() — falls
+  // back to the original SD filepath / `false` until load() succeeds.
+  const std::string& getEffectiveContentPath() const {
+    return effectiveContentPath_.empty() ? filepath : effectiveContentPath_;
+  }
+  bool isContentOnLittleFs() const { return useLittleFsForContent_; }
+
   // Metadata
   const std::string& getTitle() const { return title; }
   size_t getFileSize() const { return fileSize; }

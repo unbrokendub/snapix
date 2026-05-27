@@ -24,6 +24,10 @@ class PlainTextParser : public ContentParser {
   size_t currentOffset_ = 0;
   bool hasMore_ = true;
   bool isRtl_ = false;
+  // v2.0.189 — when true, `filepath_` lives on LittleFS (typically the
+  // UTF-8 cache file generated from a cp1251 source by Txt::load()).
+  // Open via LittleFS.open() instead of SdMan.openFileForRead().
+  bool useLittleFs_ = false;
 
   // Carries over unconsumed words from a paragraph that was
   // interrupted by a page-batch limit.
@@ -32,7 +36,12 @@ class PlainTextParser : public ContentParser {
   int16_t pendingPageY_ = 0;
 
  public:
-  PlainTextParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config);
+  // v2.0.189 — `useLittleFs` defaults to false for source compatibility
+  // with existing callers (Markdown, tools, tests).  TXT callers that
+  // routed through a cp1251→UTF-8 cache must pass true (and the cache
+  // path) so reads come from LittleFS, not SD.
+  PlainTextParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config,
+                  bool useLittleFs = false);
   ~PlainTextParser() override = default;
 
   bool parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages = 0,

@@ -1071,8 +1071,16 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     // `parser` stays null below and the cache build path early-returns.
   } else if (type == ContentType::Txt) {
     if (!state.parser) {
-      state.parser = tryNewUnique<ContentParser, PlainTextParser>("PlainTextParser", contentPath_,
-                                                                   resources_.renderer(), config);
+      // v2.0.189 — route the parser through the Txt object's effective
+      // content path so cp1251 sources read from the UTF-8 cache
+      // (LittleFS) instead of the raw cp1251 SD file.  UTF-8/ASCII
+      // sources fall back to contentPath_ + SD (no behaviour change).
+      const auto* txtProv = core.content.asTxt();
+      const Txt* txt = txtProv ? txtProv->getTxt() : nullptr;
+      const std::string parserPath = txt ? txt->getEffectiveContentPath() : std::string(contentPath_);
+      const bool useLfs = txt ? txt->isContentOnLittleFs() : false;
+      state.parser = tryNewUnique<ContentParser, PlainTextParser>("PlainTextParser", parserPath,
+                                                                   resources_.renderer(), config, useLfs);
       if (!state.parser) return;
       state.parserSpineIndex = 0;
     }

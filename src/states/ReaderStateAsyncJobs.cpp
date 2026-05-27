@@ -171,7 +171,16 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
     } else if (type == ContentType::Txt && !(shouldAbort && shouldAbort())) {
       cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
       if (!parser_) {
-        parser_.reset(new PlainTextParser(contentPath_, renderer_, config));
+        // v2.0.189 — route the parser through the Txt object's
+        // effective content path so cp1251 sources read from the
+        // UTF-8 cache (LittleFS) instead of the raw cp1251 SD file.
+        // For UTF-8/ASCII sources these fall back to contentPath_ +
+        // SD (i.e., behaviour identical to v2.0.188 and earlier).
+        const auto* txtProv = coreRef.content.asTxt();
+        const Txt* txt = txtProv ? txtProv->getTxt() : nullptr;
+        const std::string parserPath = txt ? txt->getEffectiveContentPath() : std::string(contentPath_);
+        const bool useLfs = txt ? txt->isContentOnLittleFs() : false;
+        parser_.reset(new PlainTextParser(parserPath, renderer_, config, useLfs));
         parserSpineIndex_ = 0;
       }
     }
@@ -727,7 +736,13 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
         // v2.0.162 — HtmlParser deleted; see comment in the analogous
         // branch in scheduleBackgroundCacheJob above.
       } else if (type == ContentType::Txt) {
-        parser_.reset(new PlainTextParser(contentPath_, renderer_, config));
+        // v2.0.189 — route through Txt's effective content path; see
+        // matching comment in the background-cache path above.
+        const auto* txtProv = coreRef.content.asTxt();
+        const Txt* txt = txtProv ? txtProv->getTxt() : nullptr;
+        const std::string parserPath = txt ? txt->getEffectiveContentPath() : std::string(contentPath_);
+        const bool useLfs = txt ? txt->isContentOnLittleFs() : false;
+        parser_.reset(new PlainTextParser(parserPath, renderer_, config, useLfs));
         parserSpineIndex_ = 0;
       }
     }
