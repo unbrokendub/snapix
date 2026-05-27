@@ -940,6 +940,14 @@ void ReaderState::enter(Core& core) {
       if (provider && provider->getTxt()) {
         provider->getTxt()->setupCacheDir();
       }
+      // v2.0.194 — TXT has no images, no BMPs to render.  Defensively
+      // free any pinned bitmap row buffers (~2.6 KB) + drop any residual
+      // image cache entries left over from the previous book (image
+      // BMPs can be 5-30 KB each).  These are no-ops if already empty;
+      // ensureBitmapRowBuffers() lazily re-allocs if a BMP is ever
+      // needed during the TXT session (e.g. cover BMP).
+      renderer_.freeBitmapRowBuffers();
+      renderer_.imageCache().clear();
       break;
     }
     case ContentType::Markdown: {
@@ -947,6 +955,11 @@ void ReaderState::enter(Core& core) {
       if (provider && provider->getMarkdown()) {
         provider->getMarkdown()->setupCacheDir();
       }
+      // v2.0.194 — same defensive cleanup as TXT.  Markdown supports
+      // a few embedded image syntaxes but the typical case is text-
+      // only; same lazy re-alloc applies if a BMP becomes needed.
+      renderer_.freeBitmapRowBuffers();
+      renderer_.imageCache().clear();
       break;
     }
     case ContentType::Fb2: {
@@ -1167,6 +1180,31 @@ void ReaderState::exit(Core& core) {
   renderer_.imageCache().clear();
   FONT_MANAGER.clearStreamingBitmapCaches();
   renderer_.clearWidthCache();
+
+  // v2.0.194 — additional hygiene targets identified by the v2.0.193
+  // hardware-log audit (heap fragmented at ~9 KB largest block during
+  // TXT cold-extend, blocking background cache extension).
+  //
+  // 1. Bitmap row buffers (~2.6 KB pinned by GfxRenderer after first
+  //    BMP render).  Pre-v2.0.194 only freed in the GfxRenderer dtor
+  //    (i.e. never during runtime).  Lazy-realloc on next BMP render
+  //    is cheap (~µs).
+  renderer_.freeBitmapRowBuffers();
+
+  // 2. streamOffsetCache_ capacity (v3_alpha builds only).  clear() at
+  //    line ~1046 / ~2669 sheds elements but vector::capacity stays.
+  //    For a 36-page EPUB chapter that's 36 * 8 B (PageBoundarySnapshot)
+  //    = 288 B + vector struct overhead ~24 B = ~312 B pinned across
+  //    book switches.  shrink_to_fit forces re-allocation to actual
+  //    size (which is 0 after clear), releasing the capacity.
+  //
+  //    Note: we don't clear here — that's already done above.  Just
+  //    shed the empty-but-allocated capacity.
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+  if (streamOffsetCache_.capacity() > 0 && streamOffsetCache_.empty()) {
+    streamOffsetCache_.shrink_to_fit();
+  }
+#endif
 
   // Keep the active .epdfont reader family loaded across UI transitions.
   // Several UI surfaces reuse theme.readerFontId directly, so unloading the
@@ -3072,6 +3110,31 @@ void ReaderState::startBackgroundCaching(Core& core, const char* trigger) {
                 static_cast<unsigned>(cacheBytes));
         renderer_.imageCache().clear();
         heap = reader::readHeapState();
+      }
+      // v2.0.194 — emergency hygiene escalation.  v2.0.183/190 added
+      // proactive clears at book exit; v2.0.194 also fires the same
+      // clears REACTIVELY here when the BG worker is about to skip
+      // because heap is critical and dropping the image cache alone
+      // wasn't enough.  Same caches as the exit-time hygiene; same
+      // re-warm cost (~µs malloc/realloc per cache on next use).
+      //
+      // Triggers only when:
+      //   1. heap was critical AT entry
+      //   2. dropping imageCache didn't recover enough
+      // — i.e. exactly the cases v2.0.193 logs showed gating the
+      // background worker indefinitely (Free 35K, largest 9K, stuck
+      // for minutes per the user's hardware repro).
+      if (reader::isHeapCritical(heap)) {
+        const auto heapBefore = heap;
+        FONT_MANAGER.clearStreamingBitmapCaches();
+        renderer_.clearWidthCache();
+        renderer_.freeBitmapRowBuffers();
+        heap = reader::readHeapState();
+        LOG_INF(TAG,
+                "[ASYNC] heap-critical escalation: freed font bitmaps + "
+                "width cache + bitmap rows (free=%u->%u largest=%u->%u)",
+                static_cast<unsigned>(heapBefore.freeBytes), static_cast<unsigned>(heap.freeBytes),
+                static_cast<unsigned>(heapBefore.largestBlock), static_cast<unsigned>(heap.largestBlock));
       }
       if (reader::isHeapCritical(heap)) {
         LOG_DBG(TAG, "[ASYNC] skip background cache: heap critical (free=%u largest=%u)",

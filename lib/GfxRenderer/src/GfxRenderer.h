@@ -78,7 +78,11 @@ class GfxRenderer {
   mutable uint8_t* bitmapOutputRow_ = nullptr;
   mutable uint8_t* bitmapRowBytes_ = nullptr;
   bool ensureBitmapRowBuffers() const;  // Lazy allocation on first use
-  void freeBitmapRowBuffers();
+  // freeBitmapRowBuffers moved to public section (v2.0.194) so external
+  // callers (ReaderState lifecycle hygiene) can release the ~2.6 KB
+  // pinned by these buffers when no images are being rendered.  Safe
+  // to call any time — ensureBitmapRowBuffers will lazy-re-alloc on
+  // the next BMP render.
 
   // Word width cache: open-addressing flat hash table for O(1) lookup.
   // Key: FNV-1a hash of (fontId, text, style). Value: measured width in pixels.
@@ -127,6 +131,12 @@ class GfxRenderer {
     // for text-only reading sessions).  See ensureBitmapRowBuffers().
   }
   ~GfxRenderer() { freeBitmapRowBuffers(); }
+
+  // v2.0.194 — exposed for ReaderState lifecycle hygiene.  Release the
+  // ~2.6 KB row buffers when text-only content is about to render (TXT,
+  // Markdown).  Lazy reallocation via ensureBitmapRowBuffers() handles
+  // the cover-BMP edge case.
+  void freeBitmapRowBuffers();
 
   static constexpr int VIEWABLE_MARGIN_TOP = 9;
   static constexpr int VIEWABLE_MARGIN_RIGHT = 3;
