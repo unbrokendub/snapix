@@ -24,6 +24,15 @@ class Markdown {
   size_t fileSize;
   bool loaded;
 
+  // v2.0.192 — when the source file is Windows-1251 (e.g., Russian .md
+  // exported from a cp1251 source), load() generates a UTF-8 cache file
+  // on LittleFS and routes readContent() through it.  Mirrors the Txt
+  // pattern introduced in v2.0.187/189.
+  //   * For UTF-8/ASCII source: effective path == filepath (SD card)
+  //   * For cp1251 source: effective path == cachePath + "/utf8.md" (LittleFS)
+  std::string effectiveContentPath_;
+  bool useLittleFsForContent_ = false;
+
  public:
   explicit Markdown(std::string filepath, const std::string& cacheDir);
   ~Markdown() = default;
@@ -48,6 +57,16 @@ class Markdown {
   // Path accessors
   const std::string& getCachePath() const { return cachePath; }
   const std::string& getPath() const { return filepath; }
+
+  // v2.0.192 — content-read routing for cp1251 sources (see Txt.h for
+  // the same pattern).  For UTF-8/ASCII these return (filepath, false) —
+  // behaviour unchanged.  For cp1251 sources they return the LittleFS
+  // UTF-8 cache path + true.  Safe to call before load() — falls back
+  // to the original filepath / false until load() succeeds.
+  const std::string& getEffectiveContentPath() const {
+    return effectiveContentPath_.empty() ? filepath : effectiveContentPath_;
+  }
+  bool isContentOnLittleFs() const { return useLittleFsForContent_; }
 
   // Metadata
   const std::string& getTitle() const { return title; }

@@ -34,7 +34,12 @@ constexpr int LINE_BUFFER_SIZE = 512;
  */
 class MarkdownParser : public ContentParser {
  public:
-  MarkdownParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config);
+  // v2.0.192 — `useLittleFs` defaults to false for backward compatibility
+  // with existing callers.  Markdown callers that routed through a cp1251
+  // → UTF-8 cache (from Markdown::isContentOnLittleFs()) must pass true,
+  // and `filepath` should be the LittleFS cache path.
+  MarkdownParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config,
+                 bool useLittleFs = false);
   ~MarkdownParser() override;
 
   bool parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages = 0,
@@ -52,6 +57,10 @@ class MarkdownParser : public ContentParser {
   size_t currentOffset_ = 0;
   bool hasMore_ = true;
   bool isRtl_ = false;
+  // v2.0.192 — when true, `filepath_` lives on LittleFS (UTF-8 cache
+  // from a cp1251 source).  Open via LittleFS.open() instead of
+  // SdMan.openFileForRead().
+  bool useLittleFs_ = false;
 
   // Line buffer for reading from file
   char lineBuffer_[LINE_BUFFER_SIZE];
@@ -87,7 +96,10 @@ class MarkdownParser : public ContentParser {
   static bool tokenCallback(const md_token_t* token, void* userData);
 
   // Helpers
-  bool readLine(FsFile& file, int* lineLength = nullptr, bool* isBlank = nullptr);
+  // v2.0.192 — readLine moved to a free function in MarkdownParser.cpp's
+  // anonymous namespace so it can take the AnyFile wrapper (which can't
+  // appear in the header without pulling FS.h/LittleFS.h into every
+  // includer).  See parsePages() for the new call sites.
   void appendTextBytes(ParseContext& ctx, const char* data, int len);
   void flushWordBuffer(ParseContext& ctx);
   void flushTextBlock(ParseContext& ctx);

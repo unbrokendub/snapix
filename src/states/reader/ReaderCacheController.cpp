@@ -1023,8 +1023,15 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     parser = state.parser.get();
   } else if (type == ContentType::Markdown) {
     if (!state.parser) {
-      state.parser = tryNewUnique<ContentParser, MarkdownParser>("MarkdownParser", contentPath_,
-                                                                  resources_.renderer(), config);
+      // v2.0.192 — route through Markdown's effective content path so
+      // cp1251 sources read from the UTF-8 cache on LittleFS (mirrors
+      // the v2.0.189 PlainTextParser fix).
+      const auto* mdProv = core.content.asMarkdown();
+      const Markdown* md = mdProv ? mdProv->getMarkdown() : nullptr;
+      const std::string parserPath = md ? md->getEffectiveContentPath() : std::string(contentPath_);
+      const bool useLfs = md ? md->isContentOnLittleFs() : false;
+      state.parser = tryNewUnique<ContentParser, MarkdownParser>("MarkdownParser", parserPath,
+                                                                  resources_.renderer(), config, useLfs);
       if (!state.parser) return;
       state.parserSpineIndex = 0;
     }

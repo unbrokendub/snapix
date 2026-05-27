@@ -132,7 +132,14 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
     } else if (type == ContentType::Markdown && !(shouldAbort && shouldAbort())) {
       cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
       if (!parser_) {
-        parser_.reset(new MarkdownParser(contentPath_, renderer_, config));
+        // v2.0.192 — route through Markdown's effective content path so
+        // cp1251 sources read from the UTF-8 cache (LittleFS) instead
+        // of the raw SD file.  Mirrors the v2.0.189 PlainTextParser fix.
+        const auto* mdProv = coreRef.content.asMarkdown();
+        const Markdown* md = mdProv ? mdProv->getMarkdown() : nullptr;
+        const std::string parserPath = md ? md->getEffectiveContentPath() : std::string(contentPath_);
+        const bool useLfs = md ? md->isContentOnLittleFs() : false;
+        parser_.reset(new MarkdownParser(parserPath, renderer_, config, useLfs));
         parserSpineIndex_ = 0;
       }
     } else if (type == ContentType::Fb2 && !(shouldAbort && shouldAbort())) {
@@ -730,7 +737,13 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
           parserSpineIndex_ = 0;
         }
       } else if (type == ContentType::Markdown) {
-        parser_.reset(new MarkdownParser(contentPath_, renderer_, config));
+        // v2.0.192 — route through Markdown's effective content path;
+        // see matching comment in the background-cache path above.
+        const auto* mdProv = coreRef.content.asMarkdown();
+        const Markdown* md = mdProv ? mdProv->getMarkdown() : nullptr;
+        const std::string parserPath = md ? md->getEffectiveContentPath() : std::string(contentPath_);
+        const bool useLfs = md ? md->isContentOnLittleFs() : false;
+        parser_.reset(new MarkdownParser(parserPath, renderer_, config, useLfs));
         parserSpineIndex_ = 0;
       } else if (type == ContentType::Html) {
         // v2.0.162 — HtmlParser deleted; see comment in the analogous

@@ -8,6 +8,8 @@
 #include "MarkdownParser.h"
 
 #include <EpdFontFamily.h>
+#include <FS.h>          // v2.0.192 — Arduino File for LittleFS reads
+#include <LittleFS.h>    // v2.0.192 — cp1251 cache lives on LittleFS
 #include <GfxRenderer.h>
 #include <Logging.h>
 #include <Page.h>
@@ -27,6 +29,144 @@
 
 namespace {
 bool isWhitespaceChar(const char c) { return c == ' ' || c == '\r' || c == '\n' || c == '\t'; }
+
+// v2.0.192 — same tagged-union RAII pattern as PlainTextParser's
+// AnyFile (v2.0.189), extended with fgets() support.  FsFile (SdFat)
+// has native fgets; Arduino File (FS.h) doesn't, so we emulate it
+// for the LittleFS path via a small internal read buffer.
+//
+// The buffer (kBufSize bytes) is refilled from `lfsFile_.read()` when
+// drained.  `position()` returns the LOGICAL cursor (bufStart + bufPos)
+// which is what the caller expects (SdFat's fgets would advance the
+// file position by exactly the bytes returned).  seek() invalidates
+// the buffer.
+class AnyFile {
+ public:
+  AnyFile() = default;
+  AnyFile(const AnyFile&) = delete;
+  AnyFile& operator=(const AnyFile&) = delete;
+  ~AnyFile() { close(); }
+
+  bool openSd(const std::string& path) {
+    if (!SdMan.openFileForRead("MD ", path, sdFile_)) return false;
+    useLittleFs_ = false;
+    open_ = true;
+    return true;
+  }
+  bool openLittleFs(const std::string& path) {
+    lfsFile_ = LittleFS.open(path.c_str(), "r");
+    if (!lfsFile_) return false;
+    useLittleFs_ = true;
+    open_ = true;
+    bufStart_ = 0;
+    bufLen_ = 0;
+    bufPos_ = 0;
+    return true;
+  }
+
+  size_t size() { return useLittleFs_ ? lfsFile_.size() : sdFile_.size(); }
+  size_t position() {
+    if (useLittleFs_) {
+      // Logical position = where the buffer starts in the file + how
+      // many buffered bytes the caller has consumed.
+      return bufStart_ + bufPos_;
+    }
+    return sdFile_.position();
+  }
+  bool seek(size_t pos) {
+    if (useLittleFs_) {
+      invalidateBuffer();
+      return lfsFile_.seek(pos);
+    }
+    return sdFile_.seek(pos);
+  }
+  bool seekSet(size_t pos) {
+    if (useLittleFs_) {
+      invalidateBuffer();
+      return lfsFile_.seek(pos, SeekSet);
+    }
+    return sdFile_.seekSet(pos);
+  }
+  int read(uint8_t* buf, size_t len) {
+    if (useLittleFs_) {
+      // For raw reads, drain any buffered bytes first to keep `position()`
+      // consistent with what the caller would expect.  In practice
+      // MarkdownParser uses fgets exclusively (read() unused) so this
+      // path is just defensive.
+      invalidateBuffer();
+      return lfsFile_.read(buf, len);
+    }
+    return sdFile_.read(buf, len);
+  }
+  void close() {
+    if (!open_) return;
+    if (useLittleFs_) {
+      lfsFile_.close();
+    } else {
+      sdFile_.close();
+    }
+    open_ = false;
+  }
+
+  // Read one line up to (max-1) chars or until '\n' (inclusive).
+  // Null-terminates.  Returns number of chars written (NOT including
+  // the null).  Returns 0 on EOF.  Mirrors SdFat's fgets semantics:
+  // the trailing '\n' (if present) is included in the returned count.
+  int fgets(char* out, int max) {
+    if (max <= 0) return 0;
+    if (useLittleFs_) {
+      return fgetsLittleFs(out, max);
+    }
+    return sdFile_.fgets(out, max);
+  }
+
+ private:
+  static constexpr size_t kBufSize = 512;
+  FsFile sdFile_;
+  File lfsFile_;
+  uint8_t buf_[kBufSize];
+  size_t bufStart_ = 0;  // file offset where buf_[0] came from
+  size_t bufLen_ = 0;    // how many bytes are in buf_
+  size_t bufPos_ = 0;    // next byte to serve from buf_
+  bool useLittleFs_ = false;
+  bool open_ = false;
+
+  void invalidateBuffer() {
+    bufStart_ = useLittleFs_ ? lfsFile_.position() : 0;
+    bufLen_ = 0;
+    bufPos_ = 0;
+  }
+
+  bool refillBuffer() {
+    bufStart_ = lfsFile_.position();
+    const int n = lfsFile_.read(buf_, kBufSize);
+    if (n <= 0) {
+      bufLen_ = 0;
+      bufPos_ = 0;
+      return false;
+    }
+    bufLen_ = static_cast<size_t>(n);
+    bufPos_ = 0;
+    return true;
+  }
+
+  int fgetsLittleFs(char* out, int max) {
+    int outPos = 0;
+    while (outPos < max - 1) {
+      if (bufPos_ >= bufLen_) {
+        if (!refillBuffer()) break;  // EOF
+      }
+      const char c = static_cast<char>(buf_[bufPos_++]);
+      out[outPos++] = c;
+      if (c == '\n') break;
+    }
+    out[outPos] = '\0';
+    return outPos;
+  }
+};
+}  // namespace
+
+namespace {
 
 int utf8SafePrefixLength(const char* data, const int len, const int maxBytes) {
   const int limit = std::min(len, maxBytes);
@@ -55,8 +195,9 @@ int utf8SafePrefixLength(const char* data, const int len, const int maxBytes) {
 }
 }  // namespace
 
-MarkdownParser::MarkdownParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config)
-    : filepath_(std::move(filepath)), renderer_(renderer), config_(config) {
+MarkdownParser::MarkdownParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config,
+                               bool useLittleFs)
+    : filepath_(std::move(filepath)), renderer_(renderer), config_(config), useLittleFs_(useLittleFs) {
   lineBuffer_[0] = '\0';
 }
 
@@ -183,8 +324,15 @@ bool MarkdownParser::addLineToPage(ParseContext& ctx, std::shared_ptr<TextBlock>
   return true;
 }
 
-bool MarkdownParser::readLine(FsFile& file, int* lineLength, bool* isBlank) {
-  const int readLen = file.fgets(lineBuffer_, LINE_BUFFER_SIZE);
+// v2.0.192 — moved from a MarkdownParser member method to a free
+// function so it can take the AnyFile wrapper without exposing
+// AnyFile in the public header.  Operates on a caller-provided
+// line buffer (was MarkdownParser::lineBuffer_, still passed in
+// from the same field).
+namespace {
+bool readLineAnyFile(AnyFile& file, char* lineBuffer, int bufferSize,
+                     int* lineLength, bool* isBlank) {
+  const int readLen = file.fgets(lineBuffer, bufferSize);
   if (readLen <= 0) {
     if (lineLength) *lineLength = 0;
     if (isBlank) *isBlank = true;
@@ -192,10 +340,10 @@ bool MarkdownParser::readLine(FsFile& file, int* lineLength, bool* isBlank) {
   }
 
   int len = readLen;
-  while (len > 0 && (lineBuffer_[len - 1] == '\n' || lineBuffer_[len - 1] == '\r')) {
+  while (len > 0 && (lineBuffer[len - 1] == '\n' || lineBuffer[len - 1] == '\r')) {
     len--;
   }
-  lineBuffer_[len] = '\0';
+  lineBuffer[len] = '\0';
 
   if (lineLength) {
     *lineLength = len;
@@ -203,7 +351,7 @@ bool MarkdownParser::readLine(FsFile& file, int* lineLength, bool* isBlank) {
   if (isBlank) {
     bool blank = true;
     for (int i = 0; i < len; i++) {
-      if (!isWhitespaceChar(lineBuffer_[i])) {
+      if (!isWhitespaceChar(lineBuffer[i])) {
         blank = false;
         break;
       }
@@ -212,6 +360,7 @@ bool MarkdownParser::readLine(FsFile& file, int* lineLength, bool* isBlank) {
   }
   return true;
 }
+}  // namespace
 
 void MarkdownParser::appendTextBytes(ParseContext& ctx, const char* data, int len) {
   int offset = 0;
@@ -411,9 +560,16 @@ bool MarkdownParser::tokenCallback(const md_token_t* token, void* userData) {
 
 bool MarkdownParser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages,
                                 const AbortCallback& shouldAbort) {
-  FsFile file;
-  if (!SdMan.openFileForRead("MD", filepath_, file)) {
-    LOG_ERR(TAG, "Failed to open file: %s", filepath_.c_str());
+  // v2.0.192 — route through AnyFile so the same loop works whether
+  // the file lives on SD (default) or LittleFS (UTF-8 cache for a
+  // cp1251 source, generated by Markdown::load()).  `useLittleFs_`
+  // is set by the constructor based on the caller's knowledge of the
+  // Markdown object's effective content path.
+  AnyFile file;
+  const bool opened = useLittleFs_ ? file.openLittleFs(filepath_) : file.openSd(filepath_);
+  if (!opened) {
+    LOG_ERR(TAG, "Failed to open file (%s): %s",
+            useLittleFs_ ? "LittleFS" : "SD", filepath_.c_str());
     return false;
   }
 
@@ -429,7 +585,7 @@ bool MarkdownParser::parsePages(const std::function<void(std::unique_ptr<Page>)>
 
   if (currentOffset_ == 0 && !isRtl_) {
     int rtlLineLen = 0;
-    if (readLine(file, &rtlLineLen, nullptr)) {
+    if (readLineAnyFile(file, lineBuffer_, LINE_BUFFER_SIZE, &rtlLineLen, nullptr)) {
       isRtl_ = ScriptDetector::containsArabic(lineBuffer_);
     }
     file.seekSet(currentOffset_);
@@ -502,7 +658,7 @@ bool MarkdownParser::parsePages(const std::function<void(std::unique_ptr<Page>)>
     const size_t lineStartOffset = file.position();
     int lineLen = 0;
     bool isBlank = true;
-    if (!readLine(file, &lineLen, &isBlank)) {
+    if (!readLineAnyFile(file, lineBuffer_, LINE_BUFFER_SIZE, &lineLen, &isBlank)) {
       break;
     }
     const size_t lineEndOffset = file.position();
