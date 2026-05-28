@@ -394,9 +394,28 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       // v2.0.167 — markers + idx in UnifiedCache (per book streaming.cache).
       auto ucache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
       do {
-        if (ucache.segmentSize(snapix::unifiedcache::Kind::Idx,
-                                static_cast<uint16_t>(startingSectionIndex_), nullptr)) {
-          break;  // R4.b will handle existing idx
+        // v2.0.206 — skip the upfront rebuild ONLY when a CURRENT-version
+        // idx exists; rebuild a stale one (older kPageIndexVersion) so the
+        // page-count fix takes effect without wedging on R4.b's version
+        // gate.  See the fuller comment in EpubChapterParser::parsePages.
+        {
+          File idxProbe;
+          size_t idxProbeSize = 0;
+          bool idxCurrent = false;
+          if (ucache.openSegmentReader(snapix::unifiedcache::Kind::Idx,
+                                       static_cast<uint16_t>(startingSectionIndex_), idxProbe,
+                                       &idxProbeSize)) {
+            uint8_t h[6];
+            if (idxProbeSize >= sizeof(h) &&
+                idxProbe.read(h, sizeof(h)) == static_cast<int>(sizeof(h))) {
+              const bool magicOk = h[0] == 0x53 && h[1] == 0x50 && h[2] == 0x49 && h[3] == 0x58;
+              const uint16_t ver = static_cast<uint16_t>(h[4]) | (static_cast<uint16_t>(h[5]) << 8);
+              idxCurrent = magicOk && ver == snapix::smolport::kPageIndexVersion;
+            }
+            idxProbe.close();
+          }
+          if (idxCurrent) break;  // up-to-date idx — R4.b handles it
+          // Absent or stale — fall through and (re)build below.
         }
         File mf;
         size_t markersStreamSize = 0;
@@ -484,34 +503,22 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
                                                       UINT16_MAX, {}, &stats, {}, captureFn);
         mf.close();
 
-        // v2.0.175 — same short-section fix as EpubChapterParser.cpp.  FB2
-        // sections sometimes contain only a brief title or a single
-        // paragraph (especially title-only sections, dedications, or
-        // sub-chapter dividers) whose markers fit in less than one page.
-        // The paginator never fires an overflow-triggered boundary
-        // callback for such sections, leaving `captured` empty and the
-        // R4.c block breaking without writing an idx — which propagates
-        // up as a hard "parsePages returned no output" failure that
-        // ReaderState retries forever.  Synthesize a single page-0
-        // boundary in that case so R4.b emits one Page and the streaming
-        // render path shows the short content correctly.
-        if (captured.empty()) {
-          if (stats.bytesConsumed == 0) {
-            LOG_ERR(TAG,
-                    "[CONTENT][FB2] [STREAM] R4.c read 0 bytes from markers section=%d "
-                    "size=%zu — markers segment is empty/corrupt",
-                    startingSectionIndex_, markersStreamSize);
-            break;
-          }
-          LOG_INF(TAG,
-                  "[CONTENT][FB2] [STREAM] R4.c short section=%d: synthesizing 1-page "
-                  "idx (markers=%zu bytes consumed=%u, fits in less than one page)",
-                  startingSectionIndex_, markersStreamSize, static_cast<unsigned>(stats.bytesConsumed));
-          snapix::smolport::PageBoundarySnapshot s{};
-          s.pageIndex = 0;
-          s.byteOffset = 0;
-          s.styleBits = 0;
-          captured.push_back(s);
+        // v2.0.206 — see the parallel comment in EpubChapterParser.cpp.
+        // `captured` holds only OVERFLOW page boundaries, so its size is
+        // (true page count - 1): page 0 is implicit and the final partial
+        // section page ends at EOF without firing a roll.  R4.b adds 1 back
+        // when emitting Pages.  A single-page section produces ZERO
+        // boundaries (empty `captured`) and serializes a 0-entry idx →
+        // R4.b emits 1 Page.  The v2.0.175 synthesised page-0 entry is
+        // removed: with the `+1` reconstitution it would double-count
+        // single-page sections.  Only a genuinely empty markers stream
+        // (0 bytes consumed) is an error.
+        if (captured.empty() && stats.bytesConsumed == 0) {
+          LOG_ERR(TAG,
+                  "[CONTENT][FB2] [STREAM] R4.c read 0 bytes from markers section=%d "
+                  "size=%zu — markers segment is empty/corrupt",
+                  startingSectionIndex_, markersStreamSize);
+          break;
         }
 
         const uint16_t configHash =
@@ -534,7 +541,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
         }
         LOG_INF(TAG,
                 "[CONTENT][FB2] [STREAM] idx built upfront section=%d pages=%u bytes=%u (skipping legacy parser)",
-                startingSectionIndex_, static_cast<unsigned>(captured.size()),
+                startingSectionIndex_, static_cast<unsigned>(captured.size() + 1),
                 static_cast<unsigned>(stats.bytesConsumed));
       } while (false);
     }
@@ -573,14 +580,18 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
         const uint16_t version = static_cast<uint16_t>(header[4]) |
                                   (static_cast<uint16_t>(header[5]) << 8);
         if (version != snapix::smolport::kPageIndexVersion) break;
-        const uint16_t pageCount = static_cast<uint16_t>(header[8]) |
-                                    (static_cast<uint16_t>(header[9]) << 8);
-        if (pageCount == 0) break;
+        // v2.0.206 — offset 8-9 is the OVERFLOW boundary count = (true page
+        // count - 1).  Reconstitute by adding 1 (page 0 implicit; final
+        // partial page fires no boundary).  0 boundaries = valid 1-page
+        // section, so no `== 0` early-out.
+        const uint16_t boundaryCount = static_cast<uint16_t>(header[8]) |
+                                        (static_cast<uint16_t>(header[9]) << 8);
+        const uint16_t totalPages = static_cast<uint16_t>(boundaryCount + 1);
 
         LOG_INF(TAG,
                 "[CONTENT][FB2] [STREAM] short-circuit: total %u pages from .idx section=%d "
                 "(skipping legacy parser)",
-                static_cast<unsigned>(pageCount), startingSectionIndex_);
+                static_cast<unsigned>(totalPages), startingSectionIndex_);
 
         // v2.0.132 — activate STATEFUL short-circuit so cache's batched
         // extend() calls drain the .idx page-count incrementally.  Pre-
@@ -588,7 +599,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
         // hasMore_=false, claiming the section was 1 page total — user
         // couldn't navigate past page 0 of ANY FB2 section.
         shortCircuitActive_ = true;
-        shortCircuitTotalPages_ = pageCount;
+        shortCircuitTotalPages_ = totalPages;
         shortCircuitNextPage_ = 0;
 
         while (shortCircuitNextPage_ < shortCircuitTotalPages_) {

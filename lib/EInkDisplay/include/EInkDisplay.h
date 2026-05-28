@@ -74,8 +74,17 @@ class EInkDisplay {
   // RAM so the SSD1677 differential engine sees every pixel as "changed" and
   // drives it with the fast-mode waveform (~same speed as FAST_REFRESH).
   void displayBufferDriveAll(bool turnOffScreen = false);
-  // EXPERIMENTAL: Windowed update - display only a rectangular region
-  void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
+  // EXPERIMENTAL: Windowed update - display only a rectangular region.
+  // partialRedSync: when true, the post-refresh RED-RAM baseline sync writes
+  // ONLY the window region (~window bytes) instead of the full framebuffer
+  // (BUFFER_SIZE).  This collapses the per-call SPI bus hold from ~150-310 ms
+  // to ~10 ms — critical when a background task shares the bus (e.g. the
+  // loading-spinner animation ticking while the FB2 worker reads SD).  Only
+  // safe when the out-of-window baseline is kept fresh by other means (the
+  // animation does a full displayBufferDriveAll every Nth tick).  Default
+  // false preserves the original full-frame resync for general partial updates.
+  void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false,
+                     bool partialRedSync = false);
   void displayGrayBuffer(bool turnOffScreen = false);
 
   void refreshDisplay(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);

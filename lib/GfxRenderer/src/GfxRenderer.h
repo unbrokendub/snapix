@@ -204,8 +204,13 @@ class GfxRenderer {
   void displayBufferDriveAll(bool turnOffScreen = false) const;
   void prepareCurrentFrameAsFastBaseline() const;
   void preparePartialUpdateFrame() const;
-  // EXPERIMENTAL: Windowed update - display only a rectangular region
-  void displayWindow(int x, int y, int width, int height, bool turnOffScreen = false) const;
+  // EXPERIMENTAL: Windowed update - display only a rectangular region.
+  // partialRedSync: forward to EInkDisplay::displayWindow — when true, only the
+  // window region is re-synced to RED RAM post-refresh (~10 ms bus hold vs
+  // ~150-310 ms full-frame).  Only safe when the surrounding baseline is kept
+  // fresh elsewhere (loading animation's periodic full drive-all).
+  void displayWindow(int x, int y, int width, int height, bool turnOffScreen = false,
+                     bool partialRedSync = false) const;
   void invertScreen() const;
   void clearScreen(uint8_t color = 0xFF) const;
   void clearArea(int x, int y, int width, int height, uint8_t color = 0xFF) const;

@@ -18,7 +18,7 @@ class EInkDisplay {
   uint8_t* getFrameBuffer() const { return const_cast<uint8_t*>(frameBuffer_); }
   void clearScreen(uint8_t color = 0xFF) { memset(frameBuffer_, color, BUFFER_SIZE); }
   void displayBuffer(RefreshMode, bool) {}
-  void displayWindow(int, int, int, int, bool) {}
+  void displayWindow(int, int, int, int, bool, bool = false) {}
   void drawImage(const uint8_t*, int, int, int, int) {}
   void grayscaleRevert() {}
   void copyGrayscaleLsbBuffers(uint8_t*) {}

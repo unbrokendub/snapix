@@ -239,37 +239,11 @@ class ReaderState : public State {
   void displayWithRefresh(Core& core);
   void renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride = 0);
 
-  // v2.0.196 — animated spinner state for the loading/indexing overlay.
-  // The banner shown by renderCenteredStatusMessage centres a 64x64 spinner
-  // above the status text.  Each call to tickLoadingAnimation() advances
-  // to the next frame and re-renders ONLY the spinner area via a fast
-  // partial-window refresh (~450 ms), so the user sees the spinner
-  // rotating instead of a frozen banner during long cold-extend waits.
-  //
-  // `loadingSpinnerX_/Y_` are captured by the first full-banner render
-  // (renderCenteredStatusMessage's drive-all path) and reused by every
-  // subsequent tick — avoids recomputing layout when only the spinner
-  // pixels change.  `loadingOverlayActive_` is set when the banner is
-  // visible; cleared by the call sites that hide the overlay (handled
-  // by needsRender_ -> normal page render path overwriting the banner).
-  void tickLoadingAnimation(Core& core);
-  uint8_t  loadingAnimationFrame_ = 0;
-  uint32_t loadingAnimationLastTickMs_ = 0;
-  int      loadingSpinnerX_ = 0;
-  int      loadingSpinnerY_ = 0;
-  // v2.0.200 — save the FULL banner rect (not just the spinner box) so
-  // tickLoadingAnimation can fast-refresh the entire banner instead of
-  // just the 96x96 around the spinner.  The v2.0.199 partial-window
-  // approach left a visible shade boundary between the freshly-refreshed
-  // spinner region and the rest of the banner (drive-all'd ONCE at
-  // banner appearance, then drifting).  Refreshing the whole banner
-  // per tick keeps the border + text crisp without monopolising the bus
-  // — banner is ~160x140 ≈ 2.8 KB per tick vs full-screen 48 KB.
-  int      loadingBannerX_ = 0;
-  int      loadingBannerY_ = 0;
-  int      loadingBannerW_ = 0;
-  int      loadingBannerH_ = 0;
-  bool     loadingOverlayActive_ = false;
+  // v2.0.205 — the loading/indexing overlay is a single STATIC banner drawn
+  // by renderCenteredStatusMessage over the existing screen content.  The
+  // animated spinner (v2.0.196-204) was removed: the ESP32-C3 cannot repaint
+  // it without starving the FB2/EPUB parse worker that shares the SPI bus, so
+  // it made cold loads dramatically slower for no real UX gain.
   Viewport getReaderViewport(bool showStatusBar) const;
   bool isWorkerRunning() const;
   BackgroundTask::State workerState() const;

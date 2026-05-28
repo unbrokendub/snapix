@@ -263,7 +263,20 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // shift by -1 for those chapters — old v8 indices are stale.  Same
 // effect for HTML chapters whose source starts with stray
 // `<hr>`-style page breaks.
-constexpr uint16_t kPageIndexVersion = 9;
+// v2.0.206: bumped 9 → 10.  OFF-BY-ONE PAGE-COUNT FIX.  The MEASURE walk
+// only fires a page-boundary callback on an OVERFLOW roll (page N fills →
+// roll into page N+1), so a chapter spanning P pages produces only P-1
+// boundaries (page 0 is implicit at offset 0; the final partial page ends
+// at EOF and fires no roll).  R4.b emitted `entryCount` Pages — one short —
+// so the LAST page of every multi-page chapter was never created and the
+// reader jumped straight to the next spine, dropping the chapter's tail
+// paragraph(s).  v2.0.175 had patched only the zero-boundary (single-page)
+// case via a synthesised entry.  Fix: R4.b now emits `boundaryCount + 1`
+// Pages and the synthesis is removed.  Old v9 indices carried the buggy
+// count, so the bump forces a rebuild.  (The on-disk entry layout is
+// unchanged — entries still record page 1..K starts, page 0 implicit — so
+// resume seeking is untouched.)
+constexpr uint16_t kPageIndexVersion = 10;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

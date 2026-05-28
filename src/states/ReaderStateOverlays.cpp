@@ -808,16 +808,6 @@ void ReaderState::processPendingEpubPageLoad(Core& core) {
     pendingEpubPageLoadMessageShown_ = true;
   }
 
-  // v2.0.196 — once the loading banner is up, drive the spinner animation
-  // by ticking it on every processPendingEpubPageLoad iteration.
-  // tickLoadingAnimation() is rate-limited internally (≥500 ms between
-  // frames) so the loop calls here cost ~µs when no refresh is due.
-  // This gives the user a clear "device is working" signal during long
-  // FB2/EPUB cold-extend waits that can run 10-20 s on heap-tight sessions.
-  if (pendingEpubPageLoadMessageShown_) {
-    tickLoadingAnimation(core);
-  }
-
   if (pendingEpubPageLoadLastDiagMs_ == 0 || nowMs - pendingEpubPageLoadLastDiagMs_ >= 1000) {
     LOG_INF(TAG,
             "[ASYNC] Page pending elapsed=%lu spine=%d page=%d complete=%u taskRunning=%u taskState=%d cache=%u pages=%u partial=%u retries=%u",

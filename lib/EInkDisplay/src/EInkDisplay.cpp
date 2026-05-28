@@ -696,7 +696,8 @@ void EInkDisplay::displayBufferDriveAll(bool turnOffScreen) {
 // EXPERIMENTAL: Windowed update support
 // Displays only a rectangular region of the frame buffer, preserving the rest of the screen.
 // Requirements: x and w must be byte-aligned (multiples of 8 pixels)
-void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen) {
+void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen,
+                                bool partialRedSync) {
   LOG_DBG(TAG, "Displaying window at (%d,%d) size (%dx%d)", x, y, w, h);
 
   // Validate bounds
@@ -783,15 +784,33 @@ void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
   // Perform fast refresh
   refreshDisplay(FAST_REFRESH, turnOffScreen);
 
-  // Post-refresh: sync RED RAM with the full current screen, not just the
-  // window. Otherwise pixels outside the updated area keep an older baseline
-  // and later window refreshes start leaking stale content into UI chrome.
-  setRamArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  // Post-refresh: sync the RED-RAM differential baseline with what is now on
+  // screen so the NEXT fast refresh diffs against the correct previous frame.
+  if (partialRedSync) {
+    // Window-only resync.  windowBuffer already holds this frame's window
+    // region (the bytes we just drove), so writing it back to RED RAM at the
+    // window's RAM area gives the next partial refresh a correct per-window
+    // baseline for ~10 ms of bus hold instead of the ~150-310 ms a full-frame
+    // BUFFER_SIZE write costs.  The out-of-window baseline is intentionally
+    // left untouched: the caller (loading animation) keeps it fresh with a
+    // periodic full displayBufferDriveAll, and nothing outside the window
+    // changes between those drive-alls.  This is the contention fix that lets
+    // a bus-sharing background worker (FB2 markerize reading SD) make
+    // progress while the spinner animates.
+    setRamArea(x, y, w, h);
+    writeRamBuffer(CMD_WRITE_RAM_RED, windowBuffer.data(), windowBufferSize);
+  } else {
+    // Full resync (default).  Sync RED RAM with the full current screen, not
+    // just the window.  Otherwise pixels outside the updated area keep an
+    // older baseline and later window refreshes start leaking stale content
+    // into UI chrome.
+    setRamArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
-  writeRamBuffer(CMD_WRITE_RAM_RED, frameBuffer, BUFFER_SIZE);
+    writeRamBuffer(CMD_WRITE_RAM_RED, frameBuffer, BUFFER_SIZE);
 #else
-  writeRamBuffer(CMD_WRITE_RAM_RED, frameBufferActive, BUFFER_SIZE);
+    writeRamBuffer(CMD_WRITE_RAM_RED, frameBufferActive, BUFFER_SIZE);
 #endif
+  }
   markBaselineKnown(true);
 
   LOG_DBG(TAG, "Window display complete");

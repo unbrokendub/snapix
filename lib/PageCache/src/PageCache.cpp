@@ -18,7 +18,7 @@
 #include "ContentParser.h"
 
 namespace {
-constexpr uint8_t CACHE_FILE_VERSION = 29;  // v29: v2.0.60 page cache moved from SD to LittleFS.  Cache file paths now resolve under /cache/<book_hash>/sections/ on internal flash; ImageBlock cachedBmpPath, RenderConfig serialization layout, and PageElement serialize/deserialize signatures are all unchanged on disk — but the storage backend is different.  Bumping invalidates v28 caches so any old SD-side files (now reachable via LittleFS at the new prefix) get rejected and rebuilt.
+constexpr uint8_t CACHE_FILE_VERSION = 30;  // v30: v2.0.206 off-by-one page-count fix.  The streaming short-circuit (R4.b) now emits `boundaryCount + 1` Pages instead of `boundaryCount` — the final partial page of every multi-page chapter/section was previously never created (the MEASURE walk fires boundaries only on overflow rolls, so page 0 and the EOF-terminated last page are implicit).  Existing v29 page caches were built with the short count and would keep dropping each chapter's tail; bumping forces a rebuild through the fixed parser so the recovered last page is materialised.  (v29: v2.0.60 page cache moved from SD to LittleFS.)
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 #ifndef SNAPIX_PERF_LOG

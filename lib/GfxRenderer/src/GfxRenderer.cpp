@@ -1062,7 +1062,8 @@ void GfxRenderer::preparePartialUpdateFrame() const {
   frameBuffer = einkDisplay.getFrameBuffer();
 }
 
-void GfxRenderer::displayWindow(int x, int y, int width, int height, bool turnOffScreen) const {
+void GfxRenderer::displayWindow(int x, int y, int width, int height, bool turnOffScreen,
+                                bool partialRedSync) const {
   int physX, physY, physW, physH;
   switch (orientation) {
     case Portrait:
@@ -1096,7 +1097,7 @@ void GfxRenderer::displayWindow(int x, int y, int width, int height, bool turnOf
   int alignedEnd = (physX + physW + 7) & ~7;
   physX = physX & ~7;
   physW = alignedEnd - physX;
-  einkDisplay.displayWindow(physX, physY, physW, physH, turnOffScreen);
+  einkDisplay.displayWindow(physX, physY, physW, physH, turnOffScreen, partialRedSync);
   frameBuffer = einkDisplay.getFrameBuffer();
 }
 

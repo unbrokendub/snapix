@@ -57,57 +57,8 @@
 #include "../ui/Elements.h"
 #include "../ui/views/ReaderViews.h"
 #include "ThemeManager.h"
-#include "reader/LoadingAnimation.h"  // v2.0.196 — 10-frame spinner bitmaps for the centred-status banner
 #include "reader/ReaderStateInternal.h"
 #include "reader/ReaderSupport.h"
-
-namespace {
-// v2.0.198 — pixel-by-pixel 1-bit bitmap blit that works regardless of
-// destination alignment OR display orientation.
-//
-// v2.0.196/197 used GfxRenderer::drawImage which does a row-by-row memcpy
-// of packed bytes into the framebuffer.  Problem: drawImage's destination
-// X must be a multiple of 8 for the byte copy to land on the correct
-// pixel column.  AND in Portrait orientation the renderer rotates
-// coordinates — logical Y becomes physical X, so even an 8-aligned
-// LOGICAL X can land on a non-aligned PHYSICAL X.  Result: spinner
-// rendered displaced by `(physX % 8)` pixels, visibly off-centre
-// relative to text below it.
-//
-// drawPixel handles arbitrary bit positions via the (frameBuffer[byte]
-// AND/OR bit-mask) path, so calling it per pixel sidesteps the alignment
-// issue entirely.  Cost: 64x64 = 4096 drawPixel calls ≈ 4 ms per blit.
-// Negligible vs the ~470 ms e-ink refresh that follows.
-//
-// Bitmap format (matches LoadingAnimation.h):
-//   * Row-major, packed.  Bytes per row = (width + 7) / 8.
-//   * MSB = leftmost pixel of the byte's 8-pixel group.
-//   * Bit value: 1 = WHITE (paper, "off"), 0 = BLACK (ink, "on").
-//     Matches EInkDisplay's framebuffer convention.
-void drawAlignedBitmap(GfxRenderer& renderer, const uint8_t* bitmap, int x, int y, int width,
-                       int height, bool blackPixelsOn = true) {
-  const int bytesPerRow = (width + 7) / 8;
-  for (int row = 0; row < height; ++row) {
-    const uint8_t* rowBase = bitmap + row * bytesPerRow;
-    for (int col = 0; col < width; ++col) {
-      const uint8_t byte = rowBase[col >> 3];
-      const uint8_t bit  = 7 - (col & 7);
-      const bool whitePixel = (byte >> bit) & 1;
-      // White pixel → DON'T draw (transparent over background).  Black
-      // pixel → draw in `blackPixelsOn` (true = on/ink).  Transparency
-      // matters because the spinner has lots of white pixels inside
-      // its bounding box; we'd erase the banner background underneath
-      // if we always wrote both colours.  Actually for the spinner
-      // case the banner background was already painted white by
-      // fillRect, so transparent-white is functionally identical to
-      // explicit-white.  Either way is fine.
-      if (!whitePixel) {
-        renderer.drawPixel(x + col, y + row, blackPixelsOn);
-      }
-    }
-  }
-}
-}  // namespace
 
 #define TAG "READER"
 
@@ -1543,10 +1494,6 @@ void ReaderState::render(Core& core) {
       renderCenteredStatusMessage(core, "Loading...");
       pendingTocJumpIndexingShown_ = true;
     }
-    // v2.0.196 — animate the spinner while the TOC jump is in flight.
-    // tickLoadingAnimation is rate-limited (≥500 ms) so calling it on
-    // every render() iteration costs ~µs when no refresh is due.
-    tickLoadingAnimation(core);
   } else if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_) {
     // v2.0.84: optimistic TOC navigation — render the target spine's page
     // 0 (or current target page) right away while processPendingTocJump
@@ -1565,8 +1512,6 @@ void ReaderState::render(Core& core) {
       renderCenteredStatusMessage(core, "Loading...");
       pendingEpubPageLoadMessageShown_ = true;
     }
-    // v2.0.196 — animate spinner during page-load wait (see comment above).
-    tickLoadingAnimation(core);
   } else if (menuMode_) {
     const Theme& theme = THEME_MANAGER.current();
     ui::render(renderer_, theme, menuView_);
@@ -2987,14 +2932,6 @@ void ReaderState::displayWithRefresh(Core& core) {
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
   const int pagesPerRefreshValue = core.settings.getPagesPerRefreshValue();
 
-  // v2.0.196 — any full-frame display update (the page render path that
-  // follows a successful pendingEpubPageLoad resolution) wipes the
-  // spinner banner along with the rest of the framebuffer.  Clear the
-  // overlay-active flag so the next async wait knows to start fresh from
-  // frame 0 (it gets re-set by renderCenteredStatusMessage on its first
-  // call).
-  loadingOverlayActive_ = false;
-
   // After an overlay banner (displayWindow), the RED RAM baseline is stale.
   // Drive-all refresh writes the inverted framebuffer to RED RAM so every
   // pixel is explicitly driven to its target state — no ghosting, no flash.
@@ -3031,82 +2968,37 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
   const int fontId = fontIdOverride ? fontIdOverride : core.settings.getReaderFontId(theme);
 
-  // v2.0.196 — banner now centres a 64x64 spinner ABOVE the status text
-  // (was a static 14x20 box icon to the LEFT of the text).  Layout:
+  // v2.0.205 — single STATIC "Loading..." banner centred over whatever is
+  // already on screen.  The animated spinner (v2.0.196-204) was removed: the
+  // ESP32-C3 is too slow to repaint it without starving the FB2/EPUB parse
+  // worker that shares the SPI bus, and the per-tick refresh dominated cold
+  // loads.  A static banner costs exactly one drive-all and then leaves the
+  // bus entirely to the worker.  Layout:
   //
-  //   +---- bannerW ---------+
-  //   |                      |
-  //   |     [spinner 64x64]  |
-  //   |                      |
-  //   |    Loading...        |
-  //   |                      |
-  //   +----------------------+
-  //
-  // The spinner is animated by tickLoadingAnimation() which redraws ONLY
-  // the 64x64 spinner area via a fast partial-window refresh.  Saved
-  // coords (loadingSpinnerX_/Y_) let the tick path skip layout recompute.
-  constexpr int padH    = 24;  // horizontal padding inside banner
-  constexpr int padV    = 16;  // vertical padding inside banner
-  constexpr int iconGap = 12;  // vertical gap between spinner and text
-  constexpr int spinnerW = snapix::loading::kFrameWidth;   // 64
-  constexpr int spinnerH = snapix::loading::kFrameHeight;  // 64
+  //   +---- bannerW ----+
+  //   |                 |
+  //   |    Loading...   |
+  //   |                 |
+  //   +-----------------+
+  constexpr int padH = 24;  // horizontal padding inside banner
+  constexpr int padV = 16;  // vertical padding inside banner
 
   const int textWidth  = renderer_.getTextWidth(fontId, message, EpdFontFamily::BOLD);
   const int lineHeight = renderer_.getLineHeight(fontId);
-  const int contentW   = std::max(spinnerW, textWidth);
-  const int contentH   = spinnerH + iconGap + lineHeight;
-  const int bannerW    = contentW + padH * 2;
-  const int bannerH    = contentH + padV * 2;
+  const int bannerW    = textWidth + padH * 2;
+  const int bannerH    = lineHeight + padV * 2;
   const int bannerX    = (renderer_.getScreenWidth() - bannerW) / 2;
   const int bannerY    = (renderer_.getScreenHeight() - bannerH) / 2;
-
-  // v2.0.198 — straightforward centre calculation.  v2.0.197's 8-pixel
-  // snap was a workaround for the alignment issue in drawImage, but it
-  // didn't help in Portrait orientation where the renderer rotates
-  // logical X→Y/Y→X internally (so the SCREEN-X snap landed at a non-
-  // aligned PHYSICAL X anyway).  drawAlignedBitmap (above) handles any
-  // alignment correctly via per-pixel drawPixel, so we can compute the
-  // logical centres directly and trust the math.
-  const int spinnerX       = bannerX + (bannerW - spinnerW) / 2;
-  const int spinnerY       = bannerY + padV;
-  const int spinnerCenterX = spinnerX + spinnerW / 2;
-  // Text centered on the spinner axis (same as banner centre, since
-  // spinner is now exactly centred).
-  const int textX          = spinnerCenterX - textWidth / 2;
-  const int textY          = spinnerY + spinnerH + iconGap;
+  const int textX      = bannerX + (bannerW - textWidth) / 2;
+  const int textY      = bannerY + padV;
 
   // Draw overlay banner on top of existing framebuffer content — no clearScreen,
-  // so the previous page / file-list stays visible behind the banner.
+  // so the previous page / file-list / chapters menu stays visible behind the
+  // banner (the v2.0.202 over-content fix: renderCurrentPage no longer wipes
+  // the framebuffer before this banner is drawn).
   renderer_.fillRect(bannerX, bannerY, bannerW, bannerH, !theme.primaryTextBlack);
-  // Spinner: frame 0 (rotation starts when tickLoadingAnimation fires).
-  // v2.0.198 — use drawAlignedBitmap (per-pixel drawPixel under the
-  // hood) instead of renderer_.drawImage.  drawImage memcpy's packed
-  // bytes which require the destination X to be 8-aligned AFTER the
-  // orientation rotation — in Portrait mode that's effectively a Y
-  // alignment requirement which the layout math has no easy way to
-  // enforce.  drawAlignedBitmap handles any alignment correctly.
-  loadingAnimationFrame_ = 0;
-  drawAlignedBitmap(renderer_, snapix::loading::kFrames[loadingAnimationFrame_], spinnerX, spinnerY,
-                    spinnerW, spinnerH, theme.primaryTextBlack);
   renderer_.drawText(fontId, textX, textY, message, theme.primaryTextBlack, EpdFontFamily::BOLD);
   renderer_.drawRect(bannerX + 3, bannerY + 3, bannerW - 6, bannerH - 6, theme.primaryTextBlack);
-
-  // Save spinner + banner coords so tickLoadingAnimation can redraw
-  // without recomputing the layout (and without needing the message
-  // string).  v2.0.200 also saves the banner rect — the tick now
-  // fast-refreshes the WHOLE banner area, not just the spinner box,
-  // so the freshly-driven region covers the border + text + spinner
-  // as one rectangle.  Avoids the "lighter square inside darker
-  // banner" partial-refresh shade boundary visible in the v2.0.199
-  // hardware photo.
-  loadingSpinnerX_ = spinnerX;
-  loadingSpinnerY_ = spinnerY;
-  loadingBannerX_ = bannerX;
-  loadingBannerY_ = bannerY;
-  loadingBannerW_ = bannerW;
-  loadingBannerH_ = bannerH;
-  loadingOverlayActive_ = true;
-  loadingAnimationLastTickMs_ = millis();
 
   // Use drive-all refresh for the full screen so every pixel — including the
   // file-list / page behind the banner — is actively driven to its correct
@@ -3126,91 +3018,6 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   // content).  Keep the flag so that transition also uses drive-all for a
   // crisp first page without ghosting from the banner.
   forceCleanRefreshOnNext_ = true;
-}
-
-void ReaderState::tickLoadingAnimation(Core& core) {
-  // Guard 1: overlay must be visible.  renderCenteredStatusMessage sets
-  // `loadingOverlayActive_` true; the next full page render (which replaces
-  // the framebuffer entirely) doesn't clear it explicitly — but `needsRender_`
-  // becoming true means the overlay is about to be wiped anyway, so the
-  // animation tick is wasted work.  Skipping when needsRender_ is set
-  // avoids a wasted partial-window refresh right before the full page
-  // render's drive-all wipes everything.
-  if (!loadingOverlayActive_ || needsRender_) {
-    return;
-  }
-
-  // v2.0.203 — back to 1500 ms ticks with small partial refresh per tick.
-  // v2.0.201's full-screen displayBuffer per tick blocked the SPI bus for
-  // ~500 ms per tick (BW+RED write = 96 KB at ~250 KB/s).  Worker can't
-  // read SD/LittleFS while display task holds the bus.  Hardware repro
-  // showed 70-74 sec cold-parse on 300+ KB FB2 sections — ~3x slower
-  // than expected.
-  //
-  // v2.0.203 uses displayWindow (banner area only, ~2.8 KB write = ~10 ms
-  // bus held) most ticks.  Every Nth tick does a full drive-all refresh
-  // so the surrounding chapters menu / file list gets re-driven and
-  // doesn't drift to black over long waits.  See below.
-  const uint32_t nowMs = millis();
-  constexpr uint32_t kTickIntervalMs = 1500;
-  if (nowMs - loadingAnimationLastTickMs_ < kTickIntervalMs) {
-    return;
-  }
-
-  // Advance frame index (wraps at kFrameCount=10).  Frame 0 was drawn
-  // by renderCenteredStatusMessage; frame 1 fires on the first tick
-  // ~500 ms after the banner appears, then 2,3,...,9,0,1,... rotating.
-  loadingAnimationFrame_ = static_cast<uint8_t>((loadingAnimationFrame_ + 1) % snapix::loading::kFrameCount);
-
-  // v2.0.198 — first paint the white background under the spinner
-  // (otherwise OR'ing the new frame on top of the previous frame
-  // accumulates black pixels — segments stack instead of rotating).
-  // Then draw the new frame's black pixels via drawAlignedBitmap
-  // (handles any X/Y alignment + orientation rotation correctly).
-  const Theme& theme = THEME_MANAGER.current();
-  renderer_.fillRect(loadingSpinnerX_, loadingSpinnerY_, snapix::loading::kFrameWidth,
-                     snapix::loading::kFrameHeight, !theme.primaryTextBlack);
-  drawAlignedBitmap(renderer_, snapix::loading::kFrames[loadingAnimationFrame_], loadingSpinnerX_,
-                    loadingSpinnerY_, snapix::loading::kFrameWidth, snapix::loading::kFrameHeight,
-                    theme.primaryTextBlack);
-
-  // v2.0.203 — hybrid refresh strategy that keeps both the spinner crisp
-  // AND the BG worker fed:
-  //
-  // *  MOST ticks (9 of every 10): partial displayWindow over the banner
-  //    region only.  ~2.8 KB SPI write → ~10 ms bus held + ~420 ms
-  //    refresh wait (yields via vTaskDelay, worker can use bus during
-  //    the wait).  Effective bus block per tick: ~10 ms / 1500 ms ≈ 1 %.
-  //
-  // *  EVERY 10th tick (~every 15 sec): full drive-all refresh.  Re-
-  //    drives EVERY pixel (chapters menu / file list / page text under
-  //    the banner) so they don't drift to mid-gray over long waits via
-  //    cross-talk from the partial-refresh waveform.  ~500 ms bus block
-  //    but happens rarely enough that worker still gets the lion's
-  //    share of the bus.
-  //
-  // Combined: worker bus availability ~95-99 % on average, surrounding
-  // UI gets a clean re-drive every ~15 sec.  Hardware repro with
-  // v2.0.201's pure displayBuffer (500 ms bus block every 2500 ms tick)
-  // showed 70+ sec cold-parse on 312 KB FB2 sections — bus contention
-  // was the dominant cost.  v2.0.203 should bring that back closer to
-  // the native parse speed.
-  const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
-  constexpr uint8_t kFullRefreshEveryNTicks = 10;
-  static uint8_t tickCounter = 0;
-  ++tickCounter;
-  if (tickCounter >= kFullRefreshEveryNTicks) {
-    tickCounter = 0;
-    // Re-drive everything (chapters menu + banner) to prevent drift.
-    renderer_.displayBufferDriveAll(turnOffScreen);
-  } else {
-    // Fast partial refresh of just the banner rectangle.
-    renderer_.displayWindow(loadingBannerX_, loadingBannerY_, loadingBannerW_, loadingBannerH_,
-                            turnOffScreen);
-  }
-  core.display.markDirty();
-
-  loadingAnimationLastTickMs_ = nowMs;
 }
 
 ReaderState::Viewport ReaderState::getReaderViewport(bool showStatusBar) const {

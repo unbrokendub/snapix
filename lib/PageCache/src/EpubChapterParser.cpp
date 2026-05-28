@@ -341,9 +341,33 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
                              static_cast<uint16_t>(spineIndex_), &markersSize)) {
       break;  // markerize failed earlier
     }
-    if (ucache.segmentSize(snapix::unifiedcache::Kind::Idx,
-                            static_cast<uint16_t>(spineIndex_), nullptr)) {
-      break;  // R4.b will handle the existing idx
+    // v2.0.206 — skip the upfront rebuild ONLY when a CURRENT-version idx
+    // already exists.  A stale idx (older kPageIndexVersion, e.g. after the
+    // 9→10 page-count-fix bump) is rejected by R4.b's version gate, so it
+    // MUST be rebuilt here.  Pre-fix this skipped on mere existence and
+    // relied on the render path to drop a stale idx — but the render path
+    // never runs while this page-count cache build is still failing on the
+    // stale idx, so the build could wedge.  Rebuilding here is self-healing:
+    // the writeSegment at the end of this block appends a fresh frame that
+    // supersedes the stale one (UnifiedCache is an append-log, latest frame
+    // per key wins).  Probe is cheap — read only the 6-byte magic+version.
+    {
+      File idxProbe;
+      size_t idxProbeSize = 0;
+      bool idxCurrent = false;
+      if (ucache.openSegmentReader(snapix::unifiedcache::Kind::Idx,
+                                   static_cast<uint16_t>(spineIndex_), idxProbe, &idxProbeSize)) {
+        uint8_t h[6];
+        if (idxProbeSize >= sizeof(h) &&
+            idxProbe.read(h, sizeof(h)) == static_cast<int>(sizeof(h))) {
+          const bool magicOk = h[0] == 0x53 && h[1] == 0x50 && h[2] == 0x49 && h[3] == 0x58;
+          const uint16_t ver = static_cast<uint16_t>(h[4]) | (static_cast<uint16_t>(h[5]) << 8);
+          idxCurrent = magicOk && ver == snapix::smolport::kPageIndexVersion;
+        }
+        idxProbe.close();
+      }
+      if (idxCurrent) break;  // up-to-date idx exists — R4.b will short-circuit on it
+      // Absent or stale — fall through and (re)build the idx below.
     }
     File mf;
     size_t markersStreamSize = 0;
@@ -439,46 +463,29 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
                                                   UINT16_MAX, {}, &stats, {}, captureFn);
     mf.close();
 
-    // v2.0.175 — ARCHITECTURAL FIX for short chapters (< 1 page of content).
-    // The paginator only fires page-boundary callbacks on OVERFLOW (when a
-    // page is full and a new one starts).  A chapter whose markers fit in
-    // less than one rendered page produces ZERO callbacks, so `captured`
-    // stays empty — pre-fix R4.c then `break`s without writing an idx,
-    // R4.b finds no idx and also `break`s, and parsePages reaches its end
-    // with "no streaming output", which the cache layer interprets as
-    // "PageFill worker failed".  The ReaderState retry loop then re-tries
-    // the same failure indefinitely (capped at UINT8_MAX = 255 attempts,
-    // ~6 minutes of `Loading...` and battery burn).  Observed on the
-    // "Valley-of-genius" book, spine=61 — a 641-byte chapter (looks like
-    // an appendix header / short bibliography entry) that legitimately
-    // renders as exactly one short page.
+    // v2.0.206 — page-count semantics: `captured` holds the OVERFLOW page
+    // boundaries only (page N filled → roll into page N+1).  A chapter
+    // spanning P pages therefore produces exactly P-1 boundaries: page 0 is
+    // implicit (starts at byte 0, fires no boundary) and the final partial
+    // page ends at EOF (fires no boundary either).  So `captured.size()`
+    // here is (pageCount - 1).  R4.b reconstitutes the true count as
+    // `boundaryCount + 1` when it emits Pages.
     //
-    // Fix: when the walk consumes content but produces no boundaries,
-    // synthesize a single (pageIndex=0, byteOffset=0) entry representing
-    // "this chapter has one page, render from byte 0 to EOF".  R4.b then
-    // emits one empty Page; the streaming render path R3.5 reads from
-    // byte 0 of the markers stream and renders the (partial) page
-    // correctly.  If bytesConsumed is genuinely 0 (truly empty markers
-    // stream — shouldn't happen because markerize wouldn't have written
-    // the segment in that case, but defensive), accept failure with a
-    // clearer log message than the bare break.
-    if (captured.empty()) {
-      if (stats.bytesConsumed == 0) {
-        LOG_ERR(TAG,
-                "[CONTENT][EPUB] [STREAM] R4.c read 0 bytes from markers spine=%d "
-                "size=%zu — markers segment is empty/corrupt",
-                spineIndex_, markersStreamSize);
-        break;
-      }
-      LOG_INF(TAG,
-              "[CONTENT][EPUB] [STREAM] R4.c short chapter spine=%d: synthesizing 1-page "
-              "idx (markers=%zu bytes consumed=%u, fits in less than one page)",
-              spineIndex_, markersStreamSize, static_cast<unsigned>(stats.bytesConsumed));
-      snapix::smolport::PageBoundarySnapshot s{};
-      s.pageIndex = 0;
-      s.byteOffset = 0;
-      s.styleBits = 0;
-      captured.push_back(s);
+    // A single-page chapter (content fits in less than one rendered page)
+    // produces ZERO boundaries — `captured` is legitimately empty and we
+    // serialize a 0-entry idx (just the header); R4.b emits 0 + 1 = 1 Page.
+    // (v2.0.175 used to synthesise a fake page-0 entry here; that made the
+    // count 1 for single-page chapters but, combined with R4.b's old
+    // `emit entryCount` logic, masked the multi-page off-by-one.  With the
+    // `+1` reconstitution the synthesis is both unnecessary and wrong, so
+    // it's removed.)  Only a genuinely empty/corrupt markers stream
+    // (0 bytes consumed) is an error.
+    if (captured.empty() && stats.bytesConsumed == 0) {
+      LOG_ERR(TAG,
+              "[CONTENT][EPUB] [STREAM] R4.c read 0 bytes from markers spine=%d "
+              "size=%zu — markers segment is empty/corrupt",
+              spineIndex_, markersStreamSize);
+      break;
     }
 
     // Serialize captured boundaries into `.idx` via SmolPort helper.
@@ -504,7 +511,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     }
     LOG_INF(TAG,
             "[CONTENT][EPUB] [STREAM] idx built upfront spine=%d pages=%u bytes=%u (skipping legacy parser)",
-            spineIndex_, static_cast<unsigned>(captured.size()),
+            spineIndex_, static_cast<unsigned>(captured.size() + 1),
             static_cast<unsigned>(stats.bytesConsumed));
   } while (false);
 #endif
@@ -561,12 +568,16 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // bumped 1→2 to invalidate pre-fix paginator's offsets).
     const uint16_t version = static_cast<uint16_t>(header[4]) | (static_cast<uint16_t>(header[5]) << 8);
     if (version != snapix::smolport::kPageIndexVersion) break;
-    // pageCount at offset 8-9 (uint16 LE).
-    const uint16_t pageCount = static_cast<uint16_t>(header[8]) | (static_cast<uint16_t>(header[9]) << 8);
-    if (pageCount == 0) break;
+    // Boundary count at offset 8-9 (uint16 LE).  v2.0.206 — this is the
+    // number of OVERFLOW page rolls, i.e. (true page count - 1): page 0 is
+    // implicit and the final partial page fires no boundary.  Reconstitute
+    // the true page count by adding 1.  A 0-boundary idx is a valid
+    // single-page chapter (emits 1 Page), so no `== 0` early-out.
+    const uint16_t boundaryCount = static_cast<uint16_t>(header[8]) | (static_cast<uint16_t>(header[9]) << 8);
+    const uint16_t totalPages = static_cast<uint16_t>(boundaryCount + 1);
 
     LOG_INF(TAG, "[CONTENT][EPUB] [STREAM] short-circuit: total %u pages from .idx spine=%d (skipping legacy parser)",
-            static_cast<unsigned>(pageCount), spineIndex_);
+            static_cast<unsigned>(totalPages), spineIndex_);
 
     // v2.0.132 — activate STATEFUL short-circuit.  Emit up to maxPages
     // in this call; remaining pages are emitted on subsequent
@@ -579,7 +590,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     pagesCreated_ = 0;
     hitMaxPages_ = false;
     shortCircuitActive_ = true;
-    shortCircuitTotalPages_ = pageCount;
+    shortCircuitTotalPages_ = totalPages;
     shortCircuitNextPage_ = 0;
 
     while (shortCircuitNextPage_ < shortCircuitTotalPages_) {
