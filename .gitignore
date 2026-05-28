@@ -12,6 +12,7 @@ scripts/node_modules/
 tmp/*
 data/*
 crosspoint-reader/*
+papyrix-flasher/
 *.o
 scripts/fontconvert_bin
 scripts/__pycache__/
