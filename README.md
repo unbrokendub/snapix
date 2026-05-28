@@ -127,10 +127,10 @@ pip install esptool
 esptool.py --chip esp32c3 --port /dev/tty.usbmodem* --baud 921600 write_flash 0x0 snapix-*-full.bin
 ```
 
-Or with [papyrix-flasher](https://github.com/bigbag/papyrix-flasher) (upstream's CLI tool, works for Snapix too — the Xteink X4 ROM protocol is unchanged):
+Or download `snapix-flasher` for your OS from the same release page and flash the full image directly:
 
 ```bash
-papyrix-flasher flash snapix-*-full.bin
+snapix-flasher flash snapix-*-full.bin
 ```
 
 ### OTA / SD update (Papyrix and Snapix < v2.0.60 only)
@@ -139,7 +139,7 @@ Older builds supported a "drop `firmware.bin` into `/update/` on the SD
 card and reboot" update path.  **v2.0.60+ removes this** — the OTA app
 slot was repurposed to expand LittleFS for the cache (see the migration
 notice above), so SD-card-triggered reflash is no longer possible.
-Future updates require a USB cable and `esptool` / `papyrix-flasher` per
+Future updates require a USB cable and `esptool` / `snapix-flasher` per
 the steps above.
 
 If you're upgrading from a pre-v2.0.60 build still running OTA-style
@@ -216,7 +216,7 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-It builds release firmware and publishes a GitHub Release with `snapix-*-full.bin` (one-shot flashable), `snapix-*-firmware.bin` (OTA), `snapix-*-bootloader.bin`, `snapix-*-partitions.bin`.
+It builds release firmware and publishes a GitHub Release with `snapix-*-full.bin` (one-shot flashable), `snapix-*-firmware.bin` (app-only), `snapix-*-bootloader.bin`, `snapix-*-partitions.bin`, and `snapix-flasher-*` binaries for macOS, Linux, and Windows.
 
 ## Data caching (v2.0.60+ split layout)
 

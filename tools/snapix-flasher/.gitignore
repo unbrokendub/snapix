@@ -1,0 +1,21 @@
+# Binaries
+bin/
+release/
+*.exe
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+.venv
+.idea
+CLAUDE.md
+.claude/

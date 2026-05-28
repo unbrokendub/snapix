@@ -23,6 +23,12 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/snapix-flasher/go.mod
+          cache-dependency-path: tools/snapix-flasher/go.sum
+
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
@@ -69,12 +75,21 @@ jobs:
           cp scripts/literata/OFL.txt         "snapix-${{ steps.version.outputs.version }}-OFL-Literata.txt"
           ls -lah snapix-*
 
+      - name: Build snapix-flasher
+        working-directory: tools/snapix-flasher
+        run: |
+          make test
+          make release VERSION="${{ steps.version.outputs.version }}"
+          cp release/snapix-flasher-${{ steps.version.outputs.version }}-* "$GITHUB_WORKSPACE"/
+          ls -lah "$GITHUB_WORKSPACE"/snapix-flasher-*
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: snapix-firmware-${{ steps.version.outputs.version }}
           path: |
             snapix-*.bin
+            snapix-flasher-*
             snapix-*-OFL-*.txt
           retention-days: 30
 
@@ -87,6 +102,11 @@ jobs:
             snapix-${{ steps.version.outputs.version }}-firmware.bin
             snapix-${{ steps.version.outputs.version }}-bootloader.bin
             snapix-${{ steps.version.outputs.version }}-partitions.bin
+            snapix-flasher-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
+            snapix-flasher-${{ steps.version.outputs.version }}-linux-arm64.tar.gz
+            snapix-flasher-${{ steps.version.outputs.version }}-darwin-amd64.tar.gz
+            snapix-flasher-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz
+            snapix-flasher-${{ steps.version.outputs.version }}-windows-amd64.zip
             snapix-${{ steps.version.outputs.version }}-OFL-JetBrainsMono.txt
             snapix-${{ steps.version.outputs.version }}-OFL-PTMono.txt
             snapix-${{ steps.version.outputs.version }}-OFL-IBMPlexMono.txt
@@ -116,9 +136,9 @@ jobs:
             esptool.py --chip esp32c3 --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 snapix-*-full.bin
             ```
 
-            Using [papyrix-flasher](https://github.com/bigbag/papyrix-flasher) (no install needed):
+            Using `snapix-flasher` from this release:
             ```bash
-            papyrix-flasher flash snapix-*-full.bin
+            snapix-flasher flash snapix-*-full.bin
             ```
 
             If the device won't boot after flashing, first erase flash and retry:
@@ -136,6 +156,11 @@ jobs:
             - `snapix-*-firmware.bin` — app only, for advanced users who want to write just the `factory` partition at offset `0x10000`
             - `snapix-*-bootloader.bin` — 2nd-stage bootloader (offset `0x0`), only needed for piecewise flashes
             - `snapix-*-partitions.bin` — partition table (offset `0x8000`), only needed for piecewise flashes
+            - `snapix-flasher-*-darwin-arm64.tar.gz` — Snapix flasher for Apple Silicon Macs
+            - `snapix-flasher-*-darwin-amd64.tar.gz` — Snapix flasher for Intel Macs
+            - `snapix-flasher-*-linux-amd64.tar.gz` — Snapix flasher for Linux x86_64
+            - `snapix-flasher-*-linux-arm64.tar.gz` — Snapix flasher for Linux arm64
+            - `snapix-flasher-*-windows-amd64.zip` — Snapix flasher for Windows x86_64
             - `snapix-*-OFL-JetBrainsMono.txt` — SIL OFL 1.1 for JetBrains Mono NL (do not strip)
             - `snapix-*-OFL-PTMono.txt` — SIL OFL 1.1 for PT Mono
             - `snapix-*-OFL-IBMPlexMono.txt` — SIL OFL 1.1 for IBM Plex Mono
