@@ -2,6 +2,7 @@
 
 #include <StreamingPaginator.h>
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -822,6 +823,66 @@ int main() {
     p.onPageBreak();
     runner.expectTrue(p.isPageFull(),
                       "T35_page_break_after_content_pagefull");
+  }
+
+  // -----------------------------------------------------------------------
+  // v2.0.207 — REGRESSION: a long single text-run (one marker-free
+  // paragraph) whose post-carry tail exceeds the old 2048-byte spillover
+  // cap must NOT drop words.  Pre-fix, saveSpillover() truncated the tail
+  // and the dropped words vanished at the page boundary ("words missing
+  // between pages").  T23 above only used tiny words (<2048 total spillover)
+  // so it never exercised the overflow.
+  //
+  // Here we feed ~800 distinct fixed-width words (~4.8 KB) in ONE onText
+  // call.  Page 1 fills after a few words; the ~4.7 KB tail becomes
+  // spillover — well past the old 2048 cap.  With the growing buffer every
+  // word must render exactly once, in source order.
+  // -----------------------------------------------------------------------
+  {
+    StreamingPaginatorConfig narrow = cfg;  // tiny 100x80 page
+    FakeRenderer fr;
+    StreamingPaginator p(narrow, fr);
+
+    constexpr int kWordCount = 800;
+    std::string text;
+    text.reserve(kWordCount * 6);
+    std::vector<std::string> expected;
+    expected.reserve(kWordCount);
+    for (int i = 0; i < kWordCount; ++i) {
+      char w[8];
+      std::snprintf(w, sizeof(w), "w%04d", i);  // 5 chars, all distinct
+      expected.emplace_back(w);
+      if (i > 0) text += ' ';
+      text += w;
+    }
+    runner.expectTrue(text.size() > 4000, "T36_text_run_large_enough");
+
+    // One onText delivering the whole 4.8 KB run — tail >> old 2048 cap.
+    feedText(p, text);
+
+    // Drain pages until spillover empty.  ~12 words/tiny-page → ~70 pages;
+    // cap generously.
+    for (int iter = 0; iter < 4000; ++iter) {
+      p.resetForNextPage();
+      if (p.pendingBytes() == 0 && !p.isPageFull()) break;
+    }
+    p.onStreamEnd();  // flush trailing line
+
+    // Every word must appear exactly once, in source order.
+    runner.expectEq(static_cast<size_t>(kWordCount), fr.drawCalls.size(),
+                    "T36_all_words_drawn_no_drop");
+    bool orderOk = fr.drawCalls.size() == expected.size();
+    for (size_t i = 0; orderOk && i < expected.size(); ++i) {
+      if (fr.drawCalls[i].text != expected[i]) orderOk = false;
+    }
+    runner.expectTrue(orderOk, "T36_words_in_source_order");
+    // Explicitly assert the LAST word (deep in the dropped region pre-fix)
+    // is present — this is the most direct check of the bug.
+    bool lastPresent = false;
+    for (const auto& c : fr.drawCalls) {
+      if (c.text == "w0799") { lastPresent = true; break; }
+    }
+    runner.expectTrue(lastPresent, "T36_last_word_present");
   }
 
   runner.printSummary();

@@ -487,8 +487,26 @@ class StreamingPaginator : public MarkerObserver {
   // once per render call) and one free per dtor — cheap relative to the
   // render itself.  No fragmentation risk since the allocation is
   // released before the render returns.
+  // v2.0.207 — kSpilloverCapacity is now the INITIAL allocation; the buffer
+  // GROWS on demand (up to kSpilloverMaxCapacity) instead of truncating.
+  //
+  // Pre-fix, saveSpillover() silently dropped any bytes past 2048 in a
+  // single page-fill's text-run tail.  A long paragraph (one marker-free
+  // text run, delivered up to chunkBufSize=4096 bytes at a time) that fills
+  // a page EARLY leaves >2048 bytes of tail → those words were DROPPED,
+  // visible as "words missing between pages" mid-paragraph.  The v2.0.142
+  // bump 256→2048 reduced the frequency but didn't eliminate it.  Growing
+  // the heap buffer removes the data loss entirely.
+  //
+  // The 16-bit spilloverLen_ caps the buffer at 64 KB; kSpilloverMaxCapacity
+  // (16 KB) keeps carryWordLen_+spilloverLen_ well within uint16 for
+  // pendingBytes() and is ~8 pages of carried text — unreachable in
+  // practice (steady-state spillover is <1 page).  Beyond it we truncate
+  // (graceful, strictly better than the old 2 KB cap).
   static constexpr size_t kSpilloverCapacity = 2048;
+  static constexpr size_t kSpilloverMaxCapacity = 16384;
   std::unique_ptr<uint8_t[]> spilloverBuf_;
+  size_t   spilloverCapacity_ = 0;  // current allocation size of spilloverBuf_
   uint16_t spilloverLen_ = 0;
   // v2.0.141 — absolute source byte offset of spilloverBuf_[0].
   // When saveSpillover is called with `text + i, len - i`, the spillover

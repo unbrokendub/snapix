@@ -15,6 +15,7 @@ StreamingPaginator::StreamingPaginator(const StreamingPaginatorConfig& cfg, Pagi
   // for the paginator's whole lifetime — saves a malloc/free on
   // every chapter boundary.
   spilloverBuf_ = std::unique_ptr<uint8_t[]>(new uint8_t[kSpilloverCapacity]);
+  spilloverCapacity_ = kSpilloverCapacity;
   resetForChapter();
 }
 
@@ -99,8 +100,14 @@ void StreamingPaginator::resetForNextPage() {
   // again, in which case spillover is re-saved for the page after.
   if (spilloverLen_ > 0) {
     const uint16_t len = spilloverLen_;
-    uint8_t buf[kSpilloverCapacity];
-    std::memcpy(buf, spilloverBuf_.get(), len);
+    // v2.0.207 — move the spillover buffer OUT (heap, not a stack copy) so it
+    // can exceed the initial kSpilloverCapacity without inflating the stack
+    // frame (the old `uint8_t buf[kSpilloverCapacity]` was 2 KB on a stack
+    // already tight enough to need a 24 KB loopTask).  Re-saves triggered
+    // during the replay below lazily re-allocate spilloverBuf_ via
+    // saveSpillover; `replay` frees on scope exit.
+    std::unique_ptr<uint8_t[]> replay = std::move(spilloverBuf_);
+    spilloverCapacity_ = 0;
     spilloverLen_ = 0;  // clear FIRST so re-entrant save doesn't conflict
     // v2.0.141 — restore currentSourceOffset_ to where the spillover
     // bytes ACTUALLY start in source.  Without this, any tryAddWord
@@ -114,7 +121,7 @@ void StreamingPaginator::resetForNextPage() {
     // boundary and reads duplicate content from the previous page.
     currentSourceOffset_ = spilloverSourceOffset_;
     spilloverSourceOffset_ = 0;
-    (void)processTextRun(buf, len);
+    (void)processTextRun(replay.get(), len);
   }
 }
 
@@ -779,11 +786,37 @@ void StreamingPaginator::saveSpillover(const uint8_t* text, size_t len, uint32_t
   if (spilloverLen_ == 0) {
     spilloverSourceOffset_ = srcOffset;
   }
-  const size_t room = (kSpilloverCapacity > spilloverLen_)
-                          ? (kSpilloverCapacity - spilloverLen_)
+
+  // v2.0.207 — GROW the heap buffer to fit instead of dropping the tail.
+  // (Pre-fix this truncated at kSpilloverCapacity=2048, silently losing the
+  // end of long page-straddling paragraphs — the "words missing between
+  // pages" bug.)  Geometric growth, capped at kSpilloverMaxCapacity so the
+  // 16-bit spilloverLen_ / pendingBytes() can't overflow.  resetForNextPage
+  // may have moved the buffer out (null) — re-allocate lazily here.
+  const size_t needed = static_cast<size_t>(spilloverLen_) + len;
+  if (needed > spilloverCapacity_ && spilloverCapacity_ < kSpilloverMaxCapacity) {
+    size_t newCap = spilloverCapacity_ ? spilloverCapacity_ : kSpilloverCapacity;
+    while (newCap < needed && newCap < kSpilloverMaxCapacity) {
+      newCap *= 2;
+    }
+    if (newCap > kSpilloverMaxCapacity) newCap = kSpilloverMaxCapacity;
+    auto grown = std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[newCap]);
+    if (grown) {
+      if (spilloverLen_ > 0 && spilloverBuf_) {
+        std::memcpy(grown.get(), spilloverBuf_.get(), spilloverLen_);
+      }
+      spilloverBuf_ = std::move(grown);
+      spilloverCapacity_ = newCap;
+    }
+    // Alloc failure → fall through and save what fits in the current buffer
+    // (graceful degradation; still strictly better than the old fixed cap).
+  }
+
+  const size_t room = (spilloverCapacity_ > spilloverLen_)
+                          ? (spilloverCapacity_ - spilloverLen_)
                           : 0;
   const size_t toSave = (len < room) ? len : room;
-  if (toSave > 0) {
+  if (toSave > 0 && spilloverBuf_) {
     std::memcpy(spilloverBuf_.get() + spilloverLen_, text, toSave);
     spilloverLen_ = static_cast<uint16_t>(spilloverLen_ + toSave);
   }
