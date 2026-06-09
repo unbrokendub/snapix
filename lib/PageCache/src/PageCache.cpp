@@ -18,7 +18,7 @@
 #include "ContentParser.h"
 
 namespace {
-constexpr uint8_t CACHE_FILE_VERSION = 30;  // v30: v2.0.206 off-by-one page-count fix.  The streaming short-circuit (R4.b) now emits `boundaryCount + 1` Pages instead of `boundaryCount` — the final partial page of every multi-page chapter/section was previously never created (the MEASURE walk fires boundaries only on overflow rolls, so page 0 and the EOF-terminated last page are implicit).  Existing v29 page caches were built with the short count and would keep dropping each chapter's tail; bumping forces a rebuild through the fixed parser so the recovered last page is materialised.  (v29: v2.0.60 page cache moved from SD to LittleFS.)
+constexpr uint8_t CACHE_FILE_VERSION = 31;  // v31: v3.1.0 "красная строка" first-line paragraph indent changes page layout/counts; force a rebuild of page caches built under v30.  // v30: v2.0.206 off-by-one page-count fix.  The streaming short-circuit (R4.b) now emits `boundaryCount + 1` Pages instead of `boundaryCount` — the final partial page of every multi-page chapter/section was previously never created (the MEASURE walk fires boundaries only on overflow rolls, so page 0 and the EOF-terminated last page are implicit).  Existing v29 page caches were built with the short count and would keep dropping each chapter's tail; bumping forces a rebuild through the fixed parser so the recovered last page is materialised.  (v29: v2.0.60 page cache moved from SD to LittleFS.)
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 #ifndef SNAPIX_PERF_LOG

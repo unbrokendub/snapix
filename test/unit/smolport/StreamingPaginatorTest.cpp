@@ -885,6 +885,81 @@ int main() {
     runner.expectTrue(lastPresent, "T36_last_word_present");
   }
 
+  // -----------------------------------------------------------------------
+  // v3.1.0 — "красная строка": first-line paragraph indent.
+  //   * First line of a paragraph starts at marginLeft + firstLineIndent.
+  //   * Wrapped continuation lines start at marginLeft (no indent).
+  //   * Each new paragraph (after onParagraphBreak) re-indents.
+  //   * firstLineIndent == 0 → flush-left (back-compat).
+  // stdConfig: 100x80, margin 5, 6 px/char, 4 px space.  marginLeft = 5.
+  // -----------------------------------------------------------------------
+  {
+    auto cfgInd = stdConfig();
+    cfgInd.firstLineIndent = 20;  // first line starts at x = 5 + 20 = 25
+    FakeRenderer fr;
+    StreamingPaginator p(cfgInd, fr);
+    // "alpha beta" fits the first (indented) line; "gamma" wraps to line 2.
+    feedText(p, "alpha beta gamma delta");
+    p.onParagraphBreak();        // flush both lines, open a new paragraph
+    feedText(p, "omega");        // first word of paragraph 2
+    p.onStreamEnd();
+
+    runner.expectTrue(fr.drawCalls.size() >= 5, "T37_enough_draws");
+    // Paragraph 1, line 1, first word: indented.
+    runner.expectEq(std::string("alpha"), fr.drawCalls[0].text, "T37_p1_first_word");
+    runner.expectEq(uint16_t(25), fr.drawCalls[0].x, "T37_p1_first_line_indented");
+    // Find the first word on a LOWER line (wrapped continuation) — not indented.
+    const uint16_t firstY = fr.drawCalls[0].y;
+    bool foundCont = false;
+    for (const auto& c : fr.drawCalls) {
+      if (c.y > firstY) {  // a later line within paragraph 1 (before the para break)
+        if (c.text == "gamma") {
+          runner.expectEq(uint16_t(5), c.x, "T37_continuation_line_flush_left");
+          foundCont = true;
+        }
+        break;
+      }
+    }
+    runner.expectTrue(foundCont, "T37_found_continuation_line");
+    // Paragraph 2's first word is indented again.
+    bool foundP2 = false;
+    for (const auto& c : fr.drawCalls) {
+      if (c.text == "omega") {
+        runner.expectEq(uint16_t(25), c.x, "T37_p2_first_line_indented");
+        foundP2 = true;
+        break;
+      }
+    }
+    runner.expectTrue(foundP2, "T37_found_p2");
+  }
+
+  // T38: firstLineIndent == 0 keeps the old flush-left layout (back-compat).
+  {
+    auto cfg0 = stdConfig();
+    cfg0.firstLineIndent = 0;
+    FakeRenderer fr;
+    StreamingPaginator p(cfg0, fr);
+    feedText(p, "hello world");
+    p.onParagraphBreak();
+    runner.expectTrue(!fr.drawCalls.empty(), "T38_has_draws");
+    runner.expectEq(uint16_t(5), fr.drawCalls[0].x, "T38_no_indent_when_zero");
+  }
+
+  // T39: headings are NOT first-line-indented (centered/own alignment).
+  {
+    auto cfgH = stdConfig();
+    cfgH.firstLineIndent = 20;
+    FakeRenderer fr;
+    StreamingPaginator p(cfgH, fr);
+    p.onHeadingStart(2);
+    feedText(p, "Title");
+    p.onHeadingEnd();
+    p.onStreamEnd();
+    runner.expectTrue(!fr.drawCalls.empty(), "T39_has_draws");
+    // Heading first word at the plain left margin (no красная-строка indent).
+    runner.expectEq(uint16_t(5), fr.drawCalls[0].x, "T39_heading_not_indented");
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }

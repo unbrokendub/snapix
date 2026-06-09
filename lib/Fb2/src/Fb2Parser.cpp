@@ -441,6 +441,8 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
         cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
         cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
         cfg.paragraphSpacing = static_cast<uint16_t>(cfg.bodyLineHeight / 4);
+        // v3.1.0 — "красная строка": must match ReaderState + EpubChapterParser.
+        cfg.firstLineIndent = cfg.bodyLineHeight;
 
         // v2.0.136 — diagnostic log; mirrors EpubChapterParser.
         LOG_INF(TAG,

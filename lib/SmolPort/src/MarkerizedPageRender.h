@@ -276,7 +276,12 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // count, so the bump forces a rebuild.  (The on-disk entry layout is
 // unchanged — entries still record page 1..K starts, page 0 implicit — so
 // resume seeking is untouched.)
-constexpr uint16_t kPageIndexVersion = 10;
+// v3.1.0: bumped 10 → 11.  "красная строка" — StreamingPaginatorConfig gained
+// firstLineIndent, which shifts where the first line of every prose paragraph
+// starts and therefore where page boundaries fall.  Old v10 indices were
+// built without the indent; the bump forces a rebuild so .idx byteOffsets and
+// page counts match the new layout.
+constexpr uint16_t kPageIndexVersion = 11;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

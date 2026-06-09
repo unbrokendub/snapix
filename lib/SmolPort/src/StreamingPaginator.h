@@ -84,6 +84,12 @@ struct StreamingPaginatorConfig {
   uint16_t bodyLineHeight;   // pixels per line for body text
   uint16_t headingLineHeight;// pixels per line for heading text
   uint16_t paragraphSpacing; // extra pixels added between paragraphs
+  // v3.1.0 — "красная строка": pixels the FIRST line of each top-level prose
+  // paragraph is indented (0 = off / web-style flush-left).  Applied only to
+  // the first line after a paragraph/thematic/section break — not to soft
+  // wraps, <br>, verse lines, headings, centered text, or list/quote blocks
+  // (those already carry their own indentation).  Classic book typography.
+  uint16_t firstLineIndent;
 };
 
 // Renderer abstraction — paginator delegates measurement + drawing here.
@@ -326,6 +332,27 @@ class StreamingPaginator : public MarkerObserver {
   // Whether the current line has any whitespace-stripped output yet
   // (used to decide whether to drop leading whitespace mid-paragraph).
   bool     lineHasContent_;
+
+  // v3.1.0 — "красная строка" state.  True while the NEXT word to be placed
+  // begins a fresh prose paragraph (set on chapter start + paragraph /
+  // thematic / hard-page breaks; NOT on soft wraps or <br>/verse breaks).
+  // Consumed (and cleared) by tryAddWord when it places the first word of a
+  // line: if cfg_.firstLineIndent>0 and the context is a top-level body
+  // paragraph (not centered/heading/indented), the line start is pushed in
+  // by firstLineIndent.  Deliberately preserved across resetForNextPage so a
+  // paragraph that broke exactly at the page boundary still indents its
+  // continuation page's first line, while a mid-paragraph carry (flag false)
+  // does not.
+  bool     atParagraphStart_ = false;
+
+  // v3.1.0 — extra left offset applied to the CURRENT line being built (the
+  // "красная строка" first-line indent, or 0).  Set by tryAddWord when it
+  // places the first word of a paragraph's first line; consumed by flushLine
+  // as the line's draw-start x offset and reset to 0 afterwards so wrapped
+  // continuation lines render flush-left.  (cursorX_ also carries the indent
+  // for fit-checks, but flushLine recomputes the draw x from effectiveLeft,
+  // so the offset must be threaded explicitly.)
+  uint16_t lineIndent_ = 0;
 
   // Active style stack (flattened into bits — nesting is the stripper's
   // responsibility).

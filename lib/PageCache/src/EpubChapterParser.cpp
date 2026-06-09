@@ -394,6 +394,10 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
     cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
     cfg.paragraphSpacing = static_cast<uint16_t>(cfg.bodyLineHeight / 4);
+    // v3.1.0 — "красная строка": first-line indent = one body line height.
+    // MUST match the render-time config in ReaderState (and Fb2Parser) or the
+    // .idx configHash mismatches and page boundaries drift.
+    cfg.firstLineIndent = cfg.bodyLineHeight;
 
     // v2.0.136 — diagnostic log: dump paginator config so we can verify
     // it matches what ReaderState::renderPageContents uses at render

@@ -45,6 +45,9 @@ void StreamingPaginator::resetForChapter() {
   // v2.0.145 — drop indent/center state; no pending image.
   indentDepth_ = 0;
   centered_ = false;
+  // v3.1.0 — the chapter opens a fresh paragraph → its first line indents.
+  atParagraphStart_ = true;
+  lineIndent_ = 0;
   pendingImagePathLen_ = 0;
   pendingImageWidth_ = 0;
   pendingImageHeight_ = 0;
@@ -293,6 +296,8 @@ ObserverStatus StreamingPaginator::onParagraphBreak() {
   if (pageFull_) return ObserverStatus::Stop;
   flushPartWord();  // v2.0.133
   flushLine();
+  // v3.1.0 — the next line begins a new paragraph → indent its first line.
+  atParagraphStart_ = true;
   // Add inter-paragraph spacing.  Cursor advanced by one line height in
   // flushLine; add the configured paragraph extra.
   cursorY_ = static_cast<uint16_t>(cursorY_ + cfg_.paragraphSpacing);
@@ -322,6 +327,9 @@ ObserverStatus StreamingPaginator::onPageBreak() {
   // Hard page break — flush whatever's accumulated and mark page full.
   flushPartWord();  // v2.0.133
   flushLine();
+  // v3.1.0 — content after a hard break (new section/chapter) opens a fresh
+  // paragraph; its first line on the next page indents.
+  atParagraphStart_ = true;
   pageFull_ = true;
   return ObserverStatus::Stop;
 }
@@ -332,6 +340,8 @@ ObserverStatus StreamingPaginator::onThematicBreak() {
   // draw a horizontal rule; deferred to renderer-integration phase R3.
   flushPartWord();  // v2.0.133
   flushLine();
+  // v3.1.0 — a thematic break (scene divider) starts a new paragraph.
+  atParagraphStart_ = true;
   cursorY_ = static_cast<uint16_t>(cursorY_ + cfg_.paragraphSpacing);
   if (cursorY_ + currentLineHeight() > cfg_.pageHeight - cfg_.marginBottom) {
     pageFull_ = true;
@@ -569,6 +579,18 @@ bool StreamingPaginator::tryAddWord(const uint8_t* word, size_t len, uint32_t sr
   // changes take effect at the start of each fresh line.
   if (!lineHasContent_) {
     cursorX_ = static_cast<uint16_t>(cfg_.marginLeft + indentDepth_ * kIndentStep);
+    // v3.1.0 — "красная строка": indent the first line of a top-level prose
+    // paragraph.  Skip when centered/heading (own alignment) or inside a
+    // list/quote block (indentDepth_>0, already offset).  Consume the flag
+    // here so wrapped continuation lines of the same paragraph stay flush.
+    if (atParagraphStart_) {
+      if (cfg_.firstLineIndent > 0 && !centered_ && indentDepth_ == 0 &&
+          (styleBits_ & kStyleHeading) == 0) {
+        cursorX_ = static_cast<uint16_t>(cursorX_ + cfg_.firstLineIndent);
+        lineIndent_ = cfg_.firstLineIndent;  // flushLine draws from here
+      }
+      atParagraphStart_ = false;
+    }
   }
   const uint16_t lineWidthIfAdded = static_cast<uint16_t>(
       cursorX_ + leadingSpaceWidth + wordWidth);
@@ -665,6 +687,7 @@ void StreamingPaginator::flushLine(bool justify) {
     // <br/> at start of paragraph).  Still might trigger page-full.
     cursorY_ = static_cast<uint16_t>(cursorY_ + currentLineHeight());
     cursorX_ = effectiveLeft;
+    lineIndent_ = 0;  // v3.1.0
     if (cursorY_ + currentLineHeight() > cfg_.pageHeight - cfg_.marginBottom) {
       pageFull_ = true;
     }
@@ -723,7 +746,10 @@ void StreamingPaginator::flushLine(bool justify) {
   }
 
   // v2.0.145 — center mode: compute start x = effectiveLeft + half-slack.
-  uint16_t x = effectiveLeft;
+  // v3.1.0 — non-centered lines start at effectiveLeft + lineIndent_ so the
+  // "красная строка" first line of a paragraph is offset (lineIndent_ is 0
+  // for continuation lines and always 0 when centered_).
+  uint16_t x = static_cast<uint16_t>(effectiveLeft + lineIndent_);
   if (centered_) {
     const uint16_t rightEdge =
         static_cast<uint16_t>(cfg_.pageWidth - cfg_.marginRight);
@@ -760,6 +786,7 @@ void StreamingPaginator::flushLine(bool justify) {
   lineTextLen_ = 0;
   lineWordCount_ = 0;
   lineHasContent_ = false;
+  lineIndent_ = 0;  // v3.1.0 — consumed; continuation lines are flush-left
 
   // Page-full check: if the next line would start past the bottom margin,
   // we're done with this page.  Use the heading height conservatively in
@@ -774,6 +801,7 @@ void StreamingPaginator::clearLine() {
   lineTextLen_ = 0;
   lineWordCount_ = 0;
   lineHasContent_ = false;
+  lineIndent_ = 0;  // v3.1.0
 }
 
 void StreamingPaginator::saveSpillover(const uint8_t* text, size_t len, uint32_t srcOffset) {

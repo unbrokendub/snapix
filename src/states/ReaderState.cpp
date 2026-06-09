@@ -2518,6 +2518,10 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
           cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
           cfg.paragraphSpacing = static_cast<uint16_t>(cfg.bodyLineHeight / 4);
+          // v3.1.0 — "красная строка": first-line indent = one body line
+          // height.  MUST match the upfront MEASURE-walk config in
+          // EpubChapterParser/Fb2Parser or the .idx configHash mismatches.
+          cfg.firstLineIndent = cfg.bodyLineHeight;
 
           // v2.0.136 — diagnostic: dump R3.6 paginator config so a
           // mismatch with R4.c's idx-build cfg becomes immediately
