@@ -222,8 +222,19 @@ void render(const GfxRenderer& r, const Theme& t, const FileListView& v);
 // ============================================================================
 
 struct ChapterListView {
-  static constexpr int MAX_CHAPTERS = 256;
-  static constexpr int TITLE_LEN = 64;
+  // v3.0.3 — heap audit: this view is a by-value member of ReaderState, so
+  // `chapters[]` is permanently pinned in BSS even while the chapters menu is
+  // closed (i.e. during reading + the OOM-prone cold parse).  At the old
+  // 256 × 68 B it cost ~17 KB.  Right-sized to 192 × 52 B (~10 KB) — saves
+  // ~7.4 KB of always-on DRAM that now stays in the runtime heap pool:
+  //   * MAX_CHAPTERS 256 → 192: covers the vast majority of books; a TOC
+  //     with >192 entries simply caps (addChapter guards on MAX_CHAPTERS) —
+  //     page-turn navigation through the whole book is unaffected, only the
+  //     TOC jump-list is truncated past entry 192.
+  //   * TITLE_LEN 64 → 48: TOC titles already truncate by pixel width on the
+  //     480-px screen (~40 chars max with indent), so 48 is no visible loss.
+  static constexpr int MAX_CHAPTERS = 192;
+  static constexpr int TITLE_LEN = 48;
 
   struct Chapter {
     char title[TITLE_LEN];

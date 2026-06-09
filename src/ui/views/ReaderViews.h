@@ -118,7 +118,7 @@ struct ReaderMenuView {
 void render(const GfxRenderer& r, const Theme& t, const ReaderMenuView& v);
 
 // ============================================================================
-// BookmarkListView - Compact bookmark list (20 items max vs 256 for ChapterListView)
+// BookmarkListView - Compact bookmark list (20 items max vs 192 for ChapterListView)
 // ============================================================================
 
 struct BookmarkListView {
