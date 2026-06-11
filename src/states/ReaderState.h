@@ -237,7 +237,9 @@ class ReaderState : public State {
 
   // Display helpers
   void displayWithRefresh(Core& core);
-  void renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride = 0);
+  void renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride = 0,
+                                   const char* detail = nullptr);
+  void renderLoadingStatusMessage(Core& core);
 
   // v2.0.205 — the loading/indexing overlay is a single STATIC banner drawn
   // by renderCenteredStatusMessage over the existing screen content.  The

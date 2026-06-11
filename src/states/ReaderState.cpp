@@ -913,6 +913,13 @@ void ReaderState::enter(Core& core) {
 
   contentLoaded_ = true;
 
+  // FB2 files without titled sections are parsed as one full stream.  Their
+  // first marker/index build can legitimately take minutes, so replace the
+  // generic banner with an honest static warning as soon as metadata is known.
+  if (core.content.metadata().type == ContentType::Fb2 && core.content.tocCount() == 0) {
+    renderLoadingStatusMessage(core);
+  }
+
   // Save last book path to settings
   strncpy(core.settings.lastBookPath, contentPath_, sizeof(core.settings.lastBookPath) - 1);
   core.settings.lastBookPath[sizeof(core.settings.lastBookPath) - 1] = '\0';
@@ -1491,7 +1498,7 @@ void ReaderState::render(Core& core) {
       // v2.0.199 — unified status banner uses "Loading..." for every
       // wait state.  Previously this branch showed "Indexing..." for the
       // TOC-jump path; user preferred a single label.
-      renderCenteredStatusMessage(core, "Loading...");
+      renderLoadingStatusMessage(core);
       pendingTocJumpIndexingShown_ = true;
     }
   } else if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_) {
@@ -1509,7 +1516,7 @@ void ReaderState::render(Core& core) {
   } else if (pendingEpubPageLoadActive_) {
     if (!pendingEpubPageLoadMessageShown_) {
       // v2.0.199 — unified "Loading..." (was conditional Indexing/Loading).
-      renderCenteredStatusMessage(core, "Loading...");
+      renderLoadingStatusMessage(core);
       pendingEpubPageLoadMessageShown_ = true;
     }
   } else if (menuMode_) {
@@ -2967,7 +2974,17 @@ void ReaderState::displayWithRefresh(Core& core) {
   }
 }
 
-void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride) {
+void ReaderState::renderLoadingStatusMessage(Core& core) {
+  if (contentLoaded_ && core.content.metadata().type == ContentType::Fb2 && core.content.tocCount() == 0) {
+    renderCenteredStatusMessage(core, "No chapter list found", THEME_MANAGER.current().uiFontId,
+                                "Loading may take a few minutes");
+    return;
+  }
+  renderCenteredStatusMessage(core, "Loading...");
+}
+
+void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride,
+                                              const char* detail) {
   const Theme& theme = THEME_MANAGER.current();
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
   const int fontId = fontIdOverride ? fontIdOverride : core.settings.getReaderFontId(theme);
@@ -2987,14 +3004,20 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   constexpr int padH = 24;  // horizontal padding inside banner
   constexpr int padV = 16;  // vertical padding inside banner
 
+  const bool hasDetail = detail != nullptr && detail[0] != '\0';
   const int textWidth  = renderer_.getTextWidth(fontId, message, EpdFontFamily::BOLD);
+  const int detailWidth =
+      hasDetail ? renderer_.getTextWidth(fontId, detail, EpdFontFamily::REGULAR) : 0;
   const int lineHeight = renderer_.getLineHeight(fontId);
-  const int bannerW    = textWidth + padH * 2;
-  const int bannerH    = lineHeight + padV * 2;
+  const int lineGap    = hasDetail ? std::max(4, lineHeight / 3) : 0;
+  const int bannerW    = std::max(textWidth, detailWidth) + padH * 2;
+  const int bannerH    = lineHeight + (hasDetail ? lineGap + lineHeight : 0) + padV * 2;
   const int bannerX    = (renderer_.getScreenWidth() - bannerW) / 2;
   const int bannerY    = (renderer_.getScreenHeight() - bannerH) / 2;
   const int textX      = bannerX + (bannerW - textWidth) / 2;
   const int textY      = bannerY + padV;
+  const int detailX    = bannerX + (bannerW - detailWidth) / 2;
+  const int detailY    = textY + lineHeight + lineGap;
 
   // Draw overlay banner on top of existing framebuffer content — no clearScreen,
   // so the previous page / file-list / chapters menu stays visible behind the
@@ -3002,6 +3025,9 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   // the framebuffer before this banner is drawn).
   renderer_.fillRect(bannerX, bannerY, bannerW, bannerH, !theme.primaryTextBlack);
   renderer_.drawText(fontId, textX, textY, message, theme.primaryTextBlack, EpdFontFamily::BOLD);
+  if (hasDetail) {
+    renderer_.drawText(fontId, detailX, detailY, detail, theme.primaryTextBlack, EpdFontFamily::REGULAR);
+  }
   renderer_.drawRect(bannerX + 3, bannerY + 3, bannerW - 6, bannerH - 6, theme.primaryTextBlack);
 
   // Use drive-all refresh for the full screen so every pixel — including the
