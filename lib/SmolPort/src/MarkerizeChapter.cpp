@@ -1,5 +1,7 @@
 #include "MarkerizeChapter.h"
 
+#include <cstring>
+
 namespace snapix::smolport {
 
 namespace {
@@ -9,6 +11,23 @@ namespace {
 // write error and bail early.  Implements shouldStop() against the
 // caller's abort hook so the stripper itself bails between bytes when
 // user input fires.
+//
+// v3.1.1 — WRITE COALESCING.  HtmlStripper emits plain text BYTE-BY-BYTE
+// (`sink_.emit(&b, 1)` per character) and markers in 2-4 byte dribbles.
+// Pre-fix, every emit went straight through writeChunk → one LittleFS
+// `File::write()` call per byte of the book — a 430 KB FB2 section issued
+// ~420 000 single-byte writes, and the per-call overhead (Arduino File →
+// VFS → littlefs cache lookup) dominated cold markerize wall time (hardware
+// repro: 116 s for that section, ~3.7 KB/s).  This sink now stages emits
+// into a 1 KB buffer and flushes in bulk, collapsing the write-call count
+// by ~3 orders of magnitude.  Output BYTES are identical — only the call
+// granularity changes — so markers segments, idx files, and page caches
+// stay valid (no version bump needed).
+//
+// flush() MUST be called after stripper.finish() on the clean-EOF path —
+// markerizeChapter does.  Error/abort exits skip the flush: the enclosing
+// UnifiedCache streaming frame is abandoned (size never patched) so
+// unflushed tail bytes are irrelevant.
 class CallbackSink : public HtmlStripperSink {
  public:
   CallbackSink(MarkerizeWriteFn& writeChunk, const MarkerizeAbortFn& shouldAbort,
@@ -17,11 +36,34 @@ class CallbackSink : public HtmlStripperSink {
 
   void emit(const uint8_t* data, size_t len) override {
     if (writeFailed_) return;  // latch — drop subsequent emits
-    if (!writeChunk_(data, len)) {
-      writeFailed_ = true;
+    // Large emits (image paths / anchor payloads near the 512 B payload
+    // cap) bypass staging: flush what's pending, then write directly.
+    if (len >= kStageCapacity) {
+      flush();
+      if (writeFailed_) return;
+      if (!writeChunk_(data, len)) {
+        writeFailed_ = true;
+        return;
+      }
+      outBytesAccum_ += static_cast<uint32_t>(len);
       return;
     }
+    if (stageLen_ + len > kStageCapacity) {
+      flush();
+      if (writeFailed_) return;
+    }
+    std::memcpy(stage_ + stageLen_, data, len);
+    stageLen_ = static_cast<uint16_t>(stageLen_ + len);
     outBytesAccum_ += static_cast<uint32_t>(len);
+  }
+
+  // Push any staged bytes through writeChunk.  Idempotent when empty.
+  void flush() {
+    if (writeFailed_ || stageLen_ == 0) return;
+    if (!writeChunk_(stage_, stageLen_)) {
+      writeFailed_ = true;
+    }
+    stageLen_ = 0;
   }
 
   // Called by the stripper between bytes.  Forward to the caller's abort.
@@ -33,9 +75,12 @@ class CallbackSink : public HtmlStripperSink {
   bool writeFailed() const { return writeFailed_; }
 
  private:
+  static constexpr size_t kStageCapacity = 1024;
   MarkerizeWriteFn& writeChunk_;
   const MarkerizeAbortFn& shouldAbort_;
   uint32_t& outBytesAccum_;
+  uint8_t stage_[kStageCapacity];
+  uint16_t stageLen_ = 0;
   bool writeFailed_ = false;
 };
 
@@ -76,6 +121,13 @@ MarkerizeStatus markerizeChapter(HtmlStripper::Mode mode, MarkerizeReadFn readCh
     if (got == 0) {
       // Clean EOF.
       stripper.finish();
+      // v3.1.1 — drain the coalescing stage so the markers segment holds
+      // every emitted byte.  A flush failure is a write error like any
+      // other (the enclosing streaming frame gets abandoned).
+      sink.flush();
+      if (sink.writeFailed()) {
+        result = MarkerizeStatus::WriteError;
+      }
       break;
     }
     if (got < 0) {

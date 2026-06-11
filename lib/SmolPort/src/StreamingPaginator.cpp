@@ -110,6 +110,7 @@ void StreamingPaginator::resetForNextPage() {
     // during the replay below lazily re-allocate spilloverBuf_ via
     // saveSpillover; `replay` frees on scope exit.
     std::unique_ptr<uint8_t[]> replay = std::move(spilloverBuf_);
+    const size_t replayCapacity = spilloverCapacity_;  // v3.1.1 — for reuse below
     spilloverCapacity_ = 0;
     spilloverLen_ = 0;  // clear FIRST so re-entrant save doesn't conflict
     // v2.0.141 — restore currentSourceOffset_ to where the spillover
@@ -125,6 +126,16 @@ void StreamingPaginator::resetForNextPage() {
     currentSourceOffset_ = spilloverSourceOffset_;
     spilloverSourceOffset_ = 0;
     (void)processTextRun(replay.get(), len);
+    // v3.1.1 — reuse instead of free.  If the replay didn't trigger a new
+    // save (the common case: everything fit on the fresh page),
+    // spilloverBuf_ is still null — hand the old buffer back so the next
+    // page boundary doesn't pay a fresh malloc.  Kills the per-boundary
+    // alloc/free churn the v3.0.2 move-out introduced, without giving up
+    // its stack-frame win.
+    if (!spilloverBuf_) {
+      spilloverBuf_ = std::move(replay);
+      spilloverCapacity_ = replayCapacity;
+    }
   }
 }
 

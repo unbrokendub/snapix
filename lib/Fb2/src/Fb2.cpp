@@ -638,7 +638,11 @@ void XMLCALL Fb2::endElement(void* userData, const XML_Char* name) {
       t = t.substr(start, end - start);
     }
 
-    if (!t.empty()) {
+    // v3.1.1 — cap the TOC at 512 entries.  The chapters-menu view holds 192
+    // anyway; unbounded growth on a pathological many-section FB2 is exactly
+    // the vector-doubling that exhausted the heap in the v2.0.196/v3.0.x
+    // hardware crashes (push_back → realloc → bad_alloc mid-parse).
+    if (!t.empty() && self->tocItems_.size() < 512) {
       TocItem item;
       item.title = t;
       item.sectionIndex = self->sectionCounter_ - 1;
@@ -661,18 +665,60 @@ void XMLCALL Fb2::characterData(void* userData, const XML_Char* s, int len) {
     return;
   }
 
+  // v3.1.1 — cap every accumulator.  These strings are display-only (TOC
+  // titles truncate at 48 chars on screen, book title/author fit one line);
+  // a malformed FB2 with megabytes of text inside <book-title> must not be
+  // able to grow them until the heap dies.  512 B ≈ 250 Cyrillic chars —
+  // far beyond anything renderable.
+  constexpr size_t kMetaFieldCap = 512;
+
   // Collect section title text for TOC
-  if (self->inSectionTitle_) {
+  if (self->inSectionTitle_ && self->currentSectionTitle_.size() < kMetaFieldCap) {
     self->currentSectionTitle_.append(s, len);
   }
 
   // Extract metadata based on current context
   if (self->inBookTitle) {
-    self->title.append(s, len);
+    if (self->title.size() < kMetaFieldCap) self->title.append(s, len);
   } else if (self->inFirstName) {
-    self->currentAuthorFirst.append(s, len);
+    if (self->currentAuthorFirst.size() < kMetaFieldCap) self->currentAuthorFirst.append(s, len);
   } else if (self->inLastName) {
-    self->currentAuthorLast.append(s, len);
+    if (self->currentAuthorLast.size() < kMetaFieldCap) self->currentAuthorLast.append(s, len);
+  }
+}
+
+// v3.1.1 — see the header-side comment on the *Guarded trio.  The catch
+// must live HERE, inside the C++ callback frame, because an exception
+// can NOT reliably unwind through Expat's C frames (no unwind tables →
+// __cxa_call_terminate → abort → device reboot; reproduced on hardware
+// even with parseXmlStream's outer try/catch present).
+void XMLCALL Fb2::startElementGuarded(void* userData, const XML_Char* name, const XML_Char** atts) {
+  auto* self = static_cast<Fb2*>(userData);
+  try {
+    startElement(userData, name, atts);
+  } catch (...) {
+    self->metaParseOom_ = true;
+    if (self->xmlParser_) XML_StopParser(self->xmlParser_, XML_FALSE);
+  }
+}
+
+void XMLCALL Fb2::endElementGuarded(void* userData, const XML_Char* name) {
+  auto* self = static_cast<Fb2*>(userData);
+  try {
+    endElement(userData, name);
+  } catch (...) {
+    self->metaParseOom_ = true;
+    if (self->xmlParser_) XML_StopParser(self->xmlParser_, XML_FALSE);
+  }
+}
+
+void XMLCALL Fb2::characterDataGuarded(void* userData, const XML_Char* s, int len) {
+  auto* self = static_cast<Fb2*>(userData);
+  try {
+    characterData(userData, s, len);
+  } catch (...) {
+    self->metaParseOom_ = true;
+    if (self->xmlParser_) XML_StopParser(self->xmlParser_, XML_FALSE);
   }
 }
 
@@ -692,8 +738,12 @@ bool Fb2::parseXmlStream() {
   }
 
   XML_SetUserData(xmlParser_, this);
-  XML_SetElementHandler(xmlParser_, startElement, endElement);
-  XML_SetCharacterDataHandler(xmlParser_, characterData);
+  // v3.1.1 — register the OOM-guarded wrappers (see their definitions
+  // above): an alloc failure inside a handler must be caught in the C++
+  // callback frame, not after unwinding through Expat's C frames.
+  XML_SetElementHandler(xmlParser_, startElementGuarded, endElementGuarded);
+  XML_SetCharacterDataHandler(xmlParser_, characterDataGuarded);
+  metaParseOom_ = false;
 
   constexpr size_t kChunkSize = 4096;
   uint8_t buffer[kChunkSize];
@@ -741,6 +791,14 @@ bool Fb2::parseXmlStream() {
     success = false;
   } catch (...) {
     LOG_ERR(TAG, "XML parse: unknown exception");
+    success = false;
+  }
+
+  // v3.1.1 — a guarded handler caught an alloc failure and stopped the
+  // parser.  XML_Parse already returned XML_STATUS_ERROR (ABORTED), but
+  // surface the real cause instead of a generic parse-error log.
+  if (metaParseOom_) {
+    LOG_ERR(TAG, "XML parse aborted: heap exhausted in a metadata callback (graceful, no crash)");
     success = false;
   }
 

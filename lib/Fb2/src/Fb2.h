@@ -195,6 +195,20 @@ class Fb2 {
   static void XMLCALL endElement(void* userData, const XML_Char* name);
   static void XMLCALL characterData(void* userData, const XML_Char* s, int len);
 
+  // v3.1.1 — OOM-guarded wrappers, the ONLY handlers actually registered
+  // with Expat.  A bad_alloc thrown inside a raw handler must unwind
+  // through Expat's C frames (no unwind tables) to reach parseXmlStream's
+  // try/catch — that path hits __cxa_call_terminate → abort() → reboot,
+  // which is exactly the hardware crash v2.0.197's outer catch FAILED to
+  // stop (observed again on v3.0.x: third-book FB2 load aborted right
+  // after "Found cover reference").  The wrappers catch INSIDE the C++
+  // callback frame (zero C frames between throw and catch), set
+  // metaParseOom_, and XML_StopParser — the parse then fails gracefully.
+  static void XMLCALL startElementGuarded(void* userData, const XML_Char* name, const XML_Char** atts);
+  static void XMLCALL endElementGuarded(void* userData, const XML_Char* name);
+  static void XMLCALL characterDataGuarded(void* userData, const XML_Char* s, int len);
+  bool metaParseOom_ = false;
+
   // Helper methods
   bool parseXmlStream();
   void postProcessMetadata();
