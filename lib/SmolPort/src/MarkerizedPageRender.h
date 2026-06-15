@@ -281,7 +281,11 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // starts and therefore where page boundaries fall.  Old v10 indices were
 // built without the indent; the bump forces a rebuild so .idx byteOffsets and
 // page counts match the new layout.
-constexpr uint16_t kPageIndexVersion = 11;
+// v3.2.0: bumped 11 → 12.  Scene-break ornament — onThematicBreak now
+// consumes a full ornament line ("* * *") plus air above/below instead of a
+// single paragraphSpacing gap, shifting where page boundaries fall in any
+// chapter containing an <hr>.  Rebuild forces .idx to match.
+constexpr uint16_t kPageIndexVersion = 12;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

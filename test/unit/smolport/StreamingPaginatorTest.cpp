@@ -960,6 +960,56 @@ int main() {
     runner.expectEq(uint16_t(5), fr.drawCalls[0].x, "T39_heading_not_indented");
   }
 
+  // -----------------------------------------------------------------------
+  // v3.2.0 — scene-break ornament: onThematicBreak() draws a centered
+  // "* * *" on its own line (EPUB <hr>), instead of an invisible gap.
+  // stdConfig: 100x80, margin 5 -> innerW 90, 6 px/char.  "* * *" = 5 chars
+  // = 30 px -> centered x = 5 + (90-30)/2 = 35.
+  // -----------------------------------------------------------------------
+  {
+    auto cfg = stdConfig();
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);
+    feedText(p, "before");
+    p.onThematicBreak();
+    feedText(p, "after");
+    p.onStreamEnd();
+
+    bool foundOrnament = false;
+    for (const auto& c : fr.drawCalls) {
+      if (c.text == "* * *") {
+        foundOrnament = true;
+        runner.expectEq(uint16_t(35), c.x, "T40_ornament_centered");
+      }
+    }
+    runner.expectTrue(foundOrnament, "T40_ornament_drawn");
+    // The surrounding text still renders.
+    bool before = false, after = false;
+    for (const auto& c : fr.drawCalls) {
+      if (c.text == "before") before = true;
+      if (c.text == "after") after = true;
+    }
+    runner.expectTrue(before && after, "T40_text_around_ornament_intact");
+  }
+
+  // T41: MEASURE mode (draw-suppressed) emits NO ornament draw but still
+  // advances the cursor (so .idx boundaries match the DRAW pass).
+  {
+    auto cfg = stdConfig();
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);
+    p.setDrawSuppressed(true);
+    feedText(p, "before");
+    const uint16_t yBefore = p.cursorY();
+    p.onThematicBreak();
+    p.onStreamEnd();
+    runner.expectTrue(p.cursorY() > yBefore, "T41_cursor_advanced_in_measure");
+    bool anyOrnament = false;
+    for (const auto& c : fr.drawCalls)
+      if (c.text == "* * *") anyOrnament = true;
+    runner.expectFalse(anyOrnament, "T41_no_draw_when_suppressed");
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }

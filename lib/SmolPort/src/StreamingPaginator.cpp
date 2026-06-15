@@ -347,14 +347,40 @@ ObserverStatus StreamingPaginator::onPageBreak() {
 
 ObserverStatus StreamingPaginator::onThematicBreak() {
   if (pageFull_) return ObserverStatus::Stop;
-  // For now, treated as paragraph break.  A real implementation would
-  // draw a horizontal rule; deferred to renderer-integration phase R3.
   flushPartWord();  // v2.0.133
   flushLine();
+
+  // v3.2.0 — draw a centered scene-break ornament ("* * *") on its own line
+  // instead of leaving an invisible gap (EPUB <hr> previously rendered as
+  // nothing).  ASCII asterisks are guaranteed present in every bundled font
+  // (a single U+2042 ASTERISM glyph is not).  This runs in BOTH the MEASURE
+  // walk and the DRAW pass: cursorY_ advances identically in both (the fit
+  // guard reads only cursorY_, which is draw-mode-independent), and only the
+  // drawWord is gated on drawSuppressed_ — so .idx page boundaries match
+  // what the render pass produces.
+  const uint16_t bottom = static_cast<uint16_t>(cfg_.pageHeight - cfg_.marginBottom);
+  cursorY_ = static_cast<uint16_t>(cursorY_ + cfg_.paragraphSpacing);  // air above
+  if (cursorY_ + cfg_.bodyLineHeight <= bottom) {
+    if (!drawSuppressed_) {
+      static const uint8_t kOrnament[] = {'*', ' ', '*', ' ', '*'};
+      const uint16_t w = renderer_.measureWidth(kOrnament, sizeof(kOrnament), 0);
+      const uint16_t innerW =
+          static_cast<uint16_t>(cfg_.pageWidth - cfg_.marginLeft - cfg_.marginRight);
+      const uint16_t x = (innerW > w)
+                             ? static_cast<uint16_t>(cfg_.marginLeft + (innerW - w) / 2)
+                             : cfg_.marginLeft;
+      renderer_.drawWord(x, cursorY_, kOrnament, sizeof(kOrnament), 0);
+    }
+    cursorY_ = static_cast<uint16_t>(cursorY_ + cfg_.bodyLineHeight);  // consume ornament line
+  }
+  // (If the ornament line doesn't fit at the page bottom it's skipped — the
+  // break still functions via the spacing + new-paragraph indent below; the
+  // divider just isn't redrawn on the next page.  Rare and benign.)
+
   // v3.1.0 — a thematic break (scene divider) starts a new paragraph.
   atParagraphStart_ = true;
-  cursorY_ = static_cast<uint16_t>(cursorY_ + cfg_.paragraphSpacing);
-  if (cursorY_ + currentLineHeight() > cfg_.pageHeight - cfg_.marginBottom) {
+  cursorY_ = static_cast<uint16_t>(cursorY_ + cfg_.paragraphSpacing);  // air below
+  if (cursorY_ + currentLineHeight() > bottom) {
     pageFull_ = true;
   }
   return pageFull_ ? ObserverStatus::Stop : ObserverStatus::Continue;
