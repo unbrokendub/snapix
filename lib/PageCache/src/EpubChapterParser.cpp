@@ -398,6 +398,15 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // MUST match the render-time config in ReaderState (and Fb2Parser) or the
     // .idx configHash mismatches and page boundaries drift.
     cfg.firstLineIndent = cfg.bodyLineHeight;
+    // v3.3.0 — hyphenation: dictionary from the EPUB's declared language
+    // (setLanguage strips region subtags + lowercases; empty → no hyphenation,
+    // deterministically).  MUST match ReaderState's render-time cfg.
+    cfg.hyphenate = true;
+    {
+      const std::string& lang = epub_->getLanguage();
+      std::strncpy(cfg.hyphenLang, lang.c_str(), sizeof(cfg.hyphenLang) - 1);
+      cfg.hyphenLang[sizeof(cfg.hyphenLang) - 1] = '\0';
+    }
 
     // v2.0.136 — diagnostic log: dump paginator config so we can verify
     // it matches what ReaderState::renderPageContents uses at render

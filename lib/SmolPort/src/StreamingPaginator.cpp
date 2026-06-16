@@ -1,7 +1,10 @@
 #include "StreamingPaginator.h"
 
+#include <Hyphenation.h>  // v3.3.0 — Liang word hyphenation (ru/en/de/… tries)
+
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 namespace snapix::smolport {
 
@@ -48,6 +51,15 @@ void StreamingPaginator::resetForChapter() {
   // v3.1.0 — the chapter opens a fresh paragraph → its first line indents.
   atParagraphStart_ = true;
   lineIndent_ = 0;
+  // v3.3.0 — set the hyphenation dictionary HERE so the MEASURE walk and the
+  // DRAW pass (both call resetForChapter) always agree.  The global
+  // cachedHyphenator_ can't drift between them because it's re-set right
+  // before each run.  No-op cost when hyphenate is off.
+  // Always set (even to "" → deterministic nullptr) so the global hyphenator
+  // can't retain a previous book's language between MEASURE and DRAW.
+  if (cfg_.hyphenate) {
+    Hyphenation::setLanguage(cfg_.hyphenLang);
+  }
   pendingImagePathLen_ = 0;
   pendingImageWidth_ = 0;
   pendingImageHeight_ = 0;
@@ -595,6 +607,84 @@ ObserverStatus StreamingPaginator::onStreamEnd() {
 // Internal helpers
 // =============================================================================
 
+bool StreamingPaginator::tryHyphenate(const uint8_t* word, size_t len, uint32_t srcOffset,
+                                      bool addLeadingSpace) {
+  if (len < kMinHyphenateBytes || len > kMaxHyphenateBytes) return false;
+
+  // INTRA-PAGE SAFETY (keeps .idx whole-word): the prefix stays on the
+  // current line; the remainder must land on the NEXT line of the SAME page.
+  // Require room for one more full line after this one — otherwise let the
+  // whole word wrap/carry so a fragment is never carried across a page break.
+  const uint16_t bottom = static_cast<uint16_t>(cfg_.pageHeight - cfg_.marginBottom);
+  if (cursorY_ + 2u * currentLineHeight() > bottom) return false;
+
+  const uint16_t spaceWidth = renderer_.getSpaceWidth(styleBits_);
+  const uint16_t pageRightEdge = static_cast<uint16_t>(cfg_.pageWidth - cfg_.marginRight);
+  const uint16_t leadingSpaceWidth = addLeadingSpace ? spaceWidth : 0;
+  if (cursorX_ + leadingSpaceWidth >= pageRightEdge) return false;
+  const uint16_t availPrefix = static_cast<uint16_t>(pageRightEdge - cursorX_ - leadingSpaceWidth);
+
+  // Width of a full fresh line (where the remainder will go).
+  const uint16_t fullLineLeft = static_cast<uint16_t>(cfg_.marginLeft + indentDepth_ * kIndentStep);
+  if (fullLineLeft >= pageRightEdge) return false;
+  const uint16_t fullLineWidth = static_cast<uint16_t>(pageRightEdge - fullLineLeft);
+
+  // Dictionary break points (no arbitrary fallback — only linguistically
+  // valid breaks, so we never split a word at a wrong place).
+  const std::string w(reinterpret_cast<const char*>(word), len);
+  const auto breaks = Hyphenation::breakOffsets(w, /*includeFallback=*/false);
+  if (breaks.empty()) return false;
+
+  const uint16_t hyphenWidth = renderer_.measureWidth(reinterpret_cast<const uint8_t*>("-"), 1,
+                                                       styleBits_);
+
+  // Pick the RIGHTMOST break whose prefix(+hyphen) fits the current line.
+  // Larger offset → longer prefix AND shorter remainder, so the rightmost
+  // fitting break is optimal for both constraints; check its remainder once.
+  for (int i = static_cast<int>(breaks.size()) - 1; i >= 0; --i) {
+    const size_t off = breaks[i].byteOffset;
+    if (off == 0 || off >= len) continue;
+    const bool needHyphen = breaks[i].requiresInsertedHyphen;
+    const uint16_t prefixTextW = renderer_.measureWidth(word, off, styleBits_);
+    const uint16_t prefixW = static_cast<uint16_t>(prefixTextW + (needHyphen ? hyphenWidth : 0));
+    if (prefixW > availPrefix) continue;  // too wide — try a shorter break
+
+    // Prefix fits.  Does the remainder fit a single next line?
+    const size_t remLen = len - off;
+    const uint16_t remW = renderer_.measureWidth(word + off, remLen, styleBits_);
+    if (remW > fullLineWidth) return false;  // remainder needs >1 line — bail
+    // Line-buffer capacity for "prefix" + optional '-'.
+    const size_t needBytes = off + (needHyphen ? 1u : 0u);
+    if (lineTextLen_ + needBytes > kLineTextCapacity || lineWordCount_ >= kLineWordCapacity) {
+      return false;
+    }
+
+    // Append the prefix (+ hyphen) as a slot on the current line.
+    const uint16_t slotOff = lineTextLen_;
+    std::memcpy(lineText_ + slotOff, word, off);
+    if (needHyphen) lineText_[slotOff + off] = '-';
+    lineTextLen_ = static_cast<uint16_t>(slotOff + needBytes);
+    WordSlot& slot = lineWords_[lineWordCount_++];
+    slot.textOffset = slotOff;
+    slot.textLen = static_cast<uint16_t>(needBytes);
+    slot.pixelWidth = prefixW;
+    slot.styleBits = styleBits_;
+    slot.noLeadingSpace = !addLeadingSpace;
+    cursorX_ = static_cast<uint16_t>(cursorX_ + leadingSpaceWidth + prefixW);
+    lineHasContent_ = true;
+
+    // Flush the hyphenated line (justified like any wrapped line); the gate
+    // above guarantees this does NOT fill the page, so the remainder lands on
+    // the next line of the same page via a normal add.
+    flushLine(/*justify=*/true);
+    // remainder source offset = srcOffset + off (only matters if it later
+    // carried — it won't, by the intra-page gate — but keep it accurate).
+    (void)tryAddWord(word + off, remLen, srcOffset + static_cast<uint32_t>(off));
+    return true;
+  }
+  return false;  // no break fit the current line — caller wraps whole word
+}
+
 bool StreamingPaginator::tryAddWord(const uint8_t* word, size_t len, uint32_t srcOffset) {
   if (len == 0) return true;
 
@@ -663,6 +753,12 @@ bool StreamingPaginator::tryAddWord(const uint8_t* word, size_t len, uint32_t sr
   // next word not fitting (so it's NOT a paragraph-end and should be
   // full-justified to fill out to the right margin).
   if (lineWordCount_ > 0) {
+    // v3.3.0 — before wrapping the whole word, try to hyphenate it so a
+    // prefix fills the current line.  Only succeeds when both halves stay on
+    // this page (see tryHyphenate); otherwise falls through to the wrap.
+    if (cfg_.hyphenate && tryHyphenate(word, len, srcOffset, addLeadingSpace)) {
+      return true;
+    }
     flushLine(/*justify=*/true);
     if (pageFull_) {
       // Page filled by the flush — stash the word for the next page.

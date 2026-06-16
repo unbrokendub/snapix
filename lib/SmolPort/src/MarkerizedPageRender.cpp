@@ -341,7 +341,9 @@ uint16_t computePageIndexConfigHash(const StreamingPaginatorConfig& cfg, int fon
     uint16_t paragraphSpacing;
     uint16_t firstLineIndent;   // v3.1.0 — "красная строка" (layout-affecting)
     uint8_t  fakeBold;          // v2.0.146 — width-affecting setting
-    uint8_t  reserved[1];        // pad to keep struct alignment stable
+    uint8_t  hyphenate;         // v3.3.0 — word hyphenation on/off (layout-affecting)
+    char     hyphenLang[8];     // v3.3.0 — dictionary selects break points
+    uint8_t  reserved[2];        // pad to keep struct alignment stable
   } pc{};
   pc.fontId = fontId;
   pc.pageWidth = cfg.pageWidth;
@@ -355,6 +357,8 @@ uint16_t computePageIndexConfigHash(const StreamingPaginatorConfig& cfg, int fon
   pc.paragraphSpacing = cfg.paragraphSpacing;
   pc.firstLineIndent = cfg.firstLineIndent;
   pc.fakeBold = fakeBold;
+  pc.hyphenate = cfg.hyphenate ? 1 : 0;
+  std::memcpy(pc.hyphenLang, cfg.hyphenLang, sizeof(pc.hyphenLang));
   const uint32_t h32 = fnv1a32(reinterpret_cast<const uint8_t*>(&pc), sizeof(pc));
   // Fold 32→16 by XOR high half with low half.  Reduces hash collisions
   // for sequential changes (font-size +/-1 etc.) compared to taking

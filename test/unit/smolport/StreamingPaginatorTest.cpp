@@ -1010,6 +1010,78 @@ int main() {
     runner.expectFalse(anyOrnament, "T41_no_draw_when_suppressed");
   }
 
+  // -----------------------------------------------------------------------
+  // v3.3.0 — word hyphenation (mock dictionary breaks every char from off 3
+  // to len-3, each with a visible hyphen).  stdConfig: 100x80, margin 5,
+  // 6 px/char, 4 px space, lineHeight 12 -> right edge 95, innerW 90.
+  // -----------------------------------------------------------------------
+  // T42: an overflowing word is split — prefix(+'-') on the current line, the
+  // remainder on the next, with NO characters lost.
+  {
+    auto cfg = stdConfig();
+    cfg.hyphenate = true;
+    std::strncpy(cfg.hyphenLang, "xx", sizeof(cfg.hyphenLang));  // mock ignores
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);
+    // "aa" then a 14-char word that overflows the line and must hyphenate.
+    feedText(p, "aa cccccccccccccc");
+    p.onParagraphBreak();
+    p.onStreamEnd();
+
+    // Exactly one drawn token ends with '-' (the hyphenated prefix).
+    int hyphenated = 0;
+    size_t cCount = 0;
+    bool prefixThenRemainderOnDifferentLines = false;
+    uint16_t hyphenY = 0;
+    for (const auto& d : fr.drawCalls) {
+      for (char ch : d.text) if (ch == 'c') ++cCount;
+      if (!d.text.empty() && d.text.back() == '-') { ++hyphenated; hyphenY = d.y; }
+    }
+    for (const auto& d : fr.drawCalls) {
+      // remainder = pure 'c' run on a LOWER line than the hyphenated prefix.
+      if (hyphenated && d.y > hyphenY && d.text.find('c') != std::string::npos) {
+        prefixThenRemainderOnDifferentLines = true;
+      }
+    }
+    runner.expectEq(1, hyphenated, "T42_one_hyphenated_prefix");
+    runner.expectEq(size_t(14), cCount, "T42_no_chars_lost");  // 14 c's, hyphen extra
+    runner.expectTrue(prefixThenRemainderOnDifferentLines, "T42_remainder_on_next_line");
+  }
+
+  // T43: intra-page safety — when only ONE line is left on the page, the word
+  // must NOT be hyphenated across the page boundary (it wraps/carries whole).
+  {
+    auto cfg = stdConfig();
+    cfg.hyphenate = true;
+    std::strncpy(cfg.hyphenLang, "xx", sizeof(cfg.hyphenLang));
+    // pageHeight so only ~1 content line fits: margins 5+5=10, lineHeight 12
+    // -> bottom=cfg.pageHeight-5; need cursorY + 2*12 > bottom on line 1.
+    cfg.pageHeight = 28;  // bottom=23; first line top=5; 5+24=29 > 23 -> gate blocks
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);
+    feedText(p, "aa cccccccccccccc");
+    // No hyphen should appear (gate prevents cross-page split).
+    bool anyHyphen = false;
+    for (const auto& d : fr.drawCalls)
+      if (!d.text.empty() && d.text.back() == '-') anyHyphen = true;
+    runner.expectFalse(anyHyphen, "T43_no_hyphen_when_one_line_left");
+  }
+
+  // T44: hyphenate=false keeps the old whole-word wrap (no '-').
+  {
+    auto cfg = stdConfig();
+    cfg.hyphenate = false;
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);
+    feedText(p, "aa cccccccccccccc");
+    p.onParagraphBreak();
+    p.onStreamEnd();
+    bool anyHyphen = false;
+    for (const auto& d : fr.drawCalls)
+      if (!d.text.empty() && d.text.back() == '-') anyHyphen = true;
+    runner.expectFalse(anyHyphen, "T44_no_hyphen_when_disabled");
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }

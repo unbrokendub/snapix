@@ -308,13 +308,17 @@ foreach(TEST_SRC ${TEST_SOURCES})
     )
   elseif(TEST_NAME STREQUAL "StreamingPaginatorTest")
     # v2.0.115 Phase R1 — event-driven layouter (host-side, no Arduino deps).
+    # v3.3.0 — mock_hyphenation.cpp supplies Hyphenation:: symbols with
+    # deterministic break points (avoids linking the real language tries).
     add_executable(${TEST_NAME}
       ${TEST_SRC}
       ${PROJECT_ROOT}/lib/SmolPort/src/StreamingPaginator.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/unit/smolport/mock_hyphenation.cpp
       ${TEST_HELPERS}
     )
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/lib/SmolPort/src
+      ${PROJECT_ROOT}/lib/Hyphenation/src
     )
   elseif(TEST_NAME STREQUAL "MarkerizeChapterTest")
     # v2.0.116 Phase R2 — markerize side-channel.  Drives HtmlStripper over
@@ -341,10 +345,12 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/lib/SmolPort/src/MarkerStream.cpp
       ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
       ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/unit/smolport/mock_hyphenation.cpp
       ${TEST_HELPERS}
     )
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/lib/SmolPort/src
+      ${PROJECT_ROOT}/lib/Hyphenation/src
     )
   elseif(TEST_NAME STREQUAL "StreamingChapterRendererTest")
     # v2.0.119 Phase R3.1 — chapter render orchestrator + full pipeline test.
@@ -358,10 +364,12 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/lib/SmolPort/src/MarkerStream.cpp
       ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
       ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/unit/smolport/mock_hyphenation.cpp
       ${TEST_HELPERS}
     )
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/lib/SmolPort/src
+      ${PROJECT_ROOT}/lib/Hyphenation/src
     )
   else()
     add_executable(${TEST_NAME} ${TEST_SRC} ${TEST_HELPERS})

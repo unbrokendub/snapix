@@ -285,7 +285,11 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // consumes a full ornament line ("* * *") plus air above/below instead of a
 // single paragraphSpacing gap, shifting where page boundaries fall in any
 // chapter containing an <hr>.  Rebuild forces .idx to match.
-constexpr uint16_t kPageIndexVersion = 12;
+// v3.3.0: bumped 12 → 13.  Word hyphenation — when enabled the line breaker
+// packs prefixes onto lines that previously wrapped whole, changing how many
+// lines fit per page and therefore where page boundaries fall.  configHash
+// also now folds in hyphenate + hyphenLang.  Rebuild forces .idx to match.
+constexpr uint16_t kPageIndexVersion = 13;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

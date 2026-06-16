@@ -90,6 +90,20 @@ struct StreamingPaginatorConfig {
   // wraps, <br>, verse lines, headings, centered text, or list/quote blocks
   // (those already carry their own indentation).  Classic book typography.
   uint16_t firstLineIndent;
+
+  // v3.3.0 — word hyphenation.  When `hyphenate` is true the paginator splits
+  // an overflowing word at a dictionary break point, drawing "pre-" on the
+  // current line and the remainder on the next, instead of leaving a ragged
+  // gap (Liang patterns via the Hyphenation lib; `hyphenLang` selects the
+  // dictionary, e.g. "ru"/"en"/"de").  The paginator calls
+  // Hyphenation::setLanguage(hyphenLang) itself in resetForChapter so the
+  // MEASURE walk and the DRAW pass always use the SAME dictionary (the global
+  // can't drift between them).  Hyphenation NEVER splits across a page
+  // boundary — see the gate in tryAddWord — so .idx byte offsets (which are
+  // always whole-word) are unaffected; only intra-page line packing changes.
+  // Default false (zero-init) keeps the old ragged-justify layout for tests.
+  bool hyphenate;
+  char hyphenLang[8];
 };
 
 // Renderer abstraction — paginator delegates measurement + drawing here.
@@ -592,6 +606,18 @@ class StreamingPaginator : public MarkerObserver {
   // Default 0 keeps the function callable from sites that don't track
   // source offsets (unit tests using raw `feedText`).
   bool tryAddWord(const uint8_t* word, size_t len, uint32_t srcOffset = 0);
+
+  // v3.3.0 — try to hyphenate an overflowing word: draw "pre-" on the current
+  // line and let the remainder flow onto the next line.  Returns true if the
+  // word was split + placed; false → caller falls back to whole-word wrap.
+  // Only ever splits when BOTH pieces stay on the SAME page (the remainder
+  // fits one next line), so .idx page boundaries remain whole-word.  See the
+  // hyphenate fields in StreamingPaginatorConfig.
+  bool tryHyphenate(const uint8_t* word, size_t len, uint32_t srcOffset, bool addLeadingSpace);
+  // Shortest word (bytes) worth a dictionary lookup — skips "и"/"на"/etc.
+  static constexpr size_t kMinHyphenateBytes = 10;
+  // Longest word we attempt to hyphenate (bytes); longer falls back to wrap.
+  static constexpr size_t kMaxHyphenateBytes = 80;
 
   // Flush accumulated line: draw words (via renderer_), advance cursorY by
   // the appropriate line height, reset line buffer.  Detects page overflow

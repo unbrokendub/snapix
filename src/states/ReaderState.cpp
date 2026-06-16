@@ -2529,6 +2529,19 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           // height.  MUST match the upfront MEASURE-walk config in
           // EpubChapterParser/Fb2Parser or the .idx configHash mismatches.
           cfg.firstLineIndent = cfg.bodyLineHeight;
+          // v3.3.0 — hyphenation language.  MUST match the MEASURE-walk cfg in
+          // EpubChapterParser (EPUB declared language) / Fb2Parser ("ru") or
+          // page boundaries drift between the .idx build and this render.
+          cfg.hyphenate = true;
+          {
+            const char* lang = "ru";  // FB2 default
+            if (contentType == ContentType::Epub && core.content.asEpub() &&
+                core.content.asEpub()->getEpub()) {
+              lang = core.content.asEpub()->getEpub()->getLanguage().c_str();
+            }
+            std::strncpy(cfg.hyphenLang, lang, sizeof(cfg.hyphenLang) - 1);
+            cfg.hyphenLang[sizeof(cfg.hyphenLang) - 1] = '\0';
+          }
 
           // v2.0.136 — diagnostic: dump R3.6 paginator config so a
           // mismatch with R4.c's idx-build cfg becomes immediately
