@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <new>  // v3.6.1 — std::nothrow for OOM-safe ditherer allocation
 
 // Helper functions
 uint8_t quantize(int gray, int x, int y);
@@ -114,9 +115,11 @@ class Atkinson1BitDitherer {
 class AtkinsonDitherer {
  public:
   explicit AtkinsonDitherer(int width) : width(width) {
-    errorRow0 = new int16_t[width + 4]();  // Current row
-    errorRow1 = new int16_t[width + 4]();  // Next row
-    errorRow2 = new int16_t[width + 4]();  // Row after next
+    // v3.6.1 — nothrow: an OOM here must NOT abort/reboot during image render.
+    // Construction sites check valid() and fall back to non-dithered output.
+    errorRow0 = new (std::nothrow) int16_t[width + 4]();  // Current row
+    errorRow1 = new (std::nothrow) int16_t[width + 4]();  // Next row
+    errorRow2 = new (std::nothrow) int16_t[width + 4]();  // Row after next
   }
 
   ~AtkinsonDitherer() {
@@ -124,6 +127,9 @@ class AtkinsonDitherer {
     delete[] errorRow1;
     delete[] errorRow2;
   }
+
+  // v3.6.1 — true only if all error-row buffers allocated.
+  bool valid() const { return errorRow0 && errorRow1 && errorRow2; }
   // **1. EXPLICITLY DELETE THE COPY CONSTRUCTOR**
   AtkinsonDitherer(const AtkinsonDitherer& other) = delete;
 
@@ -215,14 +221,18 @@ class AtkinsonDitherer {
 class FloydSteinbergDitherer {
  public:
   explicit FloydSteinbergDitherer(int width) : width(width), rowCount(0) {
-    errorCurRow = new int16_t[width + 2]();  // +2 for boundary handling
-    errorNextRow = new int16_t[width + 2]();
+    // v3.6.1 — nothrow; see AtkinsonDitherer.  Sites check valid().
+    errorCurRow = new (std::nothrow) int16_t[width + 2]();   // +2 for boundary handling
+    errorNextRow = new (std::nothrow) int16_t[width + 2]();
   }
 
   ~FloydSteinbergDitherer() {
     delete[] errorCurRow;
     delete[] errorNextRow;
   }
+
+  // v3.6.1 — true only if both error-row buffers allocated.
+  bool valid() const { return errorCurRow && errorNextRow; }
 
   // **1. EXPLICITLY DELETE THE COPY CONSTRUCTOR**
   FloydSteinbergDitherer(const FloydSteinbergDitherer& other) = delete;

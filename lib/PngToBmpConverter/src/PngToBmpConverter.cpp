@@ -278,6 +278,13 @@ void pngInitCallback(pngle_t* pngle, uint32_t w, uint32_t h) {
   // Skip ditherer allocation in quickMode for faster preview
   if (!ctx->quickMode) {
     ctx->ditherer = new (std::nothrow) AtkinsonDitherer(ctx->outWidth);
+    // v3.6.1 — also reject a partially-allocated ditherer (its internal
+    // error-row buffers are now nothrow too, so the object can exist with null
+    // rows).  delete() frees whatever rows did allocate.
+    if (ctx->ditherer && !ctx->ditherer->valid()) {
+      delete ctx->ditherer;
+      ctx->ditherer = nullptr;
+    }
     if (!ctx->ditherer) {
       LOG_ERR(TAG, "Failed to allocate ditherer");
       free(ctx->srcRowBuffer);

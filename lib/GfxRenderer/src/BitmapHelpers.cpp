@@ -339,6 +339,20 @@ static bool bmpTo1BitBmpScaledImpl(SrcF& srcFile, DstF& dstFile, int targetMaxWi
   const int srcWidth = leI32(hdr + 18);
   const int32_t rawHeight = leI32(hdr + 22);
 
+  // v3.6.1 — validate header dimensions before they feed size math.
+  // cover.bmp is normally self-generated (bounded by the PNG/JPEG decode
+  // caps), but a truncated/garbage file — e.g. power loss mid-write — could
+  // carry an absurd width/height.  Left unchecked, srcWidth<=0 divides by
+  // zero below (outWidth), and a huge srcWidth/srcHeight overflows the
+  // `srcRowBytes * maxSrcRowsPerOut` row-buffer size (→ undersized malloc →
+  // heap overwrite while reading rows).  The lower bound on rawHeight also
+  // rules out the INT32_MIN negation UB at `-rawHeight`.
+  static constexpr int kMaxBmpDim = 8192;
+  if (srcWidth <= 0 || srcWidth > kMaxBmpDim || rawHeight < -kMaxBmpDim) {
+    LOG_ERR(TAG, "Implausible BMP dimensions: w=%d h=%d", srcWidth, rawHeight);
+    return false;
+  }
+
   // Negative height = top-down BMP (rows stored top to bottom)
   // Positive height = bottom-up BMP (rows stored bottom to top)
   // We only support top-down BMPs since that's what our cover.bmp generator produces

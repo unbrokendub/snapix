@@ -1,6 +1,7 @@
 #include "Utf8Nfc.h"
 
 #include <cstring>
+#include <new>  // v3.6.1 — std::nothrow for OOM-safe codepoint buffer
 
 #include "Utf8NfcTable.h"
 
@@ -121,7 +122,11 @@ size_t utf8NormalizeNfc(char* buf, size_t len) {
   // Use stack buffer for small strings, heap for large ones
   constexpr size_t STACK_SIZE = 256;
   uint32_t stackBuf[STACK_SIZE];
-  uint32_t* cps = (len <= STACK_SIZE) ? stackBuf : new uint32_t[len];
+  // v3.6.1 — nothrow: this runs during TOC/metadata parsing where a low-heap
+  // moment is possible.  NFC composition is purely cosmetic, so on OOM skip it
+  // (leave the already-valid UTF-8 untouched) rather than throw → reboot.
+  uint32_t* cps = (len <= STACK_SIZE) ? stackBuf : new (std::nothrow) uint32_t[len];
+  if (cps == nullptr) return len;
 
   size_t cpCount = 0;
   size_t pos = 0;

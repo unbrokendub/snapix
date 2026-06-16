@@ -462,10 +462,23 @@ BmpReaderError Bitmap::parseHeaders() {
   // Create ditherer if enabled (only for 2-bit output)
   // Use OUTPUT dimensions for dithering (after prescaling)
   if (bpp > 2 && dithering) {
+    // v3.6.1 — OOM-safe: never abort/reboot if the dither buffers can't be
+    // allocated under heap pressure.  On failure (or partial alloc) drop the
+    // ditherer; the row loop already falls back to non-dithered output when
+    // both ditherer pointers are null (lower quality, but the image still
+    // renders and the device stays up).
     if (USE_ATKINSON) {
-      atkinsonDitherer = new AtkinsonDitherer(width);
+      atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(width);
+      if (atkinsonDitherer && !atkinsonDitherer->valid()) {
+        delete atkinsonDitherer;
+        atkinsonDitherer = nullptr;
+      }
     } else {
-      fsDitherer = new FloydSteinbergDitherer(width);
+      fsDitherer = new (std::nothrow) FloydSteinbergDitherer(width);
+      if (fsDitherer && !fsDitherer->valid()) {
+        delete fsDitherer;
+        fsDitherer = nullptr;
+      }
     }
   }
 
