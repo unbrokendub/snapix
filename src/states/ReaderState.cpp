@@ -2514,7 +2514,15 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           // screen so layout decisions match the legacy Page tree's
           // assumptions.  Heading uses 1.5× line height; arbitrary —
           // R3.6 will tune against the legacy renderer's heading metrics.
-          const uint16_t bodyLineH = static_cast<uint16_t>(renderer_.getLineHeight(fontId));
+          // v3.5.1 — apply the user's line-spacing (lineCompression) to the
+          // body line height.  The v3 streaming path previously used the raw
+          // font height, so the Line Spacing setting had NO effect on EPUB/FB2
+          // (only the legacy ParsedText path honoured it).  MUST match the
+          // MEASURE-walk config in EpubChapterParser/Fb2Parser (config_.
+          // lineCompression) — both derive from settings.getLineCompression().
+          const float lineComp = core.settings.getLineCompression();
+          const uint16_t bodyLineH =
+              static_cast<uint16_t>(renderer_.getLineHeight(fontId) * lineComp);
           snapix::smolport::StreamingPaginatorConfig cfg{};
           cfg.pageWidth = static_cast<uint16_t>(renderer_.getScreenWidth());
           cfg.pageHeight = static_cast<uint16_t>(renderer_.getScreenHeight());

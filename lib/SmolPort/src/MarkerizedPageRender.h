@@ -293,7 +293,11 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // status font's real height instead of a fixed 23 px, so marginBottom (and
 // thus the content height / page boundaries) shifts for the bundled themes.
 // Rebuild forces .idx to match the new pagination.
-constexpr uint16_t kPageIndexVersion = 14;
+// v3.5.1: bumped 14 → 15.  BUGFIX — the streaming bodyLineHeight now applies
+// lineCompression (Line Spacing), which it ignored before, so page boundaries
+// change for any non-default spacing.  Old indices were built with the raw
+// (uncompressed) line height; rebuild forces them to match.
+constexpr uint16_t kPageIndexVersion = 15;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

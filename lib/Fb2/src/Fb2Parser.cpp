@@ -430,7 +430,9 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
         // change in EpubChapterParser.cpp for the rationale (avoids the
         // configHash mismatch and pageCount mismatch that caused the
         // v2.0.130 white-screen-on-page-turn bug).
-        const uint16_t bodyLineH = static_cast<uint16_t>(renderer_.getLineHeight(config_.fontId));
+        // v3.5.1 — apply lineCompression (Line Spacing); see EpubChapterParser.
+        const uint16_t bodyLineH =
+            static_cast<uint16_t>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression);
         snapix::smolport::StreamingPaginatorConfig cfg{};
         cfg.pageWidth = static_cast<uint16_t>(renderer_.getScreenWidth());
         cfg.pageHeight = static_cast<uint16_t>(renderer_.getScreenHeight());

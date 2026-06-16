@@ -383,7 +383,11 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // (b) the pageCount we write here will differ from what the renderer
     // produces — R4.b would then emit empty Pages for nonexistent pages
     // and the legacy fallback path renders them as white screen.
-    const uint16_t bodyLineH = static_cast<uint16_t>(renderer_.getLineHeight(config_.fontId));
+    // v3.5.1 — apply lineCompression (Line Spacing) so the MEASURE walk's page
+    // boundaries match the render path; previously raw height ignored the
+    // setting for EPUB.  Mirrors ReaderState's render-time cfg.
+    const uint16_t bodyLineH =
+        static_cast<uint16_t>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression);
     snapix::smolport::StreamingPaginatorConfig cfg{};
     cfg.pageWidth = static_cast<uint16_t>(renderer_.getScreenWidth());
     cfg.pageHeight = static_cast<uint16_t>(renderer_.getScreenHeight());
