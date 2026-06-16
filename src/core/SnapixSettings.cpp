@@ -161,7 +161,7 @@ Result<void> Settings::load(drivers::Storage& storage) {
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, _reserved, uint8_t(2));
     if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPodValidated(inputFile, lineSpacing, uint8_t(4));
+    serialization::readPodValidated(inputFile, lineSpacing, uint8_t(6));
     if (++settingsRead >= fileSettingsCount) break;
     // Read themeName as fixed-length string
     inputFile.read(reinterpret_cast<uint8_t*>(themeName), sizeof(themeName));
@@ -377,7 +377,7 @@ bool Settings::loadFromFile() {
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, _reserved, uint8_t(2));
     if (++settingsRead >= fileSettingsCount) break;
-    serialization::readPodValidated(inputFile, lineSpacing, uint8_t(4));
+    serialization::readPodValidated(inputFile, lineSpacing, uint8_t(6));
     if (++settingsRead >= fileSettingsCount) break;
     inputFile.read(reinterpret_cast<uint8_t*>(themeName), sizeof(themeName));
     themeName[sizeof(themeName) - 1] = '\0';

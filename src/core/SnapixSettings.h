@@ -60,7 +60,18 @@ struct Settings {
   enum TextLayout : uint8_t { LayoutCompact = 0, LayoutStandard = 1, LayoutLarge = 2 };
 
   // Line spacing presets
-  enum LineSpacing : uint8_t { SpacingCompact = 0, SpacingNormal = 1, SpacingRelaxed = 2, SpacingLarge = 3 };
+  // v3.4.0 — XCompact/XXCompact appended (indices 4/5) so existing persisted
+  // values 0-3 keep their meaning (no settings migration).  They are tighter
+  // than Compact; the UI list therefore isn't strictly tight→loose, but
+  // append = backward-compatible.
+  enum LineSpacing : uint8_t {
+    SpacingCompact = 0,
+    SpacingNormal = 1,
+    SpacingRelaxed = 2,
+    SpacingLarge = 3,
+    SpacingXCompact = 4,
+    SpacingXXCompact = 5,
+  };
 
   // Short power button press actions
   enum PowerButtonAction : uint8_t { PowerIgnore = 0, PowerSleep = 1, PowerPageTurn = 2 };
@@ -170,6 +181,10 @@ struct Settings {
 
   float getLineCompression() const {
     switch (lineSpacing) {
+      case SpacingXXCompact:
+        return 0.70f;  // v3.4.0 — tightest
+      case SpacingXCompact:
+        return 0.78f;  // v3.4.0
       case SpacingCompact:
         return 0.85f;
       case SpacingNormal:
