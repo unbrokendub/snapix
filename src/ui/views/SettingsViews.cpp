@@ -19,7 +19,7 @@ const ReaderSettingsView::SettingDef ReaderSettingsView::DEFS[SETTING_COUNT] = {
     {"Theme", SettingType::ThemeSelect, nullptr, 0},
     {"Font Size", SettingType::Enum, FONT_SIZE_VALUES, 4},
     {"Text Layout", SettingType::Enum, TEXT_LAYOUT_VALUES, 3},
-    {"Line Spacing", SettingType::Enum, LINE_SPACING_VALUES, 6},  // v3.4.0 +X/XX-Compact
+    {"Line Spacing", SettingType::Enum, LINE_SPACING_VALUES, 10},  // v3.5.0 — 0.50..0.95 dial
     {"Text Anti-Aliasing", SettingType::Toggle, nullptr, 0},
     {"Paragraph Alignment", SettingType::Enum, ALIGNMENT_VALUES, 4},
     {"Hyphenation", SettingType::Toggle, nullptr, 0},

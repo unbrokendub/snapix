@@ -60,18 +60,15 @@ struct Settings {
   enum TextLayout : uint8_t { LayoutCompact = 0, LayoutStandard = 1, LayoutLarge = 2 };
 
   // Line spacing presets
-  // v3.4.0 — XCompact/XXCompact appended (indices 4/5) so existing persisted
-  // values 0-3 keep their meaning (no settings migration).  They are tighter
-  // than Compact; the UI list therefore isn't strictly tight→loose, but
-  // append = backward-compatible.
-  enum LineSpacing : uint8_t {
-    SpacingCompact = 0,
-    SpacingNormal = 1,
-    SpacingRelaxed = 2,
-    SpacingLarge = 3,
-    SpacingXCompact = 4,
-    SpacingXXCompact = 5,
-  };
+  // v3.5.0 — line spacing is now a 10-step NUMERIC dial (replaces the old
+  // named Compact/Normal/… levels, which ran out of names as users asked for
+  // ever-tighter spacing).  `lineSpacing` is an index 0..9 into
+  // kLineCompressionValues below: 0.50× (tightest) → 0.95× in 0.05 steps.
+  // The UI shows the raw multiplier so the user dials it in by eye.
+  static constexpr uint8_t kLineSpacingCount = 10;
+  static constexpr uint8_t kDefaultLineSpacing = 8;  // 0.90× — comfortable default
+  static constexpr float kLineCompressionValues[kLineSpacingCount] = {
+      0.50f, 0.55f, 0.60f, 0.65f, 0.70f, 0.75f, 0.80f, 0.85f, 0.90f, 0.95f};
 
   // Short power button press actions
   enum PowerButtonAction : uint8_t { PowerIgnore = 0, PowerSleep = 1, PowerPageTurn = 2 };
@@ -98,7 +95,7 @@ struct Settings {
   uint8_t showImages = 1;
   uint8_t startupBehavior = StartupLastDocument;
   uint8_t _reserved = 0;  // was coverDithering, kept for serialization compatibility
-  uint8_t lineSpacing = SpacingNormal;
+  uint8_t lineSpacing = kDefaultLineSpacing;  // v3.5.0 — index into kLineCompressionValues
   char themeName[32] = "light";
   char lastBookPath[256] = "";          // Path to last opened book
   uint8_t pendingTransition = 0;        // 0=none, 1=UI, 2=Reader
@@ -180,22 +177,8 @@ struct Settings {
   }
 
   float getLineCompression() const {
-    switch (lineSpacing) {
-      case SpacingXXCompact:
-        return 0.70f;  // v3.4.0 — tightest
-      case SpacingXCompact:
-        return 0.78f;  // v3.4.0
-      case SpacingCompact:
-        return 0.85f;
-      case SpacingNormal:
-        return 0.95f;
-      case SpacingRelaxed:
-        return 1.10f;
-      case SpacingLarge:
-        return 1.20f;
-      default:
-        return 0.95f;
-    }
+    const uint8_t idx = (lineSpacing < kLineSpacingCount) ? lineSpacing : kDefaultLineSpacing;
+    return kLineCompressionValues[idx];
   }
 
   RenderConfig getRenderConfig(const Theme& theme, uint16_t viewportWidth, uint16_t viewportHeight) const;

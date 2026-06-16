@@ -3076,11 +3076,23 @@ ReaderState::Viewport ReaderState::getReaderViewport(bool showStatusBar) const {
     vp.marginTop = std::max(2, vp.marginTop - static_cast<int>(theme.readerMarginTopReduction));
   }
   if (showStatusBar) {
-    // The legacy default of 23 px is sized for the small14 status font (28 px
-    // tall, descender at screen edge).  Themes with a smaller status font can
-    // override via theme.statusBarReservedHeight to free up content area for
-    // an extra line.  A zero value falls back to the legacy constant.
-    const int reserved = (theme.statusBarReservedHeight > 0) ? theme.statusBarReservedHeight : statusBarMargin;
+    int reserved;
+    if (theme.statusBarReservedHeight > 0) {
+      reserved = theme.statusBarReservedHeight;  // explicit per-theme override
+    } else {
+      // v3.5.0 — size the reserve to the status font's ACTUAL height instead
+      // of the fixed 23 px.  The constant was set for a 28 px status font, but
+      // the bundled themes use small ~10-14 px status fonts, so 23 px left an
+      // empty band above the bar — most visible at tight line spacing.  Sizing
+      // to the font reclaims that band (so a tightly-spaced page fits one more
+      // line) and never clips a taller status font.  Geometry: readerStatusBar
+      // draws at textY = screenHeight - marginBottom - 2 and extends DOWNWARD
+      // by the status line height (+ any positive statusBarOffsetY), so the
+      // reserve must cover that; +4 px breathing room, floor 10.
+      const int sh = renderer_.getEffectiveLineHeight(theme.statusFontId);
+      const int off = (theme.statusBarOffsetY > 0) ? static_cast<int>(theme.statusBarOffsetY) : 0;
+      reserved = std::max(sh + 4 + off, 10);
+    }
     vp.marginBottom += reserved;
   }
   vp.width = renderer_.getScreenWidth() - vp.marginLeft - vp.marginRight;

@@ -289,7 +289,11 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // packs prefixes onto lines that previously wrapped whole, changing how many
 // lines fit per page and therefore where page boundaries fall.  configHash
 // also now folds in hyphenate + hyphenLang.  Rebuild forces .idx to match.
-constexpr uint16_t kPageIndexVersion = 13;
+// v3.5.0: bumped 13 → 14.  The reader status-bar reserve is now sized to the
+// status font's real height instead of a fixed 23 px, so marginBottom (and
+// thus the content height / page boundaries) shifts for the bundled themes.
+// Rebuild forces .idx to match the new pagination.
+constexpr uint16_t kPageIndexVersion = 14;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

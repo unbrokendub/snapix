@@ -115,11 +115,10 @@ struct ReaderSettingsView {
   // Static setting definitions
   static constexpr const char* const FONT_SIZE_VALUES[] = {"XSmall", "Small", "Normal", "Large"};
   static constexpr const char* const TEXT_LAYOUT_VALUES[] = {"Compact", "Standard", "Large"};
-  // v3.4.0 — X-Compact/XX-Compact appended (tighter than Compact); index
-  // order matches the LineSpacing enum so persisted values stay valid.
-  static constexpr const char* const LINE_SPACING_VALUES[] = {"Compact",   "Normal",
-                                                              "Relaxed",   "Large",
-                                                              "X-Compact", "XX-Compact"};
+  // v3.5.0 — line spacing is a 10-step numeric dial (0.50×..0.95×); labels
+  // are the raw multiplier, index matches SnapixSettings::kLineCompressionValues.
+  static constexpr const char* const LINE_SPACING_VALUES[] = {
+      "0.50", "0.55", "0.60", "0.65", "0.70", "0.75", "0.80", "0.85", "0.90", "0.95"};
   static constexpr const char* const ALIGNMENT_VALUES[] = {"Justified", "Left", "Center", "Right"};
   static constexpr const char* const STATUS_BAR_VALUES[] = {"None", "Title", "Chapter"};
   static constexpr const char* const ORIENTATION_VALUES[] = {"Portrait", "Landscape CW", "Inverted", "Landscape CCW"};
