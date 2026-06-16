@@ -79,6 +79,11 @@ class PageCountingObserver : public MarkerObserver {
   ObserverStatus onBoldEnd() override      { bytesSeen_ += 2; return checkAdvance(inner_.onBoldEnd()); }
   ObserverStatus onItalicStart() override  { bytesSeen_ += 2; return checkAdvance(inner_.onItalicStart()); }
   ObserverStatus onItalicEnd() override    { bytesSeen_ += 2; return checkAdvance(inner_.onItalicEnd()); }
+  // v3.6.0 — super/subscript markers are 2 bytes ([0x01, tag]).
+  ObserverStatus onSuperStart() override   { bytesSeen_ += 2; return checkAdvance(inner_.onSuperStart()); }
+  ObserverStatus onSuperEnd() override     { bytesSeen_ += 2; return checkAdvance(inner_.onSuperEnd()); }
+  ObserverStatus onSubStart() override     { bytesSeen_ += 2; return checkAdvance(inner_.onSubStart()); }
+  ObserverStatus onSubEnd() override       { bytesSeen_ += 2; return checkAdvance(inner_.onSubEnd()); }
   ObserverStatus onQuoteStart() override   { bytesSeen_ += 2; return checkAdvance(inner_.onQuoteStart()); }
   ObserverStatus onQuoteEnd() override     { bytesSeen_ += 2; return checkAdvance(inner_.onQuoteEnd()); }
   // v2.0.145 — Indent / Center markers.  Each is a 2-byte [01, tag].

@@ -12,10 +12,11 @@ namespace snapix::smolport {
 GfxRendererPaginatorAdapter::GfxRendererPaginatorAdapter(const GfxRenderer& renderer, int bodyFontId,
                                                           int headingFontId, bool pixelState,
                                                           ResolveImagePathFn resolveImagePath,
-                                                          uint8_t fakeBoldMode)
+                                                          uint8_t fakeBoldMode, int superSubFontId)
     : renderer_(renderer),
       bodyFontId_(bodyFontId),
       headingFontId_(headingFontId),
+      superSubFontId_(superSubFontId),
       pixelState_(pixelState),
       resolveImagePath_(std::move(resolveImagePath)),
       fakeBoldMode_(fakeBoldMode) {}
@@ -39,9 +40,14 @@ bool GfxRendererPaginatorAdapter::applyFakeBoldSubstitution(EpdFontFamily::Style
 
 void GfxRendererPaginatorAdapter::resolveStyle(uint8_t styleBits, int* outFontId,
                                                 EpdFontFamily::Style* outStyle) const {
-  // Heading wins over inline styles for fontId selection — same convention
-  // as the legacy ChapterHtmlSlimParser layout.
-  if (styleBits & kStyleHeading) {
+  // v3.6.0 — super/subscript use the smaller built-in font (wins over heading
+  // too, e.g. a footnote ref inside a heading).  Falls back to the body font
+  // when no small font was configured.
+  if ((styleBits & (kStyleSuper | kStyleSub)) && superSubFontId_ != 0) {
+    *outFontId = superSubFontId_;
+  } else if (styleBits & kStyleHeading) {
+    // Heading wins over inline styles for fontId selection — same convention
+    // as the legacy ChapterHtmlSlimParser layout.
     *outFontId = headingFontId_;
   } else {
     *outFontId = bodyFontId_;
@@ -119,6 +125,19 @@ void GfxRendererPaginatorAdapter::drawWord(uint16_t x, uint16_t y, const uint8_t
   char buf[kWordBufBytes];
   copyTermBytes(text, len, buf, sizeof(buf));
 
+  // v3.6.0 — super/subscript vertical placement.  drawText's y is the glyph
+  // top; the body baseline sits at y + ascender(body).  Superscript: draw the
+  // small font at the line top (offset 0) so it rides above the body baseline.
+  // Subscript: shift down so the small glyph's baseline aligns with the body
+  // baseline (offset = ascender(body) − ascender(small)), placing it low.
+  int yAdj = 0;
+  if (styleBits & kStyleSub) {
+    const int bodyAsc = renderer_.getFontAscenderSize(bodyFontId_);
+    const int smallAsc = renderer_.getFontAscenderSize(fontId);
+    if (bodyAsc > smallAsc) yAdj = bodyAsc - smallAsc;
+  }
+  const int yy = static_cast<int>(y) + yAdj;
+
   // v2.0.146 — fake-bold multi-pass.  Mirrors the legacy
   // TextBlock::render path: when fakeBold is on and the requested
   // style is BOLD/BOLD_ITALIC, substitute REGULAR/ITALIC and
@@ -127,20 +146,19 @@ void GfxRendererPaginatorAdapter::drawWord(uint16_t x, uint16_t y, const uint8_t
   // visual outcome is a thicker version of the regular glyph.
   const bool fakeBold = applyFakeBoldSubstitution(&style);
   if (fakeBold) {
-    const int yi = static_cast<int>(y);
     const int xi = static_cast<int>(x);
     if (fakeBoldMode_ == 2) {
-      renderer_.drawText(fontId, xi - 1, yi, buf, pixelState_, style);
-      renderer_.drawText(fontId, xi,     yi, buf, pixelState_, style);
-      renderer_.drawText(fontId, xi + 1, yi, buf, pixelState_, style);
+      renderer_.drawText(fontId, xi - 1, yy, buf, pixelState_, style);
+      renderer_.drawText(fontId, xi,     yy, buf, pixelState_, style);
+      renderer_.drawText(fontId, xi + 1, yy, buf, pixelState_, style);
     } else {  // mode 1
-      renderer_.drawText(fontId, xi,     yi, buf, pixelState_, style);
-      renderer_.drawText(fontId, xi + 1, yi, buf, pixelState_, style);
+      renderer_.drawText(fontId, xi,     yy, buf, pixelState_, style);
+      renderer_.drawText(fontId, xi + 1, yy, buf, pixelState_, style);
     }
     return;
   }
 
-  renderer_.drawText(fontId, static_cast<int>(x), static_cast<int>(y), buf, pixelState_, style);
+  renderer_.drawText(fontId, static_cast<int>(x), yy, buf, pixelState_, style);
 }
 
 // ===========================================================================

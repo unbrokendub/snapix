@@ -48,6 +48,16 @@ constexpr uint8_t kBoldOff = 'b';
 constexpr uint8_t kItalicOn  = 'I';
 constexpr uint8_t kItalicOff = 'i';
 
+// v3.6.0 — Superscript / subscript on / off.  `<sup>`/`<sub>` (HTML + FB2).
+// Rendered in a smaller font, top-aligned (super) or bottom-aligned (sub)
+// within the line.  Footnote reference numbers and chemical/math formulas
+// (H₂O).  Letters chosen to avoid the existing tag set (B/b I/i H/h Q/q D/d
+// C/c S L N P M A) — R/r and T/t are free.
+constexpr uint8_t kSuperOn  = 'R';
+constexpr uint8_t kSuperOff = 'r';
+constexpr uint8_t kSubOn    = 'T';
+constexpr uint8_t kSubOff   = 't';
+
 // -----------------------------------------------------------------------------
 // Block-level style markers — apply to subsequent lines until matching off.
 // -----------------------------------------------------------------------------

@@ -2717,7 +2717,8 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer_, fontId, fontId,
                                                                   theme.primaryTextBlack,
                                                                   resolveImage,
-                                                                  core.settings.fakeBold);
+                                                                  core.settings.fakeBold,
+                                                                  core.settings.getSuperSubFontId(theme));  // v3.6.0
           snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
           // Streaming chunk buffer on stack — same 4 KB sizing as the

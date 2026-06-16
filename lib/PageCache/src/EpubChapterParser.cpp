@@ -454,7 +454,8 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // the .idx records — same bug class as configHash mismatch.
     snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer_, config_.fontId, config_.fontId,
                                                             true, resolveImage,
-                                                            config_.fakeBold);
+                                                            config_.fakeBold,
+                                                            config_.superSubFontId);  // v3.6.0
     snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
     constexpr size_t kChunkBufBytes = 4096;

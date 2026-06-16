@@ -290,6 +290,17 @@ void HtmlStripper::dispatchTag() {
     emitMarker(isEndTag_ ? kItalicOff : kItalicOn);
     return;
   }
+  // v3.6.0 — superscript / subscript.  Same `<sup>`/`<sub>` tag names in HTML
+  // and FB2 (FB2 falls through to this common dispatch for inline styles), so
+  // one entry covers both formats — footnote refs + formulas.
+  if (eqIc(tagName_, tagNameLen_, "sup", 3)) {
+    emitMarker(isEndTag_ ? kSuperOff : kSuperOn);
+    return;
+  }
+  if (eqIc(tagName_, tagNameLen_, "sub", 3)) {
+    emitMarker(isEndTag_ ? kSubOff : kSubOn);
+    return;
+  }
   if (tagNameLen_ == 2 && (tagName_[0] | 0x20u) == 'h' &&
       tagName_[1] >= '1' && tagName_[1] <= '6') {
     if (isEndTag_) {

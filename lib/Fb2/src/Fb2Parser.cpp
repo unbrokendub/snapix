@@ -492,7 +492,8 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
         snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer_, config_.fontId,
                                                                 config_.fontId, true,
                                                                 resolveImage,
-                                                                config_.fakeBold);
+                                                                config_.fakeBold,
+                                                                config_.superSubFontId);  // v3.6.0
         snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
         constexpr size_t kChunkBufBytes = 4096;

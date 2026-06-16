@@ -28,6 +28,8 @@ using snapix::smolport::ObserverStatus;
 using snapix::smolport::kStyleBold;
 using snapix::smolport::kStyleHeading;
 using snapix::smolport::kStyleItalic;
+using snapix::smolport::kStyleSub;
+using snapix::smolport::kStyleSuper;
 
 // -----------------------------------------------------------------------------
 // FakeRenderer — deterministic, zero-cost width metrics for assertions.
@@ -1108,6 +1110,54 @@ int main() {
     feedText(p, "paragraph");
     p.onParagraphBreak();
     runner.expectEq(uint16_t(25), fr.drawCalls[0].x, "T45_paragraph_start_indents");
+  }
+
+  // -----------------------------------------------------------------------
+  // v3.6.0 — super/subscript style bits propagate to drawWord, and the
+  // toggles are mutually exclusive.  (Font shrink + baseline offset live in
+  // the adapter, exercised on-device; here we verify the paginator sets the
+  // right styleBits.)
+  // -----------------------------------------------------------------------
+  {
+    auto cfg = stdConfig();
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);
+    feedText(p, "x");
+    p.onSuperStart();
+    feedText(p, "2");
+    p.onSuperEnd();
+    feedText(p, "y");
+    p.onParagraphBreak();
+    // Find the "2" draw — it must carry kStyleSuper and not kStyleSub.
+    bool found2 = false;
+    for (const auto& c : fr.drawCalls) {
+      if (c.text == "2") {
+        found2 = true;
+        runner.expectTrue((c.styleBits & kStyleSuper) != 0, "T46_super_bit_set");
+        runner.expectFalse((c.styleBits & kStyleSub) != 0, "T46_sub_bit_clear");
+      }
+      if (c.text == "y") {
+        runner.expectFalse((c.styleBits & kStyleSuper) != 0, "T46_super_cleared_after_end");
+      }
+    }
+    runner.expectTrue(found2, "T46_found_super_word");
+  }
+  {
+    // Sub start clears a stray super (mutual exclusion).
+    auto cfg = stdConfig();
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);
+    p.onSuperStart();
+    p.onSubStart();  // should clear super, set sub
+    feedText(p, "n");
+    p.onSubEnd();
+    p.onParagraphBreak();
+    for (const auto& c : fr.drawCalls) {
+      if (c.text == "n") {
+        runner.expectTrue((c.styleBits & kStyleSub) != 0, "T46_sub_bit_set");
+        runner.expectFalse((c.styleBits & kStyleSuper) != 0, "T46_super_cleared_by_sub");
+      }
+    }
   }
 
   runner.printSummary();

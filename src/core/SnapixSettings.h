@@ -142,6 +142,10 @@ struct Settings {
   }
 
   int getReaderFontId(const Theme& theme) const;
+  // v3.6.0 — built-in XSmall reader font used for <sup>/<sub> (smaller than the
+  // body).  Single source of truth so getRenderConfig (MEASURE walk) and the
+  // ReaderState render path pass the SAME font to the paginator adapter.
+  int getSuperSubFontId(const Theme& theme) const;
   const char* getReaderFontFamily(const Theme& theme) const;
   bool hasExternalReaderFont(const Theme& theme) const;
 

@@ -79,7 +79,8 @@ class GfxRendererPaginatorAdapter : public PaginatorRenderer {
   GfxRendererPaginatorAdapter(const GfxRenderer& renderer, int bodyFontId, int headingFontId,
                               bool pixelState = true,
                               ResolveImagePathFn resolveImagePath = {},
-                              uint8_t fakeBoldMode = 0);
+                              uint8_t fakeBoldMode = 0,
+                              int superSubFontId = 0);  // v3.6.0 — 0 = no shrink
 
   // PaginatorRenderer overrides
   uint16_t measureWidth(const uint8_t* text, size_t len, uint8_t styleBits) override;
@@ -95,6 +96,7 @@ class GfxRendererPaginatorAdapter : public PaginatorRenderer {
   const GfxRenderer& renderer_;
   int bodyFontId_;
   int headingFontId_;
+  int superSubFontId_ = 0;  // v3.6.0 — smaller font for <sup>/<sub> (0 = body)
   bool pixelState_;
   ResolveImagePathFn resolveImagePath_;
   uint8_t fakeBoldMode_ = 0;  // v2.0.146 — 0=off, 1=bold, 2=extrabold

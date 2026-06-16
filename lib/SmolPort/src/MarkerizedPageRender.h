@@ -310,7 +310,11 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // resumed page, even mid-sentence continuations); (b) Text Layout now drives
 // firstLineIndent/paragraphSpacing, shifting page boundaries.  Rebuild forces
 // indices to match.
-constexpr uint16_t kPageIndexVersion = 16;
+// v3.6.0: bumped 16 → 17.  Superscript/subscript markers (R/r, T/t) now appear
+// in the stream and render in a smaller font, changing word widths (and thus
+// page boundaries) for any chapter using <sup>/<sub>.  Rebuild forces indices
+// to match.
+constexpr uint16_t kPageIndexVersion = 17;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

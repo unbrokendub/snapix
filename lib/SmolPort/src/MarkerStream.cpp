@@ -183,6 +183,10 @@ bool MarkerStreamReader::dispatchTag(const uint8_t tag) {
     case kBoldOff:        rc = observer_.onBoldEnd(); break;
     case kItalicOn:       rc = observer_.onItalicStart(); break;
     case kItalicOff:      rc = observer_.onItalicEnd(); break;
+    case kSuperOn:        rc = observer_.onSuperStart(); break;  // v3.6.0
+    case kSuperOff:       rc = observer_.onSuperEnd(); break;
+    case kSubOn:          rc = observer_.onSubStart(); break;
+    case kSubOff:         rc = observer_.onSubEnd(); break;
 
     case kHeadingOn:
       // Heading is followed by a single ASCII digit byte (level 1-6).

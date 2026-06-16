@@ -70,6 +70,8 @@ constexpr uint8_t kStyleBold     = 1 << 0;
 constexpr uint8_t kStyleItalic   = 1 << 1;
 constexpr uint8_t kStyleHeading  = 1 << 2;
 constexpr uint8_t kStyleQuote    = 1 << 3;
+constexpr uint8_t kStyleSuper    = 1 << 4;  // v3.6.0 superscript (small, top-aligned)
+constexpr uint8_t kStyleSub      = 1 << 5;  // v3.6.0 subscript (small, bottom-aligned)
 
 // Geometry + style metrics for a single render pass.  All sizes in
 // logical pixels (post-orientation transform).  Lives on the caller's
@@ -211,6 +213,10 @@ class StreamingPaginator : public MarkerObserver {
   ObserverStatus onBoldEnd() override;
   ObserverStatus onItalicStart() override;
   ObserverStatus onItalicEnd() override;
+  ObserverStatus onSuperStart() override;  // v3.6.0
+  ObserverStatus onSuperEnd() override;
+  ObserverStatus onSubStart() override;
+  ObserverStatus onSubEnd() override;
   ObserverStatus onQuoteStart() override;
   ObserverStatus onQuoteEnd() override;
   ObserverStatus onIndentStart() override;

@@ -257,10 +257,19 @@ bool Settings::hasExternalReaderFont(const Theme& theme) const {
   return family && *family;
 }
 
+int Settings::getSuperSubFontId(const Theme& theme) const {
+  // v3.6.0 — superscript/subscript render in the built-in XSmall reader font
+  // (always present in flash, so no extra font load), regardless of the body
+  // size.  When the body is already XSmall there's no shrink, which is fine.
+  const int builtin = (theme.readerFontIdXSmall != 0) ? theme.readerFontIdXSmall : READER_FONT_ID_XSMALL;
+  return FONT_MANAGER.getReaderFontId(theme.readerFontFamilyXSmall, builtin);
+}
+
 RenderConfig Settings::getRenderConfig(const Theme& theme, uint16_t viewportWidth, uint16_t viewportHeight) const {
   return RenderConfig(getReaderFontId(theme), getLineCompression(), getIndentLevel(), getSpacingLevel(),
                       paragraphAlignment, static_cast<bool>(hyphenation), static_cast<bool>(showImages),
-                      static_cast<bool>(bionicReading), fakeBold, viewportWidth, viewportHeight);
+                      static_cast<bool>(bionicReading), fakeBold, viewportWidth, viewportHeight,
+                      getSuperSubFontId(theme));
 }
 
 // Legacy methods that use SdMan directly (for early init before Core)

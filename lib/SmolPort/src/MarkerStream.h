@@ -55,6 +55,11 @@ class MarkerObserver {
   virtual ObserverStatus onBoldEnd()      { return ObserverStatus::Continue; }
   virtual ObserverStatus onItalicStart()  { return ObserverStatus::Continue; }
   virtual ObserverStatus onItalicEnd()    { return ObserverStatus::Continue; }
+  // v3.6.0 — superscript / subscript (smaller font, raised / lowered).
+  virtual ObserverStatus onSuperStart()   { return ObserverStatus::Continue; }
+  virtual ObserverStatus onSuperEnd()     { return ObserverStatus::Continue; }
+  virtual ObserverStatus onSubStart()     { return ObserverStatus::Continue; }
+  virtual ObserverStatus onSubEnd()       { return ObserverStatus::Continue; }
 
   // Block toggles.  `headingLevel` is 1..6; the stripper emits `2` when
   // unsure.  Quote has no level.

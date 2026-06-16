@@ -435,6 +435,34 @@ ObserverStatus StreamingPaginator::onItalicEnd() {
   return ObserverStatus::Continue;
 }
 
+// v3.6.0 — super/subscript toggles.  Mirror bold/italic: flush the partial
+// word under the OLD style before the style context shifts.  Super and sub
+// are mutually exclusive in source; defensively clear the other so a
+// malformed `<sup><sub>` doesn't leave both set.
+ObserverStatus StreamingPaginator::onSuperStart() {
+  flushPartWord();
+  styleBits_ = static_cast<uint8_t>((styleBits_ & ~kStyleSub) | kStyleSuper);
+  return ObserverStatus::Continue;
+}
+
+ObserverStatus StreamingPaginator::onSuperEnd() {
+  flushPartWord();
+  styleBits_ = static_cast<uint8_t>(styleBits_ & ~kStyleSuper);
+  return ObserverStatus::Continue;
+}
+
+ObserverStatus StreamingPaginator::onSubStart() {
+  flushPartWord();
+  styleBits_ = static_cast<uint8_t>((styleBits_ & ~kStyleSuper) | kStyleSub);
+  return ObserverStatus::Continue;
+}
+
+ObserverStatus StreamingPaginator::onSubEnd() {
+  flushPartWord();
+  styleBits_ = static_cast<uint8_t>(styleBits_ & ~kStyleSub);
+  return ObserverStatus::Continue;
+}
+
 ObserverStatus StreamingPaginator::onQuoteStart() {
   flushPartWord();  // v2.0.133
   styleBits_ = static_cast<uint8_t>(styleBits_ | kStyleQuote);
