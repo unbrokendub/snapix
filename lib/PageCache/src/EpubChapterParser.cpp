@@ -397,11 +397,15 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     cfg.marginRight = static_cast<uint16_t>(streamingViewportMarginRight_);
     cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
     cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
-    cfg.paragraphSpacing = static_cast<uint16_t>(cfg.bodyLineHeight / 4);
-    // v3.1.0 — "красная строка": first-line indent = one body line height.
-    // MUST match the render-time config in ReaderState (and Fb2Parser) or the
-    // .idx configHash mismatches and page boundaries drift.
-    cfg.firstLineIndent = cfg.bodyLineHeight;
+    // v3.5.2 — Text Layout (Compact/Standard/Large) drives paragraph spacing
+    // and first-line indent, instead of hardcoded values that ignored the
+    // setting.  indentLevel 0/2/3 → indent 0 / 1 / 1.5 line heights;
+    // spacingLevel 0/1/3 → para gap 0 / ¼ / 1 line height.  MUST match
+    // ReaderState's render-time cfg (both derive from the same settings).
+    cfg.paragraphSpacing =
+        snapix::smolport::paragraphSpacingForLevel(config_.spacingLevel, cfg.bodyLineHeight);
+    cfg.firstLineIndent =
+        snapix::smolport::firstLineIndentForLevel(config_.indentLevel, cfg.bodyLineHeight);
     // v3.3.0 — hyphenation: dictionary from the EPUB's declared language
     // (setLanguage strips region subtags + lowercases; empty → no hyphenation,
     // deterministically).  MUST match ReaderState's render-time cfg.

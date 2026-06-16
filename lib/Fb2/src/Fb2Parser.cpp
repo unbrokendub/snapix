@@ -442,9 +442,12 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
         cfg.marginRight = static_cast<uint16_t>(streamingViewportMarginRight_);
         cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
         cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
-        cfg.paragraphSpacing = static_cast<uint16_t>(cfg.bodyLineHeight / 4);
-        // v3.1.0 — "красная строка": must match ReaderState + EpubChapterParser.
-        cfg.firstLineIndent = cfg.bodyLineHeight;
+        // v3.5.2 — Text Layout drives paragraph spacing + first-line indent;
+        // see EpubChapterParser.  Must match ReaderState's render-time cfg.
+        cfg.paragraphSpacing =
+            snapix::smolport::paragraphSpacingForLevel(config_.spacingLevel, cfg.bodyLineHeight);
+        cfg.firstLineIndent =
+            snapix::smolport::firstLineIndentForLevel(config_.indentLevel, cfg.bodyLineHeight);
         // v3.3.0 — hyphenation.  FB2 is the Russian ebook format, so default
         // to "ru"; Lebedev's ru patterns are Cyrillic-only, so a Latin (e.g.
         // translated) FB2 simply gets no hyphenation rather than wrong breaks.

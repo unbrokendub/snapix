@@ -92,6 +92,10 @@ struct PageBoundarySnapshot {
   uint16_t pageIndex;
   uint32_t byteOffset;
   uint8_t  styleBits;
+  // v3.5.2 — does the page that STARTS at this boundary begin a paragraph?
+  // Restored on resume so the красная-строка first-line indent only applies
+  // to real paragraph starts, not mid-sentence page continuations.
+  bool     atParagraphStart;
 };
 
 using OnPageBoundaryFn = std::function<void(const PageBoundarySnapshot&)>;
@@ -137,6 +141,10 @@ struct MarkerizedRenderResume {
   // byteOffsets remain absolute (matching the cold-walk values
   // already in `.idx`).
   uint32_t byteOffset = 0;
+  // v3.5.2 — whether the resumed page begins a paragraph (from the boundary
+  // snapshot).  Default true so a fresh chapter (page 0) indents its first
+  // line; for resumed mid-paragraph pages the caller passes false.
+  bool     atParagraphStart = true;
 };
 
 // =============================================================================
@@ -297,7 +305,12 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // lineCompression (Line Spacing), which it ignored before, so page boundaries
 // change for any non-default spacing.  Old indices were built with the raw
 // (uncompressed) line height; rebuild forces them to match.
-constexpr uint16_t kPageIndexVersion = 15;
+// v3.5.2: bumped 15 → 16.  Two changes: (a) each entry's spare byte p[5] now
+// stores atParagraphStart (fixes the красная-строка indent appearing on every
+// resumed page, even mid-sentence continuations); (b) Text Layout now drives
+// firstLineIndent/paragraphSpacing, shifting page boundaries.  Rebuild forces
+// indices to match.
+constexpr uint16_t kPageIndexVersion = 16;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

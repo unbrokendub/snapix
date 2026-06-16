@@ -1082,6 +1082,34 @@ int main() {
     runner.expectFalse(anyHyphen, "T44_no_hyphen_when_disabled");
   }
 
+  // -----------------------------------------------------------------------
+  // v3.5.2 — atParagraphStart restore on resume.  A page resumed mid-sentence
+  // must NOT get the красная-строка first-line indent; a paragraph-start page
+  // must.  setAtParagraphStart(false) is what the render path calls for a
+  // mid-paragraph resumed page.  stdConfig: marginLeft 5, indent 20 -> x = 25
+  // when indented, 5 when not.
+  // -----------------------------------------------------------------------
+  {
+    auto cfg = stdConfig();
+    cfg.firstLineIndent = 20;
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);
+    p.setAtParagraphStart(false);  // resumed into a mid-paragraph continuation
+    feedText(p, "continuation");
+    p.onParagraphBreak();
+    runner.expectTrue(!fr.drawCalls.empty(), "T45_has_draws");
+    runner.expectEq(uint16_t(5), fr.drawCalls[0].x, "T45_midparagraph_resume_no_indent");
+  }
+  {
+    auto cfg = stdConfig();
+    cfg.firstLineIndent = 20;
+    FakeRenderer fr;
+    StreamingPaginator p(cfg, fr);  // ctor -> atParagraphStart = true
+    feedText(p, "paragraph");
+    p.onParagraphBreak();
+    runner.expectEq(uint16_t(25), fr.drawCalls[0].x, "T45_paragraph_start_indents");
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }

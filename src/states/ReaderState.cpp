@@ -2532,11 +2532,14 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           cfg.marginRight = static_cast<uint16_t>(marginRight);
           cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
           cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
-          cfg.paragraphSpacing = static_cast<uint16_t>(cfg.bodyLineHeight / 4);
-          // v3.1.0 — "красная строка": first-line indent = one body line
-          // height.  MUST match the upfront MEASURE-walk config in
-          // EpubChapterParser/Fb2Parser or the .idx configHash mismatches.
-          cfg.firstLineIndent = cfg.bodyLineHeight;
+          // v3.5.2 — Text Layout (Compact/Standard/Large) drives paragraph
+          // spacing + first-line indent (it was hardcoded before, so the
+          // setting had no effect on EPUB/FB2).  MUST match the MEASURE-walk
+          // cfg in EpubChapterParser/Fb2Parser — both use the same settings.
+          cfg.paragraphSpacing = snapix::smolport::paragraphSpacingForLevel(
+              core.settings.getSpacingLevel(), cfg.bodyLineHeight);
+          cfg.firstLineIndent = snapix::smolport::firstLineIndentForLevel(
+              core.settings.getIndentLevel(), cfg.bodyLineHeight);
           // v3.3.0 — hyphenation language.  MUST match the MEASURE-walk cfg in
           // EpubChapterParser (EPUB declared language) / Fb2Parser ("ru") or
           // page boundaries drift between the .idx build and this render.
@@ -2808,6 +2811,10 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
                 // page-turn seeks to a way-too-early position →
                 // "first 3 lines change between pages" on-device.
                 resume.byteOffset = it->byteOffset;
+                // v3.5.2 — restore whether this resumed page begins a
+                // paragraph, so the красная-строка first-line indent isn't
+                // applied to a mid-sentence continuation page.
+                resume.atParagraphStart = it->atParagraphStart;
                 // Seek the file to the captured offset; readChunk
                 // returns bytes belonging to page resume.startPage
                 // and onward.

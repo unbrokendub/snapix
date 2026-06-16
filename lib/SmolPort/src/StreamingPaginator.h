@@ -106,6 +106,26 @@ struct StreamingPaginatorConfig {
   char hyphenLang[8];
 };
 
+// v3.5.2 — Text Layout (Compact/Standard/Large) → paginator pixel metrics.
+// Single source of truth shared by ReaderState's render config and the
+// EpubChapterParser/Fb2Parser MEASURE-walk configs, so the values (and thus
+// the .idx configHash) always match between build and render.
+//
+// indentLevel (SnapixSettings::getIndentLevel): 0=Compact, 2=Standard,
+// 3=Large → first-line indent of 0 / 1 / 1.5 body line heights.
+inline uint16_t firstLineIndentForLevel(uint8_t indentLevel, uint16_t bodyLineHeight) {
+  if (indentLevel == 0) return 0;
+  if (indentLevel >= 3) return static_cast<uint16_t>(bodyLineHeight * 3 / 2);
+  return bodyLineHeight;
+}
+// spacingLevel (SnapixSettings::getSpacingLevel): 0=Compact, 1=Standard,
+// 3=Large → inter-paragraph gap of 0 / ¼ / 1 body line height.
+inline uint16_t paragraphSpacingForLevel(uint8_t spacingLevel, uint16_t bodyLineHeight) {
+  if (spacingLevel == 0) return 0;
+  if (spacingLevel >= 3) return bodyLineHeight;
+  return static_cast<uint16_t>(bodyLineHeight / 4);
+}
+
 // Renderer abstraction — paginator delegates measurement + drawing here.
 // Concrete subclasses adapt to:
 //   * GfxRenderer (production — Phase R3 integration)
@@ -224,6 +244,16 @@ class StreamingPaginator : public MarkerObserver {
   // even though we skipped the events that opened it.
   void setStyleBits(uint8_t bits) { styleBits_ = bits; }
   uint8_t styleBits() const { return styleBits_; }
+
+  // v3.5.2 — paragraph-start state, captured into each .idx boundary and
+  // restored on resume.  Without this, the per-page render path's
+  // resetForChapter() blindly assumed every resumed page begins a paragraph,
+  // so the "красная строка" first-line indent appeared on EVERY page — even
+  // mid-sentence continuations.  The boundary callback records this flag for
+  // the page about to start; resume sets it so only true paragraph-start
+  // pages indent.
+  bool atParagraphStart() const { return atParagraphStart_; }
+  void setAtParagraphStart(bool v) { atParagraphStart_ = v; }
 
   uint16_t cursorX() const { return cursorX_; }
   uint16_t cursorY() const { return cursorY_; }

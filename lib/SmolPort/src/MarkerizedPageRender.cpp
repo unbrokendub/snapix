@@ -181,6 +181,12 @@ class PageCountingObserver : public MarkerObserver {
         snap.byteOffset = (bytesSeen_ > pending) ? (bytesSeen_ - pending) : 0;
       }
       snap.styleBits = inner_.styleBits();
+      // v3.5.2 — record whether the page about to start begins a paragraph.
+      // At this point atParagraphStart_ is true iff the fill came from a
+      // paragraph/thematic/page break (those set it before pageFull); a carry
+      // or mid-line overflow leaves it false.  Restored on resume so the
+      // first-line indent only appears on real paragraph starts.
+      snap.atParagraphStart = inner_.atParagraphStart();
       onBoundary_(snap);
     }
 
@@ -232,6 +238,10 @@ MarkerizedRenderResult renderMarkerizedPage(StreamingPaginator& paginator, Chapt
   // correctly even though we skipped the events that opened it.
   if (effectiveStart > 0) {
     paginator.setStyleBits(resume.styleBits);
+    // v3.5.2 — restore paragraph-start state for the resumed page so the
+    // first-line indent isn't wrongly applied to a mid-sentence continuation
+    // (resetForChapter above unconditionally set it true).
+    paginator.setAtParagraphStart(resume.atParagraphStart);
   }
 
   // v2.0.140 fix — propagate the absolute source byte offset to
@@ -386,7 +396,7 @@ size_t serializePageIndex(const PageBoundarySnapshot* entries, size_t entryCount
   for (size_t i = 0; i < entryCount; ++i) {
     write_u32_le(p + 0, entries[i].byteOffset);
     p[4] = entries[i].styleBits;
-    p[5] = 0;  // reserved
+    p[5] = entries[i].atParagraphStart ? 1 : 0;  // v3.5.2
     p[6] = 0;
     p[7] = 0;
     // Note: pageIndex is implicit (entry N is page N+1 since R3.6
@@ -425,6 +435,7 @@ bool deserializePageIndex(const uint8_t* buf, size_t bufSize,
     snap.pageIndex = static_cast<uint16_t>(i + 1);
     snap.byteOffset = read_u32_le(p + 0);
     snap.styleBits = p[4];
+    snap.atParagraphStart = (p[5] != 0);  // v3.5.2
     outEntries.push_back(snap);
     p += kPageIndexEntryBytes;
   }
