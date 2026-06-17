@@ -17,8 +17,15 @@ size_t TxtStripper::feed(const uint8_t* data, size_t len) {
     }
     if (b == '\r') continue;  // CR (CRLF) — ignored; the '\n' drives the break.
 
-    // Text byte.  Resolve any pending newline run first.
-    if (newlinesPending_ > 0) {
+    // Text byte.  A chunk-resume forced break takes priority over the newline
+    // run (the previous chunk ended at a paragraph boundary with the break
+    // still pending).
+    if (forceBreak_) {
+      const uint8_t br[2] = {kMarker, kParagraphBreak};
+      sink_.emit(br, sizeof(br));
+      forceBreak_ = false;
+      newlinesPending_ = 0;
+    } else if (newlinesPending_ > 0) {
       if (reflow_ && newlinesPending_ == 1) {
         // Hard-wrapped line continuation → join with a space.
         const uint8_t sp = ' ';

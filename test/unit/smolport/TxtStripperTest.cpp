@@ -48,6 +48,21 @@ std::string feedReflow(const std::string& in) {
 // A paragraph-break marker as a 2-char string.
 const std::string PB = std::string(1, static_cast<char>(kMarker)) + static_cast<char>(kParagraphBreak);
 
+// Markerize a set of paragraph-aligned chunks INDEPENDENTLY (fresh stripper per
+// chunk; startPendingBreak = index>0) and concatenate — mirrors chunked (lazy)
+// markerize.  Must equal one continuous pass over the joined source.
+std::string feedChunkedReflow(const std::vector<std::string>& chunks) {
+  std::string out;
+  for (size_t i = 0; i < chunks.size(); ++i) {
+    CollectSink sink;
+    TxtStripper s(sink, /*reflow=*/true, /*startPendingBreak=*/i > 0);
+    s.feed(reinterpret_cast<const uint8_t*>(chunks[i].data()), chunks[i].size());
+    s.finish();
+    out += toStr(sink.data);
+  }
+  return out;
+}
+
 }  // namespace
 
 int main() {
@@ -149,6 +164,42 @@ int main() {
     s.feed(reinterpret_cast<const uint8_t*>("bbb"), 3);
     s.finish();
     runner.expectEqual("aaa bbb", toStr(sink.data), "R6_softwrap_across_chunks");
+  }
+
+  // -- chunked markerize equivalence (lazy markerize correctness) --
+
+  // R7: paragraph-aligned chunks concatenate identically to one continuous pass.
+  {
+    const std::string src = "para one\n\npara two\n\npara three";
+    // Split AT paragraph boundaries (each chunk includes its trailing blank line).
+    const std::vector<std::string> chunks = {"para one\n\n", "para two\n\n", "para three"};
+    runner.expectEqual(feedReflow(src), feedChunkedReflow(chunks), "R7_chunk_equiv_3");
+  }
+
+  // R8: two-chunk split, content preserved + exactly the right breaks.
+  {
+    const std::string src = "alpha beta\n\ngamma delta";
+    const std::vector<std::string> chunks = {"alpha beta\n\n", "gamma delta"};
+    runner.expectEqual(feedReflow(src), feedChunkedReflow(chunks), "R8_chunk_equiv_2");
+    // sanity: the joined result is exactly "alpha beta" PB "gamma delta"
+    runner.expectEqual("alpha beta" + PB + "gamma delta", feedChunkedReflow(chunks), "R8_exact");
+  }
+
+  // R9: split where the boundary blank line straddles the cut still works
+  // (chunk 0 ends with one '\n', chunk 1 begins with the second '\n').
+  {
+    const std::string src = "one two\n\nthree four";
+    const std::vector<std::string> chunks = {"one two\n", "\nthree four"};
+    runner.expectEqual(feedReflow(src), feedChunkedReflow(chunks), "R9_straddle");
+  }
+
+  // R10: startPendingBreak alone emits a leading break before the first text.
+  {
+    CollectSink sink;
+    TxtStripper s(sink, /*reflow=*/true, /*startPendingBreak=*/true);
+    s.feed(reinterpret_cast<const uint8_t*>("hello"), 5);
+    s.finish();
+    runner.expectEqual(PB + "hello", toStr(sink.data), "R10_forced_break");
   }
 
   runner.printSummary();
