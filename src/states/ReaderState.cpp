@@ -39,10 +39,12 @@
 #include <Epub.h>
 #include <FS.h>
 #include <Fb2.h>
+#include <ChunkedMarkersReader.h>       // v3.9.0 — chunked (lazy) markers reader
 #include <GfxRendererPaginatorAdapter.h>
 #include <LittleFS.h>
 #include <MarkerizedPageRender.h>
 #include <StreamingPaginator.h>
+#include <UnifiedCacheChunkProvider.h>  // v3.9.0 — UnifiedCache-backed chunk provider
 #endif
 
 #include "../Battery.h"
@@ -2479,6 +2481,10 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
   // sectionIndex (which differs from tocIndex via Fb2::TocItem).
   std::string bookCachePath;
   int markersKey = -1;
+  // v3.9.0 — single-section docs (TXT/MD/no-TOC FB2) store markers across
+  // consecutive chunk segments (keys 0..N) for lazy/progressive markerize;
+  // section docs (EPUB/FB2-with-TOC) use one segment keyed by sectionIndex.
+  bool markersSingleSection = false;
   const ContentType contentType = core.content.metadata().type;
   if (contentType == ContentType::Epub) {
     auto* epubProv = core.content.asEpub();
@@ -2495,6 +2501,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
         // exactly like TXT/MD.  (Was the legacy ParsedText/Expat render path.)
         bookCachePath = fb2->getCachePath();
         markersKey = 0;
+        markersSingleSection = true;  // v3.9.0 — chunked markers
       } else if (currentSpineIndex_ >= 0 &&
                  currentSpineIndex_ < static_cast<int>(fb2->tocCount())) {
         const Fb2::TocItem item = fb2->getTocItem(static_cast<uint16_t>(currentSpineIndex_));
@@ -2510,6 +2517,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
     if (txtProv && txtProv->getTxt()) {
       bookCachePath = txtProv->getTxt()->getCachePath();
       markersKey = 0;
+      markersSingleSection = true;  // v3.9.0 — chunked markers
     }
   } else if (contentType == ContentType::Markdown) {
     // v3.7.0 — Markdown is single-section: markers + idx live under key 0.
@@ -2517,19 +2525,23 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
     if (mdProv && mdProv->getMarkdown()) {
       bookCachePath = mdProv->getMarkdown()->getCachePath();
       markersKey = 0;
+      markersSingleSection = true;  // v3.9.0 — chunked markers
     }
   }
   if (!bookCachePath.empty() && markersKey >= 0) {
     auto ucache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
-    File mf;
-    size_t markersSegSize = 0;
-    if (ucache.openSegmentReader(snapix::unifiedcache::Kind::Markers,
-                                   static_cast<uint16_t>(markersKey), mf, &markersSegSize)) {
-      // The file is positioned at the segment's payload start.  Capture
-      // the base offset so any `mf.seek(byteOffset)` for resume below
-      // can be translated to segment-relative coordinates.
-      const uint32_t markersSegBase = static_cast<uint32_t>(mf.position());
-      if (mf) {
+    // v3.9.0 — read markers through ChunkedMarkersReader so a single-section
+    // doc's progressively-written chunk segments (keys 0..N) present as ONE
+    // logical stream with global offsets.  A 1-chunk doc (every doc today, plus
+    // every EPUB/FB2 section) behaves exactly like the old single-segment read.
+    auto chunkProvider = markersSingleSection
+        ? snapix::pagecache::UnifiedCacheChunkProvider::singleSection(ucache)
+        : snapix::pagecache::UnifiedCacheChunkProvider::section(
+              ucache, static_cast<uint16_t>(markersKey));
+    snapix::smolport::ChunkedMarkersReader markersReader(chunkProvider);
+    const size_t markersSegSize = markersReader.totalSize();
+    {
+      if (markersReader.chunkCount() > 0 && markersSegSize > 0) {
           // Build paginator config from current viewport + font metrics.
           // Page geometry intentionally mirrors GfxRenderer's logical
           // screen so layout decisions match the legacy Page tree's
@@ -2849,32 +2861,20 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
                 // paragraph, so the красная-строка first-line indent isn't
                 // applied to a mid-sentence continuation page.
                 resume.atParagraphStart = it->atParagraphStart;
-                // Seek the file to the captured offset; readChunk
-                // returns bytes belonging to page resume.startPage
-                // and onward.
-                // v2.0.167 — seek is segment-relative; add markersSegBase
-                // to get absolute offset within streaming.cache.
-                mf.seek(static_cast<uint32_t>(markersSegBase + it->byteOffset));
+                // Seek to the captured GLOBAL offset; ChunkedMarkersReader
+                // maps it to the containing chunk + local position and reads
+                // forward (spanning chunk boundaries) from there.
+                markersReader.seekGlobal(it->byteOffset);
                 break;
               }
             }
           }
 
-          // v2.0.167 — bound reads by remaining segment bytes so the
-          // paginator doesn't run past the segment into neighbouring frame
-          // data.  Compute remaining from current position relative to
-          // segment start + segment size.
-          const uint32_t curPos = static_cast<uint32_t>(mf.position());
-          size_t markersRemaining = (curPos >= markersSegBase + markersSegSize)
-                                      ? 0
-                                      : (markersSegBase + markersSegSize - curPos);
-          auto readFn = [&mf, &markersRemaining](uint8_t* buf, size_t bufSize) -> int {
-            if (!mf) return -1;
-            if (markersRemaining == 0) return 0;  // segment EOF
-            const size_t want = std::min(bufSize, markersRemaining);
-            const int got = mf.read(buf, want);
-            if (got > 0) markersRemaining -= static_cast<size_t>(got);
-            return got;
+          // v3.9.0 — read through ChunkedMarkersReader: it bounds reads to the
+          // logical stream (all chunks) and spans chunk boundaries internally,
+          // so the paginator never runs past the markers into neighbouring data.
+          auto readFn = [&markersReader](uint8_t* buf, size_t bufSize) -> int {
+            return markersReader.read(buf, bufSize);
           };
 
           // Capture every new boundary into the cache so subsequent
@@ -2893,7 +2893,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           const auto status = snapix::smolport::renderMarkerizedPage(
               paginator, readFn, chunkBuf, sizeof(chunkBuf),
               static_cast<uint16_t>(currentSectionPage_), {}, &stats, resume, onBoundary);
-          mf.close();
+          // markersReader / chunkProvider close their file handle(s) on scope exit.
 
         if (status == snapix::smolport::MarkerizedRenderResult::Success) {
           LOG_INF(TAG,
