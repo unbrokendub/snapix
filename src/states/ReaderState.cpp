@@ -2488,13 +2488,20 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
     }
   } else if (contentType == ContentType::Fb2) {
     auto* fb2Prov = core.content.asFb2();
-    if (fb2Prov && fb2Prov->getFb2() && currentSpineIndex_ >= 0 &&
-        currentSpineIndex_ < static_cast<int>(fb2Prov->getFb2()->tocCount())) {
-      const Fb2::TocItem item =
-          fb2Prov->getFb2()->getTocItem(static_cast<uint16_t>(currentSpineIndex_));
-      if (item.sectionIndex >= 0) {
-        bookCachePath = fb2Prov->getFb2()->getCachePath();
-        markersKey = item.sectionIndex;
+    if (fb2Prov && fb2Prov->getFb2()) {
+      auto* fb2 = fb2Prov->getFb2();
+      if (fb2->tocCount() == 0) {
+        // v3.8.0 — TOC-less FB2 is one whole-book streamed section (key 0),
+        // exactly like TXT/MD.  (Was the legacy ParsedText/Expat render path.)
+        bookCachePath = fb2->getCachePath();
+        markersKey = 0;
+      } else if (currentSpineIndex_ >= 0 &&
+                 currentSpineIndex_ < static_cast<int>(fb2->tocCount())) {
+        const Fb2::TocItem item = fb2->getTocItem(static_cast<uint16_t>(currentSpineIndex_));
+        if (item.sectionIndex >= 0) {
+          bookCachePath = fb2->getCachePath();
+          markersKey = item.sectionIndex;
+        }
       }
     }
   } else if (contentType == ContentType::Txt) {

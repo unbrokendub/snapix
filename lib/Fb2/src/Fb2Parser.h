@@ -1,24 +1,36 @@
 #pragma once
 
 #include <ContentParser.h>
-#include <EpdFontFamily.h>
 #include <RenderConfig.h>
-#include <SDCardManager.h>
-#include <ScriptDetector.h>
-#include <blocks/TextBlock.h>
-#include <expat.h>
 
-#include <climits>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 
 class Page;
 class GfxRenderer;
-class ParsedText;
 class Fb2;
-class ImageBlock;
 
+/**
+ * Content parser for FB2 sections.
+ *
+ * v3.8.0 — streaming-only (legacy Expat/ParsedText path removed).  Mirrors
+ * EpubChapterParser:
+ *   tryMarkerizeSection()  (FB2 byte range → Fb2-mode HtmlStripper → markers)
+ *   → R4.c upfront idx build (MEASURE walk, with FB2 inline-image heights)
+ *   → R4.b short-circuit emits empty Page objects from the idx page count.
+ *
+ * Two shapes, same code path:
+ *   * Section-scoped (TOC present): markerize [startOffset_..endOffset_),
+ *     key = sectionIndex.
+ *   * Whole-book (no TOC): markerize the whole file from byte 0, key = 0 —
+ *     the document is one streamed section, exactly like TXT/MD.
+ *
+ * ReaderState::renderPageContents reads the markers directly for layout +
+ * drawing.  In a build without SNAPIX_MARKERIZER (build-test only) parsePages()
+ * produces no pages.
+ */
 class Fb2Parser : public ContentParser {
  public:
   Fb2Parser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config, uint32_t startOffset = 0,
@@ -29,34 +41,16 @@ class Fb2Parser : public ContentParser {
                   const AbortCallback& shouldAbort = nullptr) override;
   bool hasMoreContent() const override { return hasMore_; }
   bool canResume() const override {
-    // v2.0.132 — also resume mid-flight R4.b short-circuit emit (see
-    // header doc on shortCircuitActive_).
-    if (shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_) return true;
-    return initialized_ && suspended_ && xmlParser_ != nullptr && file_;
+    return shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_;
   }
   void reset() override;
-  const std::vector<std::pair<std::string, uint16_t>>& getAnchorMap() const override { return anchorMap_; }
-  uint32_t lastParsedOffset() const { return lastParsedOffset_; }
 
-  /**
-   * Wire an Fb2 instance for image rendering.  The parser uses fb2->cacheImage()
-   * to materialise <image l:href="#id"/> references during page layout — base64
-   * → JPEG → BMP on first encounter, then a fast cache hit thereafter.  Pass
-   * nullptr (or never call) to disable images entirely (legacy behaviour).
-   *
-   * v2.0.117 Phase R2.6: also derives the markers sidecar directory from
-   * `fb2->getCachePath() + "/markers"` so the SmolPort byte-marker pass
-   * (gated by `SNAPIX_MARKERIZER`) knows where to drop its `<spine>.bin`
-   * files.  Same lifetime as fb2_; no extra setter call site.
-   */
-  void setFb2(const Fb2* fb2);
+  // Wire an Fb2 instance for cache-path resolution + inline <image> decode
+  // during the MEASURE walk (fb2->cacheImage()).  Required for markerize/idx.
+  void setFb2(const Fb2* fb2) { fb2_ = fb2; }
 
-  // v2.0.131 — see EpubChapterParser::setStreamingViewport doc.  Plumbs
-  // real reader viewport margins from ReaderStateAsyncJobs so R4.c's
-  // upfront .idx build uses the SAME paginator config that the
-  // streaming render path will use, eliminating the configHash
-  // mismatch (and the pageCount mismatch that caused the v2.0.130 FB2
-  // white-screen-on-page-turn bug).
+  // Plumb real reader viewport margins (see EpubChapterParser) so the R4.c
+  // MEASURE walk's paginator config matches the render path.
   void setStreamingViewport(int marginTop, int marginBottom, int marginLeft, int marginRight) {
     streamingViewportMarginTop_ = marginTop;
     streamingViewportMarginBottom_ = marginBottom;
@@ -73,116 +67,26 @@ class Fb2Parser : public ContentParser {
   int startingSectionIndex_ = 0;
   bool sectionScoped_ = false;
   bool hasMore_ = true;
-  bool isRtl_ = false;
-  uint16_t rtlArabicWords_ = 0;
-  uint16_t rtlLtrWords_ = 0;
 
-  // Expat state
-  XML_Parser xmlParser_ = nullptr;
-  FsFile file_;
-  bool initialized_ = false;
-  bool suspended_ = false;
-  bool stopRequested_ = false;
-
-  // XML depth tracking
-  int depth_ = 0;
-  int skipUntilDepth_ = INT_MAX;
-  int boldUntilDepth_ = INT_MAX;
-  int italicUntilDepth_ = INT_MAX;
-  bool inBody_ = false;
-  bool inTitle_ = false;
-  bool inSubtitle_ = false;
-  bool inParagraph_ = false;
-  int bodyCount_ = 0;
-  int sectionCounter_ = 0;
-  bool firstSection_ = true;
-  bool targetSectionStarted_ = false;
-  int targetSectionDepth_ = 0;
-  bool fragmentComplete_ = false;
-  bool xmlParserSuspended_ = false;
-  bool pendingNewTextBlock_ = false;
-  TextBlock::BLOCK_STYLE pendingBlockStyle_ = TextBlock::LEFT_ALIGN;
-  bool pendingSectionStart_ = false;
-  bool pendingSectionNeedsPageBreak_ = false;
-  int pendingSectionAnchorIndex_ = -1;
-
-  // Word buffer (lazy-allocated on first use to save ~201 bytes when idle)
-  static constexpr int MAX_WORD_SIZE = 200;
-  char* partWordBuffer_ = nullptr;
-  int partWordBufferIndex_ = 0;
-
-  // Page building
-  std::unique_ptr<ParsedText> currentTextBlock_;
-  std::unique_ptr<Page> currentPage_;
-  int16_t currentPageNextY_ = 0;
-
-  // Image resolver — non-owning.  When non-null and config_.showImages is
-  // true, <image> tags are decoded via fb2_->cacheImage() and emitted as
-  // PageImage elements instead of being silently skipped.
   const Fb2* fb2_ = nullptr;
+  bool markerizeAttempted_ = false;  // one-shot per instance
 
-  // Anchor map for TOC navigation (section_N → page index)
-  std::vector<std::pair<std::string, uint16_t>> anchorMap_;
-
-  // v2.0.117 Phase R2.6 — markers sidecar directory.  Set via setFb2();
-  // empty means "skip markerize" (e.g. fb2_ never wired).
-  std::string markersDir_;
-  bool markerizeAttempted_ = false;  // one-shot per Fb2Parser lifetime
-
-  // v2.0.131 — real viewport margins from ReaderState (see header
-  // comment on setStreamingViewport).  Defaults of 4 preserve v2.0.130
-  // behaviour when setter never called.
   int streamingViewportMarginTop_ = 4;
   int streamingViewportMarginBottom_ = 4;
   int streamingViewportMarginLeft_ = 4;
   int streamingViewportMarginRight_ = 4;
 
-  // v2.0.132 — stateful R4.b short-circuit progress tracking.  See
-  // parallel comment in EpubChapterParser.h for rationale.  Caller
-  // (PageCache::create/extend) batches with maxPages=1 for first-page
-  // surfacing; without this state, R4.b emitted 1 of N pages and
-  // marked the chapter complete, so user couldn't navigate past
-  // page 0 of any section.
+  // R4.b stateful short-circuit (mirrors EpubChapterParser).
   bool shortCircuitActive_ = false;
   uint16_t shortCircuitTotalPages_ = 0;
   uint16_t shortCircuitNextPage_ = 0;
 
-  // v2.0.117 Phase R2.6 — best-effort byte-marker side-channel.  Reads
-  // the FB2 source file's [startOffset_..endOffset_) byte range, runs
-  // it through Fb2Stripper (HtmlStripper Mode::Fb2), writes the marker
-  // stream to `<markersDir_>/<startingSectionIndex_>.bin`.  Compiled
-  // out entirely when SNAPIX_MARKERIZER=0.
-  bool tryMarkerizeSection();
-
-  // Callback state
+  // Callback state for the short-circuit emit.
   std::function<void(std::unique_ptr<Page>)> onPageComplete_;
   uint16_t maxPages_ = 0;
   uint16_t pagesCreated_ = 0;
-  bool hitMaxPages_ = false;
-  AbortCallback shouldAbort_;
 
-  // File reading
-  size_t fileSize_ = 0;
-  uint32_t lastParsedOffset_ = 0;
-
-  // XML callbacks
-  static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char** atts);
-  static void XMLCALL endElement(void* userData, const XML_Char* name);
-  static void XMLCALL characterData(void* userData, const XML_Char* s, int len);
-
-  void appendPartWordBytes(const char* data, int len);
-  void flushPartWordBuffer();
-  void observeTextDirectionSample(const char* word);
-  void refreshTextDirection();
-  void releaseStreamingState();
-  void startNewTextBlock(TextBlock::BLOCK_STYLE style);
-  bool flushDeferredLayoutBeforeResume();
-  bool finishPendingSectionStart();
-  void requestXmlSuspend();
-  void makePages();
-  void addLineToPage(std::shared_ptr<TextBlock> line);
-  void addImageToPage(std::shared_ptr<ImageBlock> image);
-  void startNewPage();
-  EpdFontFamily::Style getCurrentFontFamily() const;
-  void addVerticalSpacing(int lines);
+  // markerize the section's byte range into UnifiedCache::Markers (key =
+  // startingSectionIndex_).  One-shot; cache-hit short-circuits.
+  bool tryMarkerizeSection();
 };

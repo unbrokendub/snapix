@@ -32,35 +32,8 @@ using reader::fb2SectionCachePath;
 using reader::kDefaultCacheBatchPages;
 using reader::kNonResumableCacheBatchPages;
 
-namespace {
-
-uint32_t resolveFb2AnchorSourceOffset(const Fb2* fb2, const std::string& anchor) {
-  if (!fb2) {
-    return 0;
-  }
-
-  constexpr char kPrefix[] = "section_";
-  if (anchor.rfind(kPrefix, 0) != 0) {
-    return 0;
-  }
-
-  const int targetSectionIndex = atoi(anchor.c_str() + static_cast<int>(sizeof(kPrefix) - 1));
-  if (targetSectionIndex < 0) {
-    return 0;
-  }
-
-  const uint16_t tocCount = fb2->tocCount();
-  for (uint16_t i = 0; i < tocCount; ++i) {
-    const Fb2::TocItem item = fb2->getTocItem(i);
-    if (item.sectionIndex == targetSectionIndex) {
-      return item.sourceOffset;
-    }
-  }
-
-  return 0;
-}
-
-}  // namespace
+// v3.8.0 — resolveFb2AnchorSourceOffset() removed: its only caller was the
+// legacy whole-book FB2 anchor TOC-jump worker, deleted with the ParsedText path.
 
 void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController::BackgroundCacheRequest& request,
                                         const reader::ReaderAsyncJobsController::AbortCallback& shouldAbort) {
@@ -384,11 +357,11 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
 
   Core& coreRef = *corePtr;
   const ContentType type = coreRef.content.metadata().type;
-  if (type != ContentType::Epub && type != ContentType::Fb2) {
-    return;
-  }
-
-  if (type == ContentType::Fb2 && fb2UsesSectionNavigation(coreRef.content.asFb2())) {
+  // v3.8.0 — only EPUB uses the async anchor TOC-jump worker.  FB2 TOC jumps are
+  // synchronous (section-based via fb2UsesSectionNavigation); TOC-less FB2 has no
+  // TOC to jump to.  The legacy whole-book FB2 anchor walk was removed with the
+  // ParsedText/Expat path.
+  if (type != ContentType::Epub) {
     return;
   }
 
@@ -581,82 +554,10 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
     return;
   }
 
-  const std::string cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
-  auto* provider = coreRef.content.asFb2();
-  auto* fb2 = provider ? provider->getFb2() : nullptr;
-  const uint32_t targetSourceOffset = resolveFb2AnchorSourceOffset(fb2, targetAnchor);
-  Fb2Parser parser(contentPath_, renderer_, config);
-  if (fb2) parser.setFb2(fb2);
-  PageCache cache(cachePath);
-  bool cacheLoaded = cache.load(config);
-  int targetPageHint = request.targetPageHint;
-  if (cacheLoaded && !LittleFS.exists((cachePath + ".anchors").c_str())) {
-    cacheLoaded = false;
-    cache.clear();
-  }
-
-  auto anchorResolved = [&]() -> bool {
-    if (targetAnchor.empty()) {
-      return cache.pageCount() > 0;
-    }
-    return loadAnchorPage(cachePath, targetAnchor) >= 0;
-  };
-
-  if (anchorResolved()) {
-    return;
-  }
-
-  while (!(shouldAbort && shouldAbort())) {
-    const bool resumable = parser.canResume();
-    const int currentPages = static_cast<int>(cache.pageCount());
-    const int growthPages = std::max(kFb2TocJumpMinimumGrowthPages, currentPages / 3);
-    int desiredTotalPages = currentPages > 0 ? currentPages + growthPages : kFb2TocJumpMinimumGrowthPages;
-    if (targetPageHint >= 0) {
-      desiredTotalPages = std::max(desiredTotalPages, targetPageHint + kFb2TocJumpHeadroomPages);
-    }
-    desiredTotalPages = std::max(desiredTotalPages, currentPages + 1);
-    if (!resumable && targetPageHint >= 0 && desiredTotalPages > currentPages) {
-      const int cappedGrowth =
-          std::max(kFb2TocJumpMinimumGrowthPages, std::min(kFb2TocJumpColdStartCapPages, desiredTotalPages - currentPages));
-      desiredTotalPages = std::min(desiredTotalPages, currentPages + cappedGrowth);
-    }
-
-    const uint16_t batchSize =
-        cacheLoaded ? static_cast<uint16_t>(std::max(1, desiredTotalPages - currentPages))
-                    : static_cast<uint16_t>(desiredTotalPages);
-
-    LOG_INF(TAG, "[ASYNC] FB2 TOC build anchor=%s current=%u target=%u hint=%d resumable=%u", targetAnchor.c_str(),
-            static_cast<unsigned>(cache.pageCount()), static_cast<unsigned>(desiredTotalPages),
-            targetPageHint, static_cast<unsigned>(resumable));
-
-    const bool success =
-        cacheLoaded ? cache.extend(parser, batchSize, shouldAbort) : cache.create(parser, config, batchSize, 0, shouldAbort);
-    if (!success) {
-      LOG_ERR(TAG, "[ASYNC] FB2 TOC worker failed anchor=%s hint=%d", targetAnchor.c_str(), targetPageHint);
-      break;
-    }
-
-    saveAnchorMap(parser, cachePath);
-    if (anchorResolved() || !cache.isPartial()) {
-      break;
-    }
-
-    const uint32_t parsedOffset = parser.lastParsedOffset();
-    if (targetSourceOffset > 0 && parsedOffset > 0 && parsedOffset < targetSourceOffset && cache.pageCount() > 0) {
-      const uint64_t scaled = static_cast<uint64_t>(cache.pageCount()) * targetSourceOffset;
-      const int refinedHint = static_cast<int>(scaled / parsedOffset);
-      if (refinedHint > targetPageHint) {
-        targetPageHint = refinedHint + std::max(4, refinedHint / 8);
-        LOG_INF(TAG,
-                "[ASYNC] FB2 TOC refine anchor=%s parsedOffset=%u targetOffset=%u refinedHint=%d",
-                targetAnchor.c_str(), static_cast<unsigned>(parsedOffset), static_cast<unsigned>(targetSourceOffset),
-                targetPageHint);
-      }
-    }
-
-    cacheLoaded = true;
-    vTaskDelay(1 / portTICK_PERIOD_MS);
-  }
+  // v3.8.0 — the legacy whole-book FB2 anchor TOC-jump worker was removed with
+  // the ParsedText/Expat path (it relied on Fb2Parser::lastParsedOffset() +
+  // the legacy anchor map).  FB2 returns early above, so this point is
+  // unreachable; the EPUB branch returns before here.
 }
 
 void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFillRequest& request,
