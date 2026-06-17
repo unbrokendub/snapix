@@ -339,6 +339,15 @@ foreach(TEST_SRC ${TEST_SOURCES})
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/lib/SmolPort/src
     )
+  elseif(TEST_NAME STREQUAL "ChunkedMarkersReaderTest")
+    # Header-only reader presenting chunk segments as one logical stream.
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
   elseif(TEST_NAME STREQUAL "MarkerizedPageRenderTest")
     # v2.0.121 Phase R3.4 — page-targeted streaming render.  Composes
     # markerize + chapter renderer + paginator with a draw-suppression
