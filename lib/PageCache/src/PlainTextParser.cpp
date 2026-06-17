@@ -50,6 +50,10 @@ class AnyFile {
   int read(uint8_t* buf, size_t len) {
     return useLittleFs_ ? lfsFile_.read(buf, len) : sdFile_.read(buf, len);
   }
+  bool rewind() {
+    // SdFat: seekSet(absolute); Arduino File: seek(pos, SeekSet).
+    return useLittleFs_ ? lfsFile_.seek(0, SeekSet) : sdFile_.seekSet(0);
+  }
   void close() {
     if (!open_) return;
     if (useLittleFs_) {
@@ -66,6 +70,20 @@ class AnyFile {
   bool useLittleFs_ = false;
   bool open_ = false;
 };
+
+// True if the sample contains a BLANK line (a newline followed by only
+// whitespace up to the next newline).  When present, blank lines are the
+// paragraph separators, so single newlines are soft wraps → TxtStripper reflow
+// mode.  When absent, every line is its own paragraph (no reflow).
+bool sampleHasBlankLines(const uint8_t* buf, int len) {
+  for (int i = 0; i < len; ++i) {
+    if (buf[i] != '\n') continue;
+    int j = i + 1;
+    while (j < len && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\r')) ++j;
+    if (j < len && buf[j] == '\n') return true;
+  }
+  return false;
+}
 
 }  // namespace
 
@@ -106,6 +124,15 @@ bool PlainTextParser::tryMarkerize() {
 
   constexpr size_t kChunkBufBytes = 4096;
   uint8_t chunkBuf[kChunkBufBytes];
+
+  // Sample the head to decide paragraph mode: hard-wrapped text (blank-line
+  // separators present) reflows single newlines into paragraphs; otherwise each
+  // line is its own paragraph.  Reuse chunkBuf for the sample, then rewind.
+  const int sampleN = file.read(chunkBuf, sizeof(chunkBuf));
+  const bool reflow = sampleN > 0 && sampleHasBlankLines(chunkBuf, sampleN);
+  file.rewind();
+  LOG_INF(TAG, "markerize start reflow=%u (sample=%d)", static_cast<unsigned>(reflow), sampleN);
+
   uint32_t inBytes = 0;
   uint32_t outBytes = 0;
   uint16_t chunkCount = 0;
@@ -122,7 +149,7 @@ bool PlainTextParser::tryMarkerize() {
           return outFile && outFile.write(d, l) == l;
         };
         snapix::smolport::CallbackSink sink(writeFn, noAbort, outBytes);
-        snapix::smolport::TxtStripper stripper(sink);
+        snapix::smolport::TxtStripper stripper(sink, reflow);
         status = snapix::smolport::runMarkerizeLoop(stripper, sink, readFn, chunkBuf, sizeof(chunkBuf),
                                                     noAbort, inBytes, chunkCount);
         return status == snapix::smolport::MarkerizeStatus::Success;

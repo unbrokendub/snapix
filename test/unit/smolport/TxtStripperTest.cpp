@@ -31,7 +31,15 @@ std::string toStr(const std::vector<uint8_t>& v) { return std::string(v.begin(),
 
 std::string feedAll(const std::string& in) {
   CollectSink sink;
-  TxtStripper s(sink);
+  TxtStripper s(sink);  // reflow = false (every newline run → paragraph)
+  s.feed(reinterpret_cast<const uint8_t*>(in.data()), in.size());
+  s.finish();
+  return toStr(sink.data);
+}
+
+std::string feedReflow(const std::string& in) {
+  CollectSink sink;
+  TxtStripper s(sink, /*reflow=*/true);  // single \n → space, blank line → paragraph
   s.feed(reinterpret_cast<const uint8_t*>(in.data()), in.size());
   s.finish();
   return toStr(sink.data);
@@ -114,6 +122,33 @@ int main() {
     s.feed(reinterpret_cast<const uint8_t*>("\nsecond"), 7);  // leading \n must be suppressed post-reset
     s.finish();
     runner.expectEqual("second", toStr(sink.data), "T13_reset");
+  }
+
+  // -- reflow mode (hard-wrapped text) --
+
+  // R1: single newline → space (lines join into one paragraph).
+  runner.expectEqual("line one line two", feedReflow("line one\nline two"), "R1_softwrap_join");
+
+  // R2: blank line → paragraph break.
+  runner.expectEqual("para one" + PB + "para two", feedReflow("para one\n\npara two"), "R2_blank_break");
+
+  // R3: hard-wrapped paragraph (several short lines) reflows, blank line breaks.
+  runner.expectEqual("a b c" + PB + "d e", feedReflow("a\nb\nc\n\nd\ne"), "R3_hardwrap");
+
+  // R4: 3+ newlines still collapse to ONE paragraph break.
+  runner.expectEqual("x" + PB + "y", feedReflow("x\n\n\n\ny"), "R4_collapse");
+
+  // R5: leading newlines suppressed.
+  runner.expectEqual("first", feedReflow("\n\nfirst"), "R5_leading");
+
+  // R6: chunk boundary mid-softwrap → still a single space.
+  {
+    CollectSink sink;
+    TxtStripper s(sink, /*reflow=*/true);
+    s.feed(reinterpret_cast<const uint8_t*>("aaa\n"), 4);
+    s.feed(reinterpret_cast<const uint8_t*>("bbb"), 3);
+    s.finish();
+    runner.expectEqual("aaa bbb", toStr(sink.data), "R6_softwrap_across_chunks");
   }
 
   runner.printSummary();

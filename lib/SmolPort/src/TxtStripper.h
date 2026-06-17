@@ -5,12 +5,17 @@
 // byte-marker styled-text format (see Markers.h).
 //
 // Plain text carries no markup, so the only structural transform is paragraph
-// detection.  The legacy PlainTextParser treated EVERY newline as a paragraph
-// break (each source line became its own paragraph with spacing); this stripper
-// preserves that "newline starts a new paragraph" model but COLLAPSES a run of
-// consecutive newlines into a single kParagraphBreak — the legacy path emitted
-// one paragraph gap per '\n', so a blank-line-separated file double-spaced; one
-// break per run is the cleaner, equivalent result.
+// detection.  Two modes (chosen by the caller from a sample of the file):
+//
+//   reflow = false  — every run of newlines → one kParagraphBreak.  Right for
+//                     files where each line IS a paragraph (one long line per
+//                     paragraph, no blank-line separators).
+//
+//   reflow = true   — a BLANK line (>= 2 newlines) → kParagraphBreak; a single
+//                     newline → a space (soft wrap join).  Right for hard-
+//                     wrapped text (short lines, blank-line paragraph breaks):
+//                     the lines reflow into real paragraphs instead of each
+//                     wrapped line becoming its own one-line paragraph.
 //
 // All other bytes pass through unchanged (UTF-8 safe).  Inter-word whitespace
 // (space, tab) passes through as text — StreamingPaginator::isAsciiSpace treats
@@ -30,7 +35,7 @@ namespace snapix::smolport {
 
 class TxtStripper {
  public:
-  explicit TxtStripper(HtmlStripperSink& sink) : sink_(sink) {}
+  explicit TxtStripper(HtmlStripperSink& sink, bool reflow = false) : sink_(sink), reflow_(reflow) {}
 
   // Feed an arbitrary chunk of bytes.  Safe to call repeatedly; the
   // paragraph-collapse state survives chunk boundaries.  Returns the number
@@ -45,13 +50,14 @@ class TxtStripper {
   // Reset for a fresh document.
   void reset() {
     seenContent_ = false;
-    pendingBreak_ = false;
+    newlinesPending_ = 0;
   }
 
  private:
   HtmlStripperSink& sink_;
-  bool seenContent_ = false;   // emitted any text yet? (suppresses a leading break)
-  bool pendingBreak_ = false;  // newline(s) seen since the last text byte
+  bool reflow_ = false;          // single '\n' → space (true) vs paragraph break (false)
+  bool seenContent_ = false;     // emitted any text yet? (suppresses a leading break)
+  uint16_t newlinesPending_ = 0; // newlines seen since the last text byte (capped)
 };
 
 }  // namespace snapix::smolport

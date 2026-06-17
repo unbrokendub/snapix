@@ -87,7 +87,11 @@ class CallbackSink : public HtmlStripperSink {
   bool writeFailed() const { return writeFailed_; }
 
  private:
-  static constexpr size_t kStageCapacity = 1024;
+  // v3.7.0 — 1 KB → 4 KB.  A big single-section TXT/MD markerize writes ~2 MB to
+  // LittleFS; quadrupling the coalescing buffer cuts the write-call count 4× for
+  // a meaningful speedup on the slow flash, at +3 KB on the (20 KB) worker stack.
+  // EPUB/FB2 output is unchanged (just larger flushes).
+  static constexpr size_t kStageCapacity = 4096;
   MarkerizeWriteFn& writeChunk_;
   const MarkerizeAbortFn& shouldAbort_;
   uint32_t& outBytesAccum_;

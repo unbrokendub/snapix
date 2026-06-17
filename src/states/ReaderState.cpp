@@ -2795,10 +2795,14 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
             streamOffsetCacheBookPath_ = bookCachePath;
             streamOffsetCacheKey_ = markersKey;
             // v2.0.167 — read idx from UnifiedCache::Idx segment.
+            // v3.7.0 — cap raised 4 KB → 64 KB: a single TXT/MD section can run
+            // to thousands of pages (idx = 8 B/page), and idxPayload is a heap
+            // vector so the larger read is safe.  Per-chapter EPUB/FB2 idx stay
+            // small; this only lets the big single-section idx load.
             std::vector<uint8_t> idxPayload;
             if (ucache.readSegment(snapix::unifiedcache::Kind::Idx,
                                      static_cast<uint16_t>(markersKey), idxPayload)) {
-              if (idxPayload.size() > 0 && idxPayload.size() <= 4096 &&
+              if (idxPayload.size() > 0 && idxPayload.size() <= 65536 &&
                   snapix::smolport::deserializePageIndex(idxPayload.data(), idxPayload.size(),
                                                           cfgHash, streamOffsetCache_)) {
                 LOG_INF(TAG, "[STREAM] idx loaded spine=%d entries=%u (UnifiedCache::Idx)",

@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <vector>
 
 #define TAG "STREAM_SEC"
@@ -144,27 +146,34 @@ uint16_t ensureStreamingSectionIdx(const std::string& bookCachePath, uint16_t se
     return 0;
   }
 
+  const uint16_t totalPages = static_cast<uint16_t>(captured.size() + 1);
+
+  // A single TXT/MD section can run to thousands of pages (e.g. a 1.8 MB novel),
+  // so the idx may exceed the 4 KB EPUB/FB2 stack buffer.  Persisting the FULL
+  // idx is REQUIRED for correct navigation: if it isn't persisted, the render
+  // path cold-walks and saves only a partial (prefix) idx on exit, which a later
+  // open then mistakes for the complete page count — pagination gets stuck a few
+  // pages in.  Allocate exactly what's needed on the heap (nothrow → degrade,
+  // never reboot).
   const size_t needed =
       snapix::smolport::kPageIndexHeaderBytes + captured.size() * snapix::smolport::kPageIndexEntryBytes;
-  if (needed > 4096) {
-    // >~500 pages for one section.  The render path can still cold-build into
-    // streamOffsetCache_; just report the count so navigation works.
-    LOG_INF(TAG, "[STREAM] idx too large to persist key=%u pages=%u", static_cast<unsigned>(sectionKey),
-            static_cast<unsigned>(captured.size() + 1));
-    return static_cast<uint16_t>(captured.size() + 1);
+  std::unique_ptr<uint8_t[]> serdebuf(new (std::nothrow) uint8_t[needed]);
+  if (!serdebuf) {
+    LOG_ERR(TAG, "[STREAM] idx alloc failed key=%u bytes=%zu pages=%u",
+            static_cast<unsigned>(sectionKey), needed, static_cast<unsigned>(totalPages));
+    return totalPages;  // count is known; render falls back to cold-walk
   }
-  uint8_t serdebuf[4096];
   const size_t wrote = snapix::smolport::serializePageIndex(captured.data(), captured.size(),
-                                                            configHash, serdebuf, sizeof(serdebuf));
-  if (wrote == 0) return static_cast<uint16_t>(captured.size() + 1);
+                                                            configHash, serdebuf.get(), needed);
+  if (wrote == 0) return totalPages;
 
-  if (!cache.writeSegment(snapix::unifiedcache::Kind::Idx, sectionKey, serdebuf, wrote)) {
+  if (!cache.writeSegment(snapix::unifiedcache::Kind::Idx, sectionKey, serdebuf.get(), wrote)) {
     LOG_ERR(TAG, "[STREAM] idx write failed key=%u", static_cast<unsigned>(sectionKey));
   } else {
-    LOG_INF(TAG, "[STREAM] idx built key=%u pages=%u bytes=%u", static_cast<unsigned>(sectionKey),
-            static_cast<unsigned>(captured.size() + 1), static_cast<unsigned>(stats.bytesConsumed));
+    LOG_INF(TAG, "[STREAM] idx built key=%u pages=%u bytes=%zu", static_cast<unsigned>(sectionKey),
+            static_cast<unsigned>(totalPages), wrote);
   }
-  return static_cast<uint16_t>(captured.size() + 1);
+  return totalPages;
 }
 
 #else  // !SNAPIX_MARKERIZER

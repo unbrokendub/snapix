@@ -8,21 +8,29 @@ size_t TxtStripper::feed(const uint8_t* data, size_t len) {
   for (size_t i = 0; i < len; ++i) {
     const uint8_t b = data[i];
 
-    // Newline: defer the paragraph break.  A run of consecutive '\n' (with
-    // interspersed '\r') collapses to ONE break, emitted lazily when the next
-    // text byte arrives.  Deferring also means trailing newlines emit nothing.
+    // Newline: count it (deferred).  A run is resolved when the next text byte
+    // arrives — so trailing newlines emit nothing, and the count distinguishes
+    // a single newline (soft wrap in reflow mode) from a blank line (paragraph).
     if (b == '\n') {
-      if (seenContent_) pendingBreak_ = true;
+      if (seenContent_ && newlinesPending_ < 0xFFFF) ++newlinesPending_;
       continue;
     }
     if (b == '\r') continue;  // CR (CRLF) — ignored; the '\n' drives the break.
 
-    // Any other byte is text content.  Emit the deferred paragraph break first.
-    if (pendingBreak_) {
-      const uint8_t br[2] = {kMarker, kParagraphBreak};
-      sink_.emit(br, sizeof(br));
-      pendingBreak_ = false;
+    // Text byte.  Resolve any pending newline run first.
+    if (newlinesPending_ > 0) {
+      if (reflow_ && newlinesPending_ == 1) {
+        // Hard-wrapped line continuation → join with a space.
+        const uint8_t sp = ' ';
+        sink_.emit(&sp, 1);
+      } else {
+        // Paragraph break: every newline run (non-reflow) or a blank line (reflow).
+        const uint8_t br[2] = {kMarker, kParagraphBreak};
+        sink_.emit(br, sizeof(br));
+      }
+      newlinesPending_ = 0;
     }
+
     if (b == kMarker) {
       // Self-double a literal 0x01 so the stream stays self-synchronising.
       const uint8_t esc[2] = {kMarker, kMarker};
@@ -32,8 +40,7 @@ size_t TxtStripper::feed(const uint8_t* data, size_t len) {
     }
     seenContent_ = true;
 
-    // Cooperative early-exit (write failure / abort) — report bytes consumed
-    // so the caller can rewind, matching HtmlStripper::feed semantics.
+    // Cooperative early-exit (write failure / abort) — report bytes consumed.
     if (sink_.shouldStop()) return i + 1;
   }
   return len;
