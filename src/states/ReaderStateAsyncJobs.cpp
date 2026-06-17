@@ -138,8 +138,13 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
         const auto* mdProv = coreRef.content.asMarkdown();
         const Markdown* md = mdProv ? mdProv->getMarkdown() : nullptr;
         const std::string parserPath = md ? md->getEffectiveContentPath() : std::string(contentPath_);
+        const std::string mdCachePath = md ? md->getCachePath() : std::string();
         const bool useLfs = md ? md->isContentOnLittleFs() : false;
-        parser_.reset(new MarkdownParser(parserPath, renderer_, config, useLfs));
+        // v3.7.0 — streaming MD parser; plumb viewport so the MEASURE-walk
+        // .idx config matches the render path (see EPUB site above).
+        auto* mdParser = new MarkdownParser(parserPath, mdCachePath, renderer_, config, useLfs);
+        mdParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
+        parser_.reset(mdParser);
         parserSpineIndex_ = 0;
       }
     } else if (type == ContentType::Fb2 && !(shouldAbort && shouldAbort())) {
@@ -186,8 +191,13 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
         const auto* txtProv = coreRef.content.asTxt();
         const Txt* txt = txtProv ? txtProv->getTxt() : nullptr;
         const std::string parserPath = txt ? txt->getEffectiveContentPath() : std::string(contentPath_);
+        const std::string txtCachePath = txt ? txt->getCachePath() : std::string();
         const bool useLfs = txt ? txt->isContentOnLittleFs() : false;
-        parser_.reset(new PlainTextParser(parserPath, renderer_, config, useLfs));
+        // v3.7.0 — streaming TXT parser; plumb viewport so the MEASURE-walk
+        // .idx config matches the render path (see EPUB site above).
+        auto* txtParser = new PlainTextParser(parserPath, txtCachePath, renderer_, config, useLfs);
+        txtParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
+        parser_.reset(txtParser);
         parserSpineIndex_ = 0;
       }
     }
@@ -742,8 +752,11 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
         const auto* mdProv = coreRef.content.asMarkdown();
         const Markdown* md = mdProv ? mdProv->getMarkdown() : nullptr;
         const std::string parserPath = md ? md->getEffectiveContentPath() : std::string(contentPath_);
+        const std::string mdCachePath = md ? md->getCachePath() : std::string();
         const bool useLfs = md ? md->isContentOnLittleFs() : false;
-        parser_.reset(new MarkdownParser(parserPath, renderer_, config, useLfs));
+        auto* mdParser = new MarkdownParser(parserPath, mdCachePath, renderer_, config, useLfs);
+        mdParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
+        parser_.reset(mdParser);
         parserSpineIndex_ = 0;
       } else if (type == ContentType::Html) {
         // v2.0.162 — HtmlParser deleted; see comment in the analogous
@@ -754,8 +767,11 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
         const auto* txtProv = coreRef.content.asTxt();
         const Txt* txt = txtProv ? txtProv->getTxt() : nullptr;
         const std::string parserPath = txt ? txt->getEffectiveContentPath() : std::string(contentPath_);
+        const std::string txtCachePath = txt ? txt->getCachePath() : std::string();
         const bool useLfs = txt ? txt->isContentOnLittleFs() : false;
-        parser_.reset(new PlainTextParser(parserPath, renderer_, config, useLfs));
+        auto* txtParser = new PlainTextParser(parserPath, txtCachePath, renderer_, config, useLfs);
+        txtParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
+        parser_.reset(txtParser);
         parserSpineIndex_ = 0;
       }
     }

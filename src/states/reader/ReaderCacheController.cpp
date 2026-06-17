@@ -1076,9 +1076,14 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
       const auto* mdProv = core.content.asMarkdown();
       const Markdown* md = mdProv ? mdProv->getMarkdown() : nullptr;
       const std::string parserPath = md ? md->getEffectiveContentPath() : std::string(contentPath_);
+      const std::string mdCachePath = md ? md->getCachePath() : std::string();
       const bool useLfs = md ? md->isContentOnLittleFs() : false;
+      // v3.7.0 — streaming MD parser (background build).  Like EPUB here, the
+      // viewport isn't plumbed; the render path rebuilds the .idx with real
+      // margins on first visit (configHash self-heal).
       state.parser = tryNewUnique<ContentParser, MarkdownParser>("MarkdownParser", parserPath,
-                                                                  resources_.renderer(), config, useLfs);
+                                                                  mdCachePath, resources_.renderer(),
+                                                                  config, useLfs);
       if (!state.parser) return;
       state.parserSpineIndex = 0;
     }
@@ -1132,9 +1137,13 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
       const auto* txtProv = core.content.asTxt();
       const Txt* txt = txtProv ? txtProv->getTxt() : nullptr;
       const std::string parserPath = txt ? txt->getEffectiveContentPath() : std::string(contentPath_);
+      const std::string txtCachePath = txt ? txt->getCachePath() : std::string();
       const bool useLfs = txt ? txt->isContentOnLittleFs() : false;
+      // v3.7.0 — streaming TXT parser (background build); see MD note above re:
+      // viewport / configHash self-heal on first render.
       state.parser = tryNewUnique<ContentParser, PlainTextParser>("PlainTextParser", parserPath,
-                                                                   resources_.renderer(), config, useLfs);
+                                                                   txtCachePath, resources_.renderer(),
+                                                                   config, useLfs);
       if (!state.parser) return;
       state.parserSpineIndex = 0;
     }

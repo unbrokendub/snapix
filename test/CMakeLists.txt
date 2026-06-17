@@ -111,6 +111,18 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/lib/Utf8/src/Utf8.cpp
       ${TEST_HELPERS}
     )
+  elseif(TEST_NAME STREQUAL "MarkdownStripperTest")
+    # Markdown → marker-byte stripper (reuses md_parser, emits SmolPort markers).
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/Markdown/src/MarkdownStripper.cpp
+      ${PROJECT_ROOT}/lib/Markdown/src/md_parser.c
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/Markdown/src
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
   elseif(TEST_NAME MATCHES "^MarkdownParser.*Test$")
     add_executable(${TEST_NAME}
       ${TEST_SRC}
@@ -328,6 +340,16 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${TEST_SRC}
       ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
       ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
+  elseif(TEST_NAME STREQUAL "TxtStripperTest")
+    # TXT → marker-byte stripper (plain text, paragraph detection only).
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/TxtStripper.cpp
       ${TEST_HELPERS}
     )
     target_include_directories(${TEST_NAME} PRIVATE

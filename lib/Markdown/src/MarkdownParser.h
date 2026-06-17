@@ -1,109 +1,75 @@
 /**
  * MarkdownParser.h
  *
- * Markdown parser using md_parser for tokenization.
- * Implements ContentParser interface for integration with PageCache.
- * Reads directly from SD card with minimal memory usage.
+ * v3.7.0 — migrated from the legacy ParsedText block path to the v3 streaming
+ * pipeline (same as EPUB/FB2 and PlainTextParser):
+ *   tryMarkerize()  (file → MarkdownStripper → UnifiedCache::Markers key 0)
+ *   → ensureStreamingSectionIdx()  (MEASURE-only walk → UnifiedCache::Idx)
+ *   → short-circuit emits empty Page objects from the idx page count.
+ *
+ * ReaderState::renderPageContents reads the markers directly for layout +
+ * drawing.  The md_parser tokeniser still does Markdown syntax recognition —
+ * now inside MarkdownStripper, emitting markers instead of ParsedText blocks.
  */
 
 #pragma once
 
 #include <ContentParser.h>
 #include <RenderConfig.h>
-#include <ScriptDetector.h>
 #include <SdFat.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 
-#include "md_parser.h"
-
 class Page;
 class GfxRenderer;
-class ParsedText;
-class TextBlock;
 
-constexpr int MAX_WORD_SIZE = 200;
-constexpr int LINE_BUFFER_SIZE = 512;
-
-/**
- * Content parser for Markdown files using md_parser tokenization.
- * Parses markdown syntax (headers, bold, italic, lists, etc.) into styled text.
- * Minimal memory usage - reads line by line from SD card.
- */
 class MarkdownParser : public ContentParser {
  public:
-  // v2.0.192 — `useLittleFs` defaults to false for backward compatibility
-  // with existing callers.  Markdown callers that routed through a cp1251
-  // → UTF-8 cache (from Markdown::isContentOnLittleFs()) must pass true,
-  // and `filepath` should be the LittleFS cache path.
-  MarkdownParser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config,
-                 bool useLittleFs = false);
+  // `bookCachePath` is the book's cache directory (Markdown::getCachePath()).
+  // `useLittleFs` selects SD vs LittleFS for the source read (cp1251 UTF-8
+  // cache lives on LittleFS).
+  MarkdownParser(std::string filepath, std::string bookCachePath, GfxRenderer& renderer,
+                 const RenderConfig& config, bool useLittleFs = false);
   ~MarkdownParser() override;
 
   bool parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages = 0,
                   const AbortCallback& shouldAbort = nullptr) override;
   bool hasMoreContent() const override { return hasMore_; }
-  bool canResume() const override { return currentOffset_ > 0 && hasMore_; }
+  bool canResume() const override {
+    return shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_;
+  }
   void reset() override;
 
+  // Plumb real reader viewport margins (called right after construction), so the
+  // upfront MEASURE walk uses the same paginator config as the render path.
+  void setStreamingViewport(int marginTop, int marginBottom, int marginLeft, int marginRight) {
+    streamingViewportMarginTop_ = marginTop;
+    streamingViewportMarginBottom_ = marginBottom;
+    streamingViewportMarginLeft_ = marginLeft;
+    streamingViewportMarginRight_ = marginRight;
+  }
+
  private:
-  // File state
-  std::string filepath_;
+  std::string filepath_;       // effective content path (SD or LittleFS UTF-8 cache)
+  std::string bookCachePath_;  // UnifiedCache dir (Markdown::getCachePath())
   GfxRenderer& renderer_;
   RenderConfig config_;
-  size_t fileSize_ = 0;
-  size_t currentOffset_ = 0;
-  bool hasMore_ = true;
-  bool isRtl_ = false;
-  // v2.0.192 — when true, `filepath_` lives on LittleFS (UTF-8 cache
-  // from a cp1251 source).  Open via LittleFS.open() instead of
-  // SdMan.openFileForRead().
   bool useLittleFs_ = false;
+  bool hasMore_ = true;
 
-  // Line buffer for reading from file
-  char lineBuffer_[LINE_BUFFER_SIZE];
+  // Streaming state (mirrors EpubChapterParser / PlainTextParser).
+  bool markerizeAttempted_ = false;
+  bool shortCircuitActive_ = false;
+  uint16_t shortCircuitTotalPages_ = 0;
+  uint16_t shortCircuitNextPage_ = 0;
 
-  // Carries over unconsumed words from a text block that was
-  // interrupted by a page-batch limit.
-  std::unique_ptr<ParsedText> pendingTextBlock_;
-  std::unique_ptr<Page> pendingPage_;
-  int16_t pendingPageNextY_ = 0;
+  int streamingViewportMarginTop_ = 4;
+  int streamingViewportMarginBottom_ = 4;
+  int streamingViewportMarginLeft_ = 4;
+  int streamingViewportMarginRight_ = 4;
 
-  // Parsing context passed through md_parser callback
-  struct ParseContext {
-    MarkdownParser* self;
-    std::unique_ptr<ParsedText> textBlock;
-    std::unique_ptr<Page> currentPage;
-    int16_t pageNextY;
-    bool inBold;
-    bool inItalic;
-    bool inCodeBlock;
-    int headerLevel;
-    bool hitMaxPages;
-    uint16_t pagesCreated;
-    uint16_t maxPages;
-    bool replayCurrentLine;
-    std::function<void(std::unique_ptr<Page>)> onPageComplete;
-
-    // Word buffer for building words
-    char wordBuffer[MAX_WORD_SIZE + 1];
-    int wordBufferIndex;
-  };
-
-  // Static callback for md_parser
-  static bool tokenCallback(const md_token_t* token, void* userData);
-
-  // Helpers
-  // v2.0.192 — readLine moved to a free function in MarkdownParser.cpp's
-  // anonymous namespace so it can take the AnyFile wrapper (which can't
-  // appear in the header without pulling FS.h/LittleFS.h into every
-  // includer).  See parsePages() for the new call sites.
-  void appendTextBytes(ParseContext& ctx, const char* data, int len);
-  void flushWordBuffer(ParseContext& ctx);
-  void flushTextBlock(ParseContext& ctx);
-  bool addLineToPage(ParseContext& ctx, std::shared_ptr<TextBlock> line);
-  int getCurrentFontStyle(const ParseContext& ctx) const;
-  void startNewTextBlock(ParseContext& ctx, int style);
+  bool tryMarkerize();
 };

@@ -2497,6 +2497,20 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
         markersKey = item.sectionIndex;
       }
     }
+  } else if (contentType == ContentType::Txt) {
+    // v3.7.0 — TXT is single-section: markers + idx live under key 0.
+    auto* txtProv = core.content.asTxt();
+    if (txtProv && txtProv->getTxt()) {
+      bookCachePath = txtProv->getTxt()->getCachePath();
+      markersKey = 0;
+    }
+  } else if (contentType == ContentType::Markdown) {
+    // v3.7.0 — Markdown is single-section: markers + idx live under key 0.
+    auto* mdProv = core.content.asMarkdown();
+    if (mdProv && mdProv->getMarkdown()) {
+      bookCachePath = mdProv->getMarkdown()->getCachePath();
+      markersKey = 0;
+    }
   }
   if (!bookCachePath.empty() && markersKey >= 0) {
     auto ucache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
@@ -2543,12 +2557,20 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           // v3.3.0 — hyphenation language.  MUST match the MEASURE-walk cfg in
           // EpubChapterParser (EPUB declared language) / Fb2Parser ("ru") or
           // page boundaries drift between the .idx build and this render.
-          cfg.hyphenate = true;
+          // v3.7.0 — TXT/MD have no declared language, so they disable
+          // hyphenation (hyphenLang ""), matching the MEASURE-walk config in
+          // StreamingSection::ensureStreamingSectionIdx.  cfg.hyphenate is part
+          // of the .idx configHash, so MEASURE and DRAW MUST agree here.
+          const bool isTxtOrMd =
+              (contentType == ContentType::Txt || contentType == ContentType::Markdown);
+          cfg.hyphenate = !isTxtOrMd;
           {
             const char* lang = "ru";  // FB2 default
             if (contentType == ContentType::Epub && core.content.asEpub() &&
                 core.content.asEpub()->getEpub()) {
               lang = core.content.asEpub()->getEpub()->getLanguage().c_str();
+            } else if (isTxtOrMd) {
+              lang = "";
             }
             std::strncpy(cfg.hyphenLang, lang, sizeof(cfg.hyphenLang) - 1);
             cfg.hyphenLang[sizeof(cfg.hyphenLang) - 1] = '\0';
