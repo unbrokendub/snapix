@@ -39,12 +39,22 @@ struct RenderConfig {
         superSubFontId(superSubFontId) {}
 
   bool operator==(const RenderConfig& o) const {
+    // NOTE: superSubFontId is intentionally NOT compared here.  The page-cache
+    // header (PageCache::writeHeader / load) does not serialize it, so a loaded
+    // fileConfig always reads it back as 0 — including it here made config !=
+    // fileConfig fire forever whenever the live superSubFontId was non-zero,
+    // i.e. an INFINITE cache-rebuild loop (create → "config mismatch" →
+    // invalidate → create …) for any section loaded cross-object (e.g. a
+    // background-prefetched EPUB spine).  The streaming idx configHash
+    // (computePageIndexConfigHash) likewise omits superSubFontId, so excluding
+    // it here keeps the page-cache key consistent with both serialization and
+    // the idx.  (superSubFontId tracks the theme's XSmall font; in practice it
+    // only changes alongside fontId, which IS compared.)
     return fontId == o.fontId && std::abs(lineCompression - o.lineCompression) < 1e-6f &&
            indentLevel == o.indentLevel && spacingLevel == o.spacingLevel &&
            paragraphAlignment == o.paragraphAlignment && hyphenation == o.hyphenation && showImages == o.showImages &&
            bionicReading == o.bionicReading && fakeBold == o.fakeBold &&
-           viewportWidth == o.viewportWidth && viewportHeight == o.viewportHeight &&
-           superSubFontId == o.superSubFontId;
+           viewportWidth == o.viewportWidth && viewportHeight == o.viewportHeight;
   }
   bool operator!=(const RenderConfig& o) const { return !(*this == o); }
 };

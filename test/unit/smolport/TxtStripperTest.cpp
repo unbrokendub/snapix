@@ -63,6 +63,19 @@ std::string feedChunkedReflow(const std::vector<std::string>& chunks) {
   return out;
 }
 
+// Same, non-reflow mode (every newline is a paragraph break).
+std::string feedChunkedNonReflow(const std::vector<std::string>& chunks) {
+  std::string out;
+  for (size_t i = 0; i < chunks.size(); ++i) {
+    CollectSink sink;
+    TxtStripper s(sink, /*reflow=*/false, /*startPendingBreak=*/i > 0);
+    s.feed(reinterpret_cast<const uint8_t*>(chunks[i].data()), chunks[i].size());
+    s.finish();
+    out += toStr(sink.data);
+  }
+  return out;
+}
+
 }  // namespace
 
 int main() {
@@ -200,6 +213,35 @@ int main() {
     s.feed(reinterpret_cast<const uint8_t*>("hello"), 5);
     s.finish();
     runner.expectEqual(PB + "hello", toStr(sink.data), "R10_forced_break");
+  }
+
+  // -- chunked markerize equivalence, NON-reflow (every newline = paragraph) --
+  // Mirrors the lazy markerize cut: chunks split AFTER a '\n' (the boundary
+  // findChunkEnd uses in non-reflow mode).
+
+  // R11: line-per-paragraph chunks concatenate identically to one pass.
+  {
+    const std::string src = "alpha\nbeta\ngamma";
+    const std::vector<std::string> chunks = {"alpha\n", "beta\n", "gamma"};
+    runner.expectEqual(feedAll(src), feedChunkedNonReflow(chunks), "R11_nonreflow_equiv");
+    runner.expectEqual("alpha" + PB + "beta" + PB + "gamma", feedChunkedNonReflow(chunks),
+                       "R11_exact");
+  }
+
+  // R12: a newline RUN split across the cut still collapses to ONE break
+  // (chunk 0 ends after the first '\n'; chunk 1 carries the rest of the run).
+  {
+    const std::string src = "alpha\n\n\nbeta";
+    const std::vector<std::string> chunks = {"alpha\n", "\n\nbeta"};
+    runner.expectEqual(feedAll(src), feedChunkedNonReflow(chunks), "R12_nonreflow_run_split");
+    runner.expectEqual("alpha" + PB + "beta", feedChunkedNonReflow(chunks), "R12_exact");
+  }
+
+  // R13: three chunks, mixed run lengths — all collapse, no spurious breaks.
+  {
+    const std::string src = "one\ntwo\n\nthree";
+    const std::vector<std::string> chunks = {"one\n", "two\n", "\nthree"};
+    runner.expectEqual(feedAll(src), feedChunkedNonReflow(chunks), "R13_nonreflow_mixed");
   }
 
   runner.printSummary();

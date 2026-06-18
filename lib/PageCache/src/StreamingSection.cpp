@@ -13,10 +13,13 @@
 #define TAG "STREAM_SEC"
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+#include <ChunkedMarkersReader.h>
 #include <GfxRenderer.h>
 #include <GfxRendererPaginatorAdapter.h>
 #include <MarkerizedPageRender.h>
 #include <StreamingPaginator.h>
+
+#include "UnifiedCacheChunkProvider.h"
 #endif
 
 namespace snapix::pagecache {
@@ -176,11 +179,123 @@ uint16_t ensureStreamingSectionIdx(const std::string& bookCachePath, uint16_t se
   return totalPages;
 }
 
+uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCachePath,
+                                 bool sourceExhausted, GfxRenderer& renderer,
+                                 const RenderConfig& config, int mT, int mB, int mL, int mR,
+                                 const char* hyphenLang) {
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+
+  const snapix::smolport::StreamingPaginatorConfig cfg =
+      makeSectionConfig(renderer, config, mT, mB, mL, mR, hyphenLang);
+  st.configHash = snapix::smolport::computePageIndexConfigHash(cfg, config.fontId, config.fakeBold);
+  st.configHashValid = true;
+
+  // Present Markers keys 0..N as one logical stream so the resume walk spans the
+  // chunk boundaries.  At least chunk 0 must exist by the time we're called.
+  auto provider = UnifiedCacheChunkProvider::singleSection(cache);
+  snapix::smolport::ChunkedMarkersReader reader(provider);
+  if (reader.chunkCount() <= 0 || reader.totalSize() == 0) {
+    LOG_ERR(TAG, "[STREAM] extend: no marker chunks present");
+    return 0;
+  }
+
+  // Resume from the last (still-incomplete) page boundary so we only measure the
+  // pages that the newest chunk made available.  A fresh idx (no boundaries yet)
+  // walks from page 0 / offset 0.
+  snapix::smolport::MarkerizedRenderResume resume{};
+  if (!st.boundaries.empty()) {
+    const auto& last = st.boundaries.back();
+    resume.startPage = last.pageIndex;
+    resume.byteOffset = last.byteOffset;
+    resume.styleBits = last.styleBits;
+    resume.atParagraphStart = last.atParagraphStart;
+    if (!reader.seekGlobal(last.byteOffset)) {
+      LOG_ERR(TAG, "[STREAM] extend: seek to resume offset %u failed",
+              static_cast<unsigned>(last.byteOffset));
+      return 0;
+    }
+  }
+
+  auto resolveImage = [](const uint8_t*, size_t) -> std::string { return {}; };
+  snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer, config.fontId, config.fontId,
+                                                        /*black=*/true, resolveImage, config.fakeBold,
+                                                        config.superSubFontId);
+  snapix::smolport::StreamingPaginator paginator(cfg, adapter);
+
+  constexpr size_t kChunkBufBytes = 4096;
+  uint8_t chunkBuf[kChunkBufBytes];
+  auto readFn = [&reader](uint8_t* buf, size_t bufSize) -> int { return reader.read(buf, bufSize); };
+
+  // Capture only the boundaries this walk discovers (pages startPage+1 onward);
+  // appended to st.boundaries below — never duplicates the resume boundary.
+  std::vector<snapix::smolport::PageBoundarySnapshot> fresh;
+  auto captureFn = [&fresh](const snapix::smolport::PageBoundarySnapshot& s) { fresh.push_back(s); };
+
+  snapix::smolport::MarkerizedRenderStats stats{};
+  (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf, sizeof(chunkBuf),
+                                               UINT16_MAX, {}, &stats, resume, captureFn);
+
+  for (const auto& b : fresh) st.boundaries.push_back(b);
+
+  const uint16_t totalPages =
+      static_cast<uint16_t>(st.boundaries.size() + (sourceExhausted ? 1 : 0));
+
+  // Persist the full idx (heap-sized, nothrow → degrade not reboot).  A later
+  // open re-uses it; if the write fails the count is still returned and the
+  // render path cold-walks.
+  const size_t needed = snapix::smolport::kPageIndexHeaderBytes +
+                        st.boundaries.size() * snapix::smolport::kPageIndexEntryBytes;
+  std::unique_ptr<uint8_t[]> serdebuf(new (std::nothrow) uint8_t[needed]);
+  if (!serdebuf) {
+    LOG_ERR(TAG, "[STREAM] extend idx alloc failed bytes=%zu pages=%u", needed,
+            static_cast<unsigned>(totalPages));
+    return totalPages;
+  }
+  const size_t wrote = snapix::smolport::serializePageIndex(st.boundaries.data(), st.boundaries.size(),
+                                                            st.configHash, serdebuf.get(), needed);
+  if (wrote > 0 && !cache.writeSegment(snapix::unifiedcache::Kind::Idx, 0, serdebuf.get(), wrote)) {
+    LOG_ERR(TAG, "[STREAM] extend idx write failed pages=%u", static_cast<unsigned>(totalPages));
+  } else {
+    LOG_INF(TAG, "[STREAM] idx extend pages=%u (+%u) exhausted=%u", static_cast<unsigned>(totalPages),
+            static_cast<unsigned>(fresh.size()), static_cast<unsigned>(sourceExhausted));
+  }
+  return totalPages;
+}
+
+uint16_t loadChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCachePath,
+                               GfxRenderer& renderer, const RenderConfig& config, int mT, int mB,
+                               int mL, int mR, const char* hyphenLang) {
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+  const snapix::smolport::StreamingPaginatorConfig cfg =
+      makeSectionConfig(renderer, config, mT, mB, mL, mR, hyphenLang);
+  const uint16_t hash = snapix::smolport::computePageIndexConfigHash(cfg, config.fontId, config.fakeBold);
+
+  std::vector<uint8_t> bytes;
+  if (!cache.readSegment(snapix::unifiedcache::Kind::Idx, 0, bytes) || bytes.empty()) return 0;
+  if (!snapix::smolport::deserializePageIndex(bytes.data(), bytes.size(), hash, st.boundaries)) {
+    st.boundaries.clear();
+    return 0;  // stale / wrong version / wrong config → caller re-measures
+  }
+  st.configHash = hash;
+  st.configHashValid = true;
+  return static_cast<uint16_t>(st.boundaries.size());
+}
+
 #else  // !SNAPIX_MARKERIZER
 
 uint16_t ensureStreamingSectionIdx(const std::string&, uint16_t, GfxRenderer&, const RenderConfig&,
                                    int, int, int, int, const char*) {
   return 0;  // markerizer compiled out — TXT/MD produce no pages (build-test env)
+}
+
+uint16_t extendChunkedSectionIdx(ChunkedIdxState&, const std::string&, bool, GfxRenderer&,
+                                 const RenderConfig&, int, int, int, int, const char*) {
+  return 0;  // markerizer compiled out
+}
+
+uint16_t loadChunkedSectionIdx(ChunkedIdxState&, const std::string&, GfxRenderer&,
+                               const RenderConfig&, int, int, int, int, const char*) {
+  return 0;  // markerizer compiled out
 }
 
 #endif
