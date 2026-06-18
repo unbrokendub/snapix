@@ -341,8 +341,19 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
                                                             config_.superSubFontId);
       snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
+      // HEAP-allocate the streaming buffer — NOT a 4 KB stack array.  This R4.c
+      // MEASURE walk runs on the 20 KB ReaderAsync task and descends into JPEG
+      // header decode via resolveImage; a 4 KB stack frame here overflows the
+      // task stack on image-heavy FB2 (Stack protection fault — the v2.0.149
+      // panic class).  nothrow → degrade (skip the idx build), never crash.
       constexpr size_t kChunkBufBytes = 4096;
-      uint8_t chunkBuf[kChunkBufBytes];
+      std::unique_ptr<uint8_t[]> chunkBuf(new (std::nothrow) uint8_t[kChunkBufBytes]);
+      if (!chunkBuf) {
+        LOG_ERR(TAG, "[CONTENT][FB2] [STREAM] R4.c chunkBuf alloc failed section=%d",
+                startingSectionIndex_);
+        mf.close();
+        break;
+      }
       size_t markersRemaining = markersStreamSize;
       auto readFn = [&mf, &markersRemaining](uint8_t* buf, size_t bufSize) -> int {
         if (!mf || markersRemaining == 0) return markersRemaining == 0 ? 0 : -1;
@@ -358,7 +369,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
       };
 
       snapix::smolport::MarkerizedRenderStats stats{};
-      (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf, sizeof(chunkBuf),
+      (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf.get(), kChunkBufBytes,
                                                     UINT16_MAX, {}, &stats, {}, captureFn);
       mf.close();
 

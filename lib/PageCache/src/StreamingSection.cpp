@@ -228,8 +228,19 @@ uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCac
                                                         config.superSubFontId);
   snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
+  // HEAP-allocate the streaming buffer — NOT a 4 KB stack array.  This MEASURE
+  // walk runs on the 20 KB ReaderAsync task and, for FB2, descends into JPEG
+  // header decode via the image resolver; a 4 KB stack frame here overflows the
+  // task stack on image-heavy books (Stack protection fault — same class as the
+  // v2.0.149 Fb2Parser R4.c panic, fixed in v2.0.151 by heap-allocating the
+  // paginator spillover buffer rather than bumping the stack).  nothrow →
+  // degrade (return the count so far), never crash.
   constexpr size_t kChunkBufBytes = 4096;
-  uint8_t chunkBuf[kChunkBufBytes];
+  std::unique_ptr<uint8_t[]> chunkBuf(new (std::nothrow) uint8_t[kChunkBufBytes]);
+  if (!chunkBuf) {
+    LOG_ERR(TAG, "[STREAM] extend chunkBuf alloc failed");
+    return static_cast<uint16_t>(st.boundaries.size() + (sourceExhausted ? 1 : 0));
+  }
   auto readFn = [&reader](uint8_t* buf, size_t bufSize) -> int { return reader.read(buf, bufSize); };
 
   // Capture only the boundaries this walk discovers (pages startPage+1 onward);
@@ -238,7 +249,7 @@ uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCac
   auto captureFn = [&fresh](const snapix::smolport::PageBoundarySnapshot& s) { fresh.push_back(s); };
 
   snapix::smolport::MarkerizedRenderStats stats{};
-  (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf, sizeof(chunkBuf),
+  (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf.get(), kChunkBufBytes,
                                                UINT16_MAX, {}, &stats, resume, captureFn);
 
   for (const auto& b : fresh) st.boundaries.push_back(b);
