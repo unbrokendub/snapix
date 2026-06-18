@@ -31,6 +31,67 @@
 
 #define TAG "FB2_PARSE"
 
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+namespace {
+
+// v3.10 — no-TOC lazy markerize chunk size (source bytes).  FB2 markers are
+// smaller than source (tags stripped), so ~32 KB source → ~3 s write per chunk.
+constexpr uint32_t kFb2ChunkBytes = 32768;
+
+// Find the end of the chunk starting at `start`: the first ELEMENT boundary —
+// a '>' followed (after optional whitespace) by '<' — at or after
+// start+kFb2ChunkBytes, returned as the offset of that '<' so chunk K+1 begins
+// with a tag.  Returns fileSize if none remains (the last chunk).
+//
+// Safe because the FB2 stripper has no tag-nesting stack and emits block breaks
+// on CLOSE tags, so a fresh stripper resuming at such a boundary produces
+// byte-identical markers (host-proven, Fb2ChunkEquivTest).  Base64 <binary>
+// blobs contain no '<'/'>' so are never split; the small leading <description>
+// sits wholly inside chunk 0 (it's < kFb2ChunkBytes).
+uint32_t findFb2ChunkEnd(FsFile& f, uint32_t start, uint32_t fileSize) {
+  if (start + kFb2ChunkBytes >= fileSize) return fileSize;
+  const uint32_t base = start + kFb2ChunkBytes;
+  {
+    snapix::spi::SharedBusLock lk;
+    if (!f.seek(base)) return fileSize;
+  }
+  uint8_t buf[512];
+  uint32_t scanned = 0;
+  int state = 0;  // 0 = scanning for '>'; 1 = saw '>', skipping ws, expecting '<'
+  for (;;) {
+    int n;
+    {
+      snapix::spi::SharedBusLock lk;
+      n = f.read(buf, sizeof(buf));
+    }
+    if (n <= 0) return fileSize;  // EOF before a boundary → this is the last chunk
+    for (int i = 0; i < n; ++i) {
+      const uint8_t b = buf[i];
+      if (state == 0) {
+        if (b == '>') state = 1;
+      } else {
+        if (b == '<') return base + scanned + static_cast<uint32_t>(i);  // cut at the '<'
+        if (b != ' ' && b != '\t' && b != '\r' && b != '\n') state = 0;  // text after '>' — keep scanning
+      }
+    }
+    scanned += static_cast<uint32_t>(n);
+  }
+}
+
+// Re-derive the source offset of chunk `targetChunk` on cold start by applying
+// the boundary rule from `start`, targetChunk times (cheap — seeks past each
+// chunk body and scans only the boundary tail).
+uint32_t rescanFb2ToChunk(FsFile& f, uint32_t start, uint32_t fileSize, int targetChunk) {
+  uint32_t off = start;
+  for (int i = 0; i < targetChunk && off < fileSize; ++i) {
+    off = findFb2ChunkEnd(f, off, fileSize);
+  }
+  return off;
+}
+
+}  // namespace
+#endif
+
 Fb2Parser::Fb2Parser(std::string filepath, GfxRenderer& renderer, const RenderConfig& config, const uint32_t startOffset,
                      const int startingSectionIndex, const bool sectionScoped, const uint32_t endOffset)
     : filepath_(std::move(filepath)),
@@ -49,6 +110,17 @@ void Fb2Parser::reset() {
   shortCircuitActive_ = false;
   shortCircuitTotalPages_ = 0;
   shortCircuitNextPage_ = 0;
+  // v3.10 — no-TOC progressive state.
+  progressiveInit_ = false;
+  fileSize_ = 0;
+  chunkStart_ = 0;
+  chunkIdx_ = 0;
+  sourceExhausted_ = false;
+  progIdx_.boundaries.clear();
+  progIdx_.configHash = 0;
+  progIdx_.configHashValid = false;
+  progPagesAvailable_ = 0;
+  progEmitCursor_ = 0;
 }
 
 // =============================================================================
@@ -148,6 +220,14 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
   pagesCreated_ = 0;
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  // v3.10 — a no-TOC (whole-book) FB2 uses the LAZY/progressive engine: markerize
+  // one element-bounded chunk per call + extend the idx incrementally, so page 0
+  // shows after chunk 0 instead of after the whole file.  Section-scoped (TOC)
+  // parsers keep the per-section short-circuit path below.
+  if (!sectionScoped_) {
+    return parsePagesProgressive(onPageComplete, maxPages);
+  }
+
   // R4.b STATEFUL short-circuit continuation — drain remaining empty Pages
   // from a previously-read idx page count (cache batches with maxPages).
   if (shortCircuitActive_) {
@@ -377,3 +457,205 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
   return false;
 #endif
 }
+
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+// =============================================================================
+// v3.10 — no-TOC (whole-book) LAZY/progressive markerize.  Mirrors
+// PlainTextParser: one element-bounded chunk markerized per parsePages call
+// (Markers keys 0,1,2,…) + incremental idx via extendChunkedSectionIdx over a
+// ChunkedMarkersReader.  Reboot-safe with no persisted cursor (probe chunks +
+// rescan for element boundaries).  The render path already reads no-TOC FB2 via
+// singleSection (markersKey 0, probes 0..N).
+// =============================================================================
+
+bool Fb2Parser::ensureProgressiveInit() {
+  if (progressiveInit_) return true;
+  if (!fb2_ || filepath_.empty()) return false;
+
+  FsFile f;
+  if (!SdMan.openFileForRead("FB2_INIT", filepath_, f)) {
+    LOG_ERR(TAG, "[CONTENT][FB2] progressive init open failed path=%s", filepath_.c_str());
+    return false;
+  }
+  {
+    snapix::spi::SharedBusLock lk;
+    fileSize_ = static_cast<uint32_t>(f.fileSize());
+  }
+
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
+  int existing = 0;
+  for (;; ++existing) {
+    size_t sz = 0;
+    if (!cache.segmentSize(snapix::unifiedcache::Kind::Markers, static_cast<uint16_t>(existing), &sz)) break;
+  }
+  chunkIdx_ = existing;
+
+  // Re-derive the next chunk's source offset (cold start).  A fresh book starts
+  // at startOffset_ (0 for no-TOC).
+  chunkStart_ = (existing > 0) ? rescanFb2ToChunk(f, startOffset_, fileSize_, existing) : startOffset_;
+  sourceExhausted_ = (fileSize_ == 0) || (chunkStart_ >= fileSize_);
+
+  // Legacy guard: a pre-v3.10 single whole-file key 0 spans the whole body (its
+  // markers are ≫ a fresh chunk 0).  Render it as ONE complete chunk via the
+  // 1-chunk reader + existing idx; never append (which would overlap markers).
+  if (existing == 1 && !sourceExhausted_) {
+    size_t k0 = 0;
+    if (cache.segmentSize(snapix::unifiedcache::Kind::Markers, 0, &k0) &&
+        k0 > static_cast<size_t>(chunkStart_) + kFb2ChunkBytes) {
+      LOG_INF(TAG, "[CONTENT][FB2] legacy whole-file markers (size=%zu chunk0End=%u) — single chunk",
+              k0, static_cast<unsigned>(chunkStart_));
+      chunkStart_ = fileSize_;
+      sourceExhausted_ = true;
+    }
+  }
+  f.close();
+
+  // Re-use the current idx (if version + config match) so a cold parser doesn't
+  // re-measure chunks it already indexed.
+  progPagesAvailable_ = 0;
+  if (existing > 0) {
+    const uint16_t loaded = snapix::pagecache::loadChunkedSectionIdx(
+        progIdx_, fb2_->getCachePath(), renderer_, config_, streamingViewportMarginTop_,
+        streamingViewportMarginBottom_, streamingViewportMarginLeft_, streamingViewportMarginRight_,
+        /*hyphenLang=*/"ru");
+    if (loaded > 0) progPagesAvailable_ = static_cast<uint16_t>(loaded + (sourceExhausted_ ? 1 : 0));
+  }
+  progEmitCursor_ = 0;
+  progressiveInit_ = true;
+  LOG_INF(TAG,
+          "[CONTENT][FB2] progressive init size=%u chunks=%d chunkStart=%u exhausted=%u pagesAvail=%u",
+          static_cast<unsigned>(fileSize_), existing, static_cast<unsigned>(chunkStart_),
+          static_cast<unsigned>(sourceExhausted_), static_cast<unsigned>(progPagesAvailable_));
+  return true;
+}
+
+bool Fb2Parser::markerizeNextChunk() {
+  if (sourceExhausted_) return false;
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
+
+  FsFile srcFile;
+  if (!SdMan.openFileForRead("FB2_MC", filepath_, srcFile)) {
+    LOG_ERR(TAG, "[CONTENT][FB2] markerize chunk open failed path=%s", filepath_.c_str());
+    return false;
+  }
+  const uint32_t start = chunkStart_;
+  const uint32_t end = findFb2ChunkEnd(srcFile, start, fileSize_);
+  if (end <= start) {
+    srcFile.close();
+    sourceExhausted_ = true;
+    return false;
+  }
+  {
+    snapix::spi::SharedBusLock lk;
+    srcFile.seek(start);
+  }
+
+  uint32_t remaining = end - start;  // cap markerize at this chunk's source range
+  const int thisChunk = chunkIdx_;
+  constexpr size_t kChunkBufBytes = 4096;
+  uint8_t chunkBuf[kChunkBufBytes];
+  snapix::smolport::MarkerizeStats stats{};
+  snapix::smolport::MarkerizeStatus status = snapix::smolport::MarkerizeStatus::ReadError;
+
+  const bool ok = cache.writeSegmentStreamingDeferred(
+      snapix::unifiedcache::Kind::Markers, static_cast<uint16_t>(thisChunk),
+      [&](File& outFile) -> bool {
+        auto readFn = [&srcFile, &remaining](uint8_t* buf, size_t bufSize) -> int {
+          if (remaining == 0) return 0;  // chunk range consumed → clean EOF
+          int n;
+          {
+            snapix::spi::SharedBusLock lk;
+            if (!srcFile.available()) return 0;
+            size_t toRead = bufSize;
+            if (toRead > remaining) toRead = remaining;
+            n = srcFile.read(buf, toRead);
+          }
+          if (n < 0) return -1;
+          if (n > 0) remaining -= static_cast<uint32_t>(n);
+          return n;
+        };
+        auto writeFn = [&outFile](const uint8_t* d, size_t l) -> bool {
+          return outFile && outFile.write(d, l) == l;
+        };
+        status = snapix::smolport::markerizeChapter(
+            snapix::smolport::HtmlStripper::Mode::Fb2, readFn, writeFn, chunkBuf, sizeof(chunkBuf),
+            {}, &stats);
+        return status == snapix::smolport::MarkerizeStatus::Success;
+      });
+
+  srcFile.close();
+  if (!ok || status != snapix::smolport::MarkerizeStatus::Success) {
+    LOG_ERR(TAG, "[CONTENT][FB2] markerize chunk %d failed status=%u in=%u out=%u", thisChunk,
+            static_cast<unsigned>(status), static_cast<unsigned>(stats.inputBytes),
+            static_cast<unsigned>(stats.outputBytes));
+    return false;
+  }
+  chunkStart_ = end;
+  sourceExhausted_ = (end >= fileSize_);
+  ++chunkIdx_;
+  LOG_INF(TAG, "[CONTENT][FB2] chunk %d markerized src=[%u,%u) in=%u out=%u exhausted=%u", thisChunk,
+          static_cast<unsigned>(start), static_cast<unsigned>(end),
+          static_cast<unsigned>(stats.inputBytes), static_cast<unsigned>(stats.outputBytes),
+          static_cast<unsigned>(sourceExhausted_));
+  return true;
+}
+
+bool Fb2Parser::parsePagesProgressive(
+    const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages) {
+  if (!ensureProgressiveInit()) {
+    hasMore_ = false;
+    return false;
+  }
+
+  // Image resolver for the MEASURE walk so inline-image heights shift page
+  // boundaries to match the render path (mirrors the section-scoped R4.c
+  // resolver).  cacheImage is idempotent + fast-mode (header peek only).
+  const Fb2* fb2Ptr = fb2_;
+  const int mT = streamingViewportMarginTop_, mB = streamingViewportMarginBottom_;
+  const int mL = streamingViewportMarginLeft_, mR = streamingViewportMarginRight_;
+  const uint16_t imgMaxW = static_cast<uint16_t>(renderer_.getScreenWidth() - mL - mR);
+  const uint16_t imgMaxH = static_cast<uint16_t>(renderer_.getScreenHeight() - mT - mB);
+  auto resolveImage = [fb2Ptr, imgMaxW, imgMaxH](const uint8_t* p, size_t l) -> std::string {
+    if (fb2Ptr == nullptr || p == nullptr || l == 0) return {};
+    std::string src(reinterpret_cast<const char*>(p), l);
+    if (!src.empty() && src[0] == '#') src.erase(0, 1);
+    std::string outPath;
+    uint16_t w = 0, h = 0;
+    const bool ok = fb2Ptr->cacheImage(src, outPath, w, h, imgMaxW, imgMaxH,
+                                       /*fastMode=*/true, /*shouldAbort=*/{});
+    return ok ? outPath : std::string();
+  };
+
+  // Make pages available: when the emit cursor catches up and source remains,
+  // markerize the next chunk + extend the idx over it (one chunk per iteration).
+  uint16_t guard = 0;
+  while (progEmitCursor_ >= progPagesAvailable_ && !sourceExhausted_) {
+    if (!markerizeNextChunk()) break;
+    const uint16_t avail = snapix::pagecache::extendChunkedSectionIdx(
+        progIdx_, fb2_->getCachePath(), sourceExhausted_, renderer_, config_, mT, mB, mL, mR,
+        /*hyphenLang=*/"ru", resolveImage);
+    if (avail == 0) {
+      LOG_ERR(TAG, "[CONTENT][FB2] [STREAM] idx extend produced 0 pages (chunk %d)", chunkIdx_ - 1);
+      break;
+    }
+    progPagesAvailable_ = avail;
+    if (++guard > 8192) break;
+  }
+
+  uint16_t created = 0;
+  while (progEmitCursor_ < progPagesAvailable_) {
+    if (maxPages > 0 && created >= maxPages) break;
+    onPageComplete(std::unique_ptr<Page>(new Page));
+    ++progEmitCursor_;
+    ++created;
+  }
+
+  hasMore_ = (progEmitCursor_ < progPagesAvailable_) || !sourceExhausted_;
+  if (!hasMore_) renderer_.clearWidthCache();
+  LOG_INF(TAG,
+          "[CONTENT][FB2] [STREAM] progressive batch emitted=%u avail=%u exhausted=%u hasMore=%u",
+          static_cast<unsigned>(created), static_cast<unsigned>(progPagesAvailable_),
+          static_cast<unsigned>(sourceExhausted_), static_cast<unsigned>(hasMore_));
+  return created > 0;
+}
+#endif

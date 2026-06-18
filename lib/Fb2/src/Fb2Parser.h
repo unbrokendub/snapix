@@ -2,6 +2,7 @@
 
 #include <ContentParser.h>
 #include <RenderConfig.h>
+#include <StreamingSection.h>  // ChunkedIdxState + extend/loadChunkedSectionIdx (v3.10 no-TOC lazy)
 
 #include <cstdint>
 #include <functional>
@@ -41,6 +42,11 @@ class Fb2Parser : public ContentParser {
                   const AbortCallback& shouldAbort = nullptr) override;
   bool hasMoreContent() const override { return hasMore_; }
   bool canResume() const override {
+    // No-TOC (whole-book) uses the progressive/lazy engine; section-scoped (TOC)
+    // uses the per-section short-circuit.
+    if (!sectionScoped_) {
+      return progressiveInit_ && (progEmitCursor_ < progPagesAvailable_ || !sourceExhausted_);
+    }
     return shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_;
   }
   void reset() override;
@@ -87,6 +93,28 @@ class Fb2Parser : public ContentParser {
   uint16_t pagesCreated_ = 0;
 
   // markerize the section's byte range into UnifiedCache::Markers (key =
-  // startingSectionIndex_).  One-shot; cache-hit short-circuits.
+  // startingSectionIndex_).  One-shot; cache-hit short-circuits.  Used by the
+  // section-scoped (TOC) path.
   bool tryMarkerizeSection();
+
+  // ---- v3.10 — no-TOC (whole-book) LAZY/progressive markerize ----------------
+  // A big no-TOC FB2 used to markerize the whole file before page 0.  Now the
+  // body is markerized in ~32 KB element-bounded CHUNKS (Markers keys 0,1,2,…),
+  // one per parsePages call, with the idx extended incrementally over a
+  // ChunkedMarkersReader — mirrors PlainTextParser.  Page 0 renders after chunk
+  // 0; image-heavy FB2 also skips reading the trailing <binary> blobs upfront.
+  // These members/methods are inert for the section-scoped (TOC) path.
+  bool progressiveInit_ = false;
+  uint32_t fileSize_ = 0;        // markerize end (whole file for no-TOC)
+  uint32_t chunkStart_ = 0;      // source offset where the next chunk starts
+  int chunkIdx_ = 0;             // next Markers chunk key
+  bool sourceExhausted_ = false; // last chunk ran to fileSize_
+  snapix::pagecache::ChunkedIdxState progIdx_;  // boundaries measured so far
+  uint16_t progPagesAvailable_ = 0;  // pages the idx currently covers
+  uint16_t progEmitCursor_ = 0;      // pages emitted so far
+
+  bool parsePagesProgressive(const std::function<void(std::unique_ptr<Page>)>& onPageComplete,
+                             uint16_t maxPages);
+  bool ensureProgressiveInit();  // recover chunk cursor + load existing idx
+  bool markerizeNextChunk();     // markerize one element-bounded chunk → key chunkIdx_
 };

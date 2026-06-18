@@ -16,9 +16,11 @@
 // =============================================================================
 
 #include <MarkerizedPageRender.h>  // PageBoundarySnapshot
+
 #include <RenderConfig.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -68,10 +70,15 @@ struct ChunkedIdxState {
 // Returns the total page count available so far
 // (= boundaries.size() + (sourceExhausted ? 1 : 0)), or 0 on failure / when the
 // markerizer is compiled out.  `hyphenLang` selects hyphenation ("" disables).
+//
+// `resolveImage` (optional) lets the MEASURE walk account for inline-image
+// heights so page boundaries match the render path — FB2 passes its
+// cacheImage-backed resolver; TXT/MD (no inline images) leave it empty.
 uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCachePath,
                                  bool sourceExhausted, GfxRenderer& renderer,
                                  const RenderConfig& config, int marginTop, int marginBottom,
-                                 int marginLeft, int marginRight, const char* hyphenLang);
+                                 int marginLeft, int marginRight, const char* hyphenLang,
+                                 std::function<std::string(const uint8_t*, size_t)> resolveImage = {});
 
 // Load the CURRENT (version + configHash matching) idx into `st` so a cold
 // (post-reboot) parser skips re-measuring chunks it already indexed.  Returns

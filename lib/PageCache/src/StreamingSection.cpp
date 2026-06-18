@@ -182,7 +182,8 @@ uint16_t ensureStreamingSectionIdx(const std::string& bookCachePath, uint16_t se
 uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCachePath,
                                  bool sourceExhausted, GfxRenderer& renderer,
                                  const RenderConfig& config, int mT, int mB, int mL, int mR,
-                                 const char* hyphenLang) {
+                                 const char* hyphenLang,
+                                 std::function<std::string(const uint8_t*, size_t)> resolveImage) {
   auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
 
   const snapix::smolport::StreamingPaginatorConfig cfg =
@@ -216,9 +217,14 @@ uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCac
     }
   }
 
-  auto resolveImage = [](const uint8_t*, size_t) -> std::string { return {}; };
+  // FB2 passes a cacheImage-backed resolver so image heights shift boundaries;
+  // TXT/MD have no inline images → no-op.
+  snapix::smolport::ResolveImagePathFn resolveFn =
+      resolveImage ? std::move(resolveImage)
+                   : snapix::smolport::ResolveImagePathFn(
+                         [](const uint8_t*, size_t) -> std::string { return {}; });
   snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer, config.fontId, config.fontId,
-                                                        /*black=*/true, resolveImage, config.fakeBold,
+                                                        /*black=*/true, resolveFn, config.fakeBold,
                                                         config.superSubFontId);
   snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
@@ -289,7 +295,8 @@ uint16_t ensureStreamingSectionIdx(const std::string&, uint16_t, GfxRenderer&, c
 }
 
 uint16_t extendChunkedSectionIdx(ChunkedIdxState&, const std::string&, bool, GfxRenderer&,
-                                 const RenderConfig&, int, int, int, int, const char*) {
+                                 const RenderConfig&, int, int, int, int, const char*,
+                                 std::function<std::string(const uint8_t*, size_t)>) {
   return 0;  // markerizer compiled out
 }
 

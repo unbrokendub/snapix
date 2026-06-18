@@ -348,6 +348,17 @@ foreach(TEST_SRC ${TEST_SOURCES})
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/lib/SmolPort/src
     )
+  elseif(TEST_NAME STREQUAL "Fb2ChunkEquivTest")
+    # v3.10 — proves element-boundary FB2 chunks markerize identically to one
+    # continuous pass (the correctness basis for lazy no-TOC FB2 markerize).
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
   elseif(TEST_NAME STREQUAL "MarkerizedPageRenderTest")
     # v2.0.121 Phase R3.4 — page-targeted streaming render.  Composes
     # markerize + chapter renderer + paginator with a draw-suppression
