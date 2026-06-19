@@ -37,6 +37,8 @@
 
 #define TAG "EPUB_CHAP"
 
+#include <memory>   // unique_ptr — heap the MEASURE-walk buffers off the 20 KB task stack
+#include <new>      // std::nothrow
 #include <utility>
 
 namespace {
@@ -458,8 +460,18 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
                                                             config_.superSubFontId);  // v3.6.0
     snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
+    // v3.10.2 — HEAP the streaming buffer (was a 4 KB stack array).  This R4.c
+    // MEASURE walk runs on the 20 KB ReaderAsync task and reads BMP image
+    // headers via resolveImageSize during the walk; a 4 KB stack frame here (on
+    // top of the serdebuf below) is needless stack pressure on the same task
+    // that overflowed in v3.10.1 for FB2.  nothrow → degrade, never crash.
     constexpr size_t kChunkBufBytes = 4096;
-    uint8_t chunkBuf[kChunkBufBytes];
+    std::unique_ptr<uint8_t[]> chunkBuf(new (std::nothrow) uint8_t[kChunkBufBytes]);
+    if (!chunkBuf) {
+      LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] R4.c chunkBuf alloc failed spine=%d", spineIndex_);
+      mf.close();
+      break;
+    }
     // v2.0.167 — markers reader is positioned inside streaming.cache and
     // would read past the segment into the next frame's bytes if unbounded.
     // Track remaining bytes from segmentSize and clamp each read.
@@ -481,7 +493,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // stream in draw-suppressed mode and fires the callback at
     // every page boundary.  Returns PageNotFound when EOF hits.
     snapix::smolport::MarkerizedRenderStats stats{};
-    (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf, sizeof(chunkBuf),
+    (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf.get(), kChunkBufBytes,
                                                   UINT16_MAX, {}, &stats, {}, captureFn);
     mf.close();
 
@@ -516,18 +528,25 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     const uint16_t configHash =
         snapix::smolport::computePageIndexConfigHash(cfg, config_.fontId,
                                                       config_.fakeBold);
+    // v3.10.2 — HEAP the idx serialize buffer (was a 4 KB stack array with a
+    // `needed > 4096` cap that SILENTLY dropped the idx for >~500-page chapters,
+    // forcing a render-time cold walk).  Heap `needed` exactly (nothrow): no
+    // stack pressure, and large chapters now get a full upfront idx.
     const size_t needed = snapix::smolport::kPageIndexHeaderBytes +
                            captured.size() * snapix::smolport::kPageIndexEntryBytes;
-    if (needed > 4096) break;
-    uint8_t serdebuf[4096];
+    std::unique_ptr<uint8_t[]> serdebuf(new (std::nothrow) uint8_t[needed]);
+    if (!serdebuf) {
+      LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] idx alloc failed spine=%d bytes=%zu", spineIndex_, needed);
+      break;
+    }
     const size_t wrote = snapix::smolport::serializePageIndex(
-        captured.data(), captured.size(), configHash, serdebuf, sizeof(serdebuf));
+        captured.data(), captured.size(), configHash, serdebuf.get(), needed);
     if (wrote == 0) break;
 
     // v2.0.167 — write idx as a UnifiedCache::Idx segment.  No more
     // .work + rename — UnifiedCache append is atomic at the frame level.
     if (!ucache.writeSegment(snapix::unifiedcache::Kind::Idx,
-                              static_cast<uint16_t>(spineIndex_), serdebuf, wrote)) {
+                              static_cast<uint16_t>(spineIndex_), serdebuf.get(), wrote)) {
       LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] idx write to UnifiedCache failed spine=%d", spineIndex_);
       break;
     }
