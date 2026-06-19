@@ -40,8 +40,17 @@ constexpr size_t kEpubNearPrefetchMinFreeBytes = 32 * 1024;
 constexpr size_t kEpubNearPrefetchMinLargestBlock = 18 * 1024;
 constexpr size_t kEpubResidentWarmMinFreeBytes = 44 * 1024;
 constexpr size_t kEpubResidentWarmMinLargestBlock = 20 * 1024;
-constexpr size_t kEpubFarSweepMinFreeBytes = 56 * 1024;
-constexpr size_t kEpubFarSweepMinLargestBlock = 24 * 1024;
+// v3.10.3 — the far-sweep is OPTIONAL read-ahead (caches spines you may never
+// reach), so its heap gate must be generous: markerizing one EPUB chapter peaks
+// at ~50 KB transient (ZIP inflate ~32 KB contiguous + HTML normalize +
+// markerize/idx buffers).  The old 56 KB/24 KB gate was a pre-check that a big
+// chapter blew straight through — device-observed Min Free 4936 during a far-
+// sweep of an 80-page chapter — and 24 KB largest was BELOW the 32 KB inflate's
+// contiguous need (it could green-light an alloc bigger than it guaranteed).
+// Require enough to absorb a worst-case chapter with margin; if heap is below
+// this the sweep simply defers until idle recovers it (no functional loss).
+constexpr size_t kEpubFarSweepMinFreeBytes = 72 * 1024;
+constexpr size_t kEpubFarSweepMinLargestBlock = 36 * 1024;
 
 // v2.0.80: serialises all .anchors save/load operations.  Pre-2.0.80, the UI
 // task's periodic TOC-pending poll called loadAnchorMap() (open + read +
