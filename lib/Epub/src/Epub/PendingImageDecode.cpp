@@ -105,25 +105,40 @@ bool drainOne() {
   config.logTag = item.logTag ? item.logTag : TAG;
   config.outputOnLittleFs = true;
 
+  // v3.10.8 — ATOMIC BMP write.  convertToBmp streams the BMP straight to its
+  // output path, so this BG worker used to write directly to targetBmpPath while
+  // the FOREGROUND streaming render polls `LittleFS.exists(targetBmpPath)` and
+  // reads the file the instant it appears (GfxRendererPaginatorAdapter::drawImage
+  // / resolveImageSize).  On the first view of an image page the foreground then
+  // read a HALF-WRITTEN BMP → random noise over the image; flipping away and back
+  // looked clean only because the file had finished by then.  Decode to a `.part`
+  // file and rename on success: the target appears ONLY when complete, so the
+  // foreground sees either no file (draws nothing; gRefreshPending repaints once
+  // the BMP lands) or the whole file — never a partial one.
+  const std::string partPath = item.targetBmpPath + ".part";
+  LittleFS.remove(partPath.c_str());  // clear any stale partial from a prior abort/boot
   LOG_INF(TAG, "drainOne: convert start temp=%s → %s (%ux%u quick=%u)", item.tempJpegPath.c_str(),
           item.targetBmpPath.c_str(), static_cast<unsigned>(item.maxWidth), static_cast<unsigned>(item.maxHeight),
           static_cast<unsigned>(item.quickMode));
   const uint32_t startMs = millis();
-  const bool ok = ImageConverterFactory::convertToBmp(item.tempJpegPath, item.targetBmpPath, config);
+  const bool ok = ImageConverterFactory::convertToBmp(item.tempJpegPath, partPath, config);
   const uint32_t elapsed = millis() - startMs;
 
   if (ok) {
     LittleFS.remove(item.tempJpegPath.c_str());
+    LittleFS.remove(item.targetBmpPath.c_str());  // drop any stale/invalid prior BMP
+    if (!LittleFS.rename(partPath.c_str(), item.targetBmpPath.c_str())) {
+      LOG_ERR(TAG, "drainOne: rename %s -> %s failed", partPath.c_str(), item.targetBmpPath.c_str());
+      LittleFS.remove(partPath.c_str());
+      return true;
+    }
     LOG_INF(TAG, "drainOne: decode ok %s (%u ms; remaining=%u)", item.targetBmpPath.c_str(),
             static_cast<unsigned>(elapsed), static_cast<unsigned>(pendingCount()));
     gRefreshPending.store(true, std::memory_order_release);
   } else {
     LOG_ERR(TAG, "drainOne: decode failed %s (%u ms)", item.targetBmpPath.c_str(), static_cast<unsigned>(elapsed));
     LittleFS.remove(item.tempJpegPath.c_str());
-    // Drop the half-written BMP if convertToBmp left one behind.
-    if (LittleFS.exists(item.targetBmpPath.c_str())) {
-      LittleFS.remove(item.targetBmpPath.c_str());
-    }
+    LittleFS.remove(partPath.c_str());  // drop the half-written temp
   }
 
   return true;
