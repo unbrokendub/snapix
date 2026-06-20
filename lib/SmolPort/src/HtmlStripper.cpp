@@ -303,9 +303,22 @@ void HtmlStripper::dispatchTag() {
   }
   if (tagNameLen_ == 2 && (tagName_[0] | 0x20u) == 'h' &&
       tagName_[1] >= '1' && tagName_[1] <= '6') {
+    // v3.10.6 — HTML headings carry their text DIRECTLY (unlike FB2 <title>,
+    // which wraps it in inner <p> that break on close).  Without a block break
+    // around the heading, an EPUB chapter's <h1>ГЛАВА 15</h1><h2>title</h2>
+    // collapsed inline with the running header and the first body paragraph —
+    // "the whole chapter start on one line".  Isolate the heading as its own
+    // block (paragraph break before + after) and centre it, matching the FB2
+    // <title> appearance.  The leading break is a no-op-ish blank-line at a
+    // fresh chapter top (acceptable breathing room); it never trips pageFull
+    // (only kPageBreak does), so no empty page-0.
     if (isEndTag_) {
       emitMarker(kHeadingOff);
+      emitMarker(kCenterOff);
+      emitMarker(kParagraphBreak);
     } else {
+      emitMarker(kParagraphBreak);
+      emitMarker(kCenterOn);
       const uint8_t bytes[3] = {kMarker, kHeadingOn, tagName_[1]};
       sink_.emit(bytes, 3);
     }

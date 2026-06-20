@@ -43,7 +43,13 @@
 
 namespace snapix::unifiedcache {
 
-constexpr uint16_t kFormatVersion = 1;
+// v2: v3.10.6 — bumped to WIPE cached MARKERS (+ idx) so the new HTML <h1>-<h6>
+// markerization (paragraph break + centering around headings) reaches books that
+// were already cached.  EPUB/FB2 markerize is skipped on a Markers cache-hit
+// (EpubChapterParser), so a markerization change is invisible to existing books
+// unless the UnifiedCache is invalidated here.  Mismatch wipes the file +
+// re-markerizes on next open (graceful; see load()).
+constexpr uint16_t kFormatVersion = 2;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kFrameHeaderSize = 8;
 constexpr uint16_t kGlobalKey = 0xFFFF;

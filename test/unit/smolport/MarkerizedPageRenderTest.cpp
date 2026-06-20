@@ -899,6 +899,41 @@ int main() {
     runner.expectTrue(noneLost, "exitseam_no_word_lost");
   }
 
+  // -----------------------------------------------------------------------
+  // v3.10.6 — HTML <h1>-<h6> headings must be ISOLATED (own line), not inline.
+  //
+  // Pre-fix the h-tag handler emitted only kHeadingOn/Off with NO break, so an
+  // EPUB chapter's <h1>ГЛАВА 15</h1><h2>title</h2><p>body…</p> collapsed onto a
+  // single line ("the whole chapter start on one line").  Fix adds a paragraph
+  // break + centering around the heading.  Assert the heading word and the first
+  // body word land on DIFFERENT lines (different y).  Pre-fix → same y → FAIL.
+  // -----------------------------------------------------------------------
+  {
+    auto hm = markerizeAll(
+        "<h1>HEADINGWORD</h1><h2>SUBHEADING</h2>"
+        "<p>bodyword more body text to fill out the first line nicely here ok</p>");
+    StreamingPaginatorConfig tall = smallConfig();
+    tall.pageHeight = 400;  // tall enough that h1 + h2 + body all land on page 0
+    FakeRenderer fr;
+    StreamingPaginator pag(tall, fr);
+    size_t pos = 0;
+    uint8_t buf[256];
+    renderMarkerizedPage(pag, makeReader(hm, pos), buf, sizeof(buf), /*targetPage=*/0);
+
+    int headY = -1, subY = -1, bodyY = -1;
+    for (const auto& d : fr.draws) {
+      if (d.text == "HEADINGWORD" && headY < 0) headY = d.y;
+      if (d.text == "SUBHEADING" && subY < 0) subY = d.y;
+      if (d.text == "bodyword" && bodyY < 0) bodyY = d.y;
+    }
+    runner.expectTrue(headY >= 0, "heading_h1_drawn");
+    runner.expectTrue(subY >= 0, "heading_h2_drawn");
+    runner.expectTrue(bodyY >= 0, "heading_body_drawn");
+    // Each element on its own line: h1 < h2 < body in vertical position.
+    runner.expectTrue(headY >= 0 && subY > headY, "heading_h2_below_h1");
+    runner.expectTrue(subY >= 0 && bodyY > subY, "heading_body_below_h2");
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }
