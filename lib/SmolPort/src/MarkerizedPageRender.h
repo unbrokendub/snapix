@@ -96,6 +96,14 @@ struct PageBoundarySnapshot {
   // Restored on resume so the красная-строка first-line indent only applies
   // to real paragraph starts, not mid-sentence page continuations.
   bool     atParagraphStart;
+  // v3.10.5 — block-level layout context at this boundary (NOT in styleBits).
+  // A page that begins inside a <blockquote>/<li> (indentDepth>0) or a centered
+  // block must restore this on resume, else the resumed page wraps at the wrong
+  // width and breaks at a different byte than the MEASURE walk recorded here →
+  // a word or two duplicated/eaten at the boundary.  Stored in the entry's two
+  // previously-spare bytes (p[6], p[7]); see serializePageIndex.
+  uint8_t  indentDepth = 0;
+  bool     centered = false;
 };
 
 using OnPageBoundaryFn = std::function<void(const PageBoundarySnapshot&)>;
@@ -145,6 +153,12 @@ struct MarkerizedRenderResume {
   // snapshot).  Default true so a fresh chapter (page 0) indents its first
   // line; for resumed mid-paragraph pages the caller passes false.
   bool     atParagraphStart = true;
+  // v3.10.5 — block-level layout context (indent depth + centering) from the
+  // boundary snapshot, restored so a page resumed mid-<blockquote>/<li>/center
+  // wraps at the same width the MEASURE walk used.  Default 0/false = top-level
+  // prose (fresh chapter / non-block pages).
+  uint8_t  indentDepth = 0;
+  bool     centered = false;
 };
 
 // =============================================================================
@@ -314,7 +328,16 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // in the stream and render in a smaller font, changing word widths (and thus
 // page boundaries) for any chapter using <sup>/<sub>.  Rebuild forces indices
 // to match.
-constexpr uint16_t kPageIndexVersion = 17;
+// v3.10.5: bumped 17 → 18.  BUGFIX — each entry's two spare bytes p[6]/p[7] now
+// store the boundary's block-level layout context: indentDepth (p[6]) and
+// centered (p[7]).  Restored on resume so a page that STARTS inside a
+// <blockquote>/<li>/centered block wraps at the correct (indented) width instead
+// of full width — pre-fix the resumed page broke at a different byte than the
+// MEASURE walk recorded, duplicating/eating a word or two at that boundary on
+// EPUB/FB2 chapters with block elements.  On-disk entry layout is unchanged
+// (still 8 bytes; the bytes were reserved/zero), but old v17 indices carry
+// zeroes (= the buggy "no indent" assumption) so the bump forces a rebuild.
+constexpr uint16_t kPageIndexVersion = 18;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

@@ -2861,6 +2861,12 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
                 // paragraph, so the красная-строка first-line indent isn't
                 // applied to a mid-sentence continuation page.
                 resume.atParagraphStart = it->atParagraphStart;
+                // v3.10.5 — restore block-level layout context so a page that
+                // begins inside a <blockquote>/<li>/centered block wraps at the
+                // indented width the .idx was built with (else the resumed break
+                // diverges from it->byteOffset → a word duplicated/eaten here).
+                resume.indentDepth = it->indentDepth;
+                resume.centered = it->centered;
                 // Seek to the captured GLOBAL offset; ChunkedMarkersReader
                 // maps it to the containing chunk + local position and reads
                 // forward (spanning chunk boundaries) from there.

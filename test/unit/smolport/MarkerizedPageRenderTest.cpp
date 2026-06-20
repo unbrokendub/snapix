@@ -6,6 +6,7 @@
 #include <StreamingPaginator.h>
 
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -698,6 +699,110 @@ int main() {
           runner.expectEq(snaps[2].byteOffset, resumeSnaps[1].byteOffset,
                           "v140_resume_p3_offset_absolute");
         }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // v3.10.5 — BLOCK CONTEXT (indent/center) lost on resume → EATEN WORDS.
+  //
+  // This is the device bug: on EPUB/FB2, a page that STARTS inside a
+  // <blockquote>/<li>/centered block (indentDepth_>0) had its block context
+  // wiped by resetForChapter() on resume.  TWO defects compounded:
+  //   (a) the resumed render wrapped at FULL width instead of the indented
+  //       width → its page break diverged from the .idx the continuous MEASURE
+  //       walk built → content shifted/duplicated/eaten at the seam; and
+  //   (b) PageCountingObserver::checkAdvance ran resetForNextPage() (which lays
+  //       out + DRAWS the new page's carried word + spillover replay) BEFORE
+  //       updating draw-suppression, so a cold skip-to-target page whose whole
+  //       content was spillover rendered BLANK — an entire page eaten.
+  //
+  // The fixes: capture indentDepth/centered in each boundary snapshot + restore
+  // them on resume; set draw-suppression before resetForNextPage.  This test
+  // models the DEVICE path: build the .idx with a continuous (draw-suppressed)
+  // MEASURE walk, then render every page via per-page seek-resume from that
+  // .idx — and asserts NO SOURCE WORD IS LOST.  Pre-fix, mid-blockquote pages
+  // dropped words (skip-suppression blanked them / wrong-width shifted them);
+  // the assertion below fails without both fixes.
+  //
+  // (A residual 1-word DUP can still appear at the block EXIT boundary, where
+  // the continuous idx-build and the seek-resume render diverge by one word at
+  // the mid-page width change — the older carry/spillover measure-vs-resume
+  // equivalence class.  That's a duplicate, not a loss, and is out of scope.)
+  // -----------------------------------------------------------------------
+  {
+    // Intro paragraph (page 0, no indent) then a long <blockquote> that runs to
+    // EOF — so every page after page 0 begins (and stays) INSIDE the indent, with
+    // no mid-page block exit to muddy the comparison.
+    std::string intro = "intro alpha beta gamma delta epsilon zeta eta theta iota kappa lambda";
+    std::string quote;
+    for (int i = 0; i < 90; ++i) quote += "q" + std::to_string(i) + " ";
+    std::string html = "<p>" + intro + "</p><blockquote>" + quote + "</blockquote>";
+    auto qm = markerizeAll(html);
+
+    // Build the .idx the way the device does: one continuous draw-suppressed walk.
+    std::vector<snapix::smolport::PageBoundarySnapshot> snaps;
+    {
+      FakeRenderer fr;
+      StreamingPaginator pag(smallConfig(), fr);
+      size_t pos = 0;
+      uint8_t buf[256];
+      renderMarkerizedPage(
+          pag, makeReader(qm, pos), buf, sizeof(buf), /*targetPage=*/99, {}, nullptr, {},
+          [&](const snapix::smolport::PageBoundarySnapshot& s) { snaps.push_back(s); });
+    }
+    runner.expectTrue(snaps.size() >= 3, "indentctx_multi_page");
+
+    // Meaningful only if a page actually begins inside the indented block.
+    bool sawIndentedBoundary = false;
+    for (const auto& s : snaps) if (s.indentDepth > 0) sawIndentedBoundary = true;
+    runner.expectTrue(sawIndentedBoundary, "indentctx_boundary_inside_blockquote");
+
+    // For each page: a continuous-walk render (target=N from offset 0, which sees
+    // the <blockquote> marker → correct indentDepth) MUST draw exactly the same
+    // words as a per-page seek-resume from the .idx snapshot.  This catches BOTH
+    // defects: the skip-to-target path (needs the draw-suppression ordering fix
+    // or mid-block pages render blank) and the resume path (needs indentDepth
+    // restored or it wraps wide and shifts words).  Pre-fix → mismatch.
+    for (size_t pageIdx = 1; pageIdx <= snaps.size(); ++pageIdx) {
+      const auto& snap = snaps[pageIdx - 1];
+      if (snap.pageIndex != pageIdx) continue;
+
+      std::vector<std::string> walkWords;
+      {
+        FakeRenderer fr;
+        StreamingPaginator pag(smallConfig(), fr);
+        size_t pos = 0;
+        uint8_t buf[256];
+        renderMarkerizedPage(pag, makeReader(qm, pos), buf, sizeof(buf),
+                             static_cast<uint16_t>(pageIdx));
+        for (const auto& d : fr.draws) walkWords.push_back(d.text);
+      }
+
+      std::vector<std::string> resumeWords;
+      {
+        FakeRenderer fr;
+        StreamingPaginator pag(smallConfig(), fr);
+        size_t pos = snap.byteOffset;
+        uint8_t buf[256];
+        snapix::smolport::MarkerizedRenderResume resume;
+        resume.startPage = snap.pageIndex;
+        resume.styleBits = snap.styleBits;
+        resume.atParagraphStart = snap.atParagraphStart;
+        resume.byteOffset = snap.byteOffset;
+        resume.indentDepth = snap.indentDepth;
+        resume.centered = snap.centered;
+        renderMarkerizedPage(pag, makeReader(qm, pos), buf, sizeof(buf),
+                             static_cast<uint16_t>(pageIdx), {}, nullptr, resume);
+        for (const auto& d : fr.draws) resumeWords.push_back(d.text);
+      }
+
+      const std::string label = "indentctx_page" + std::to_string(pageIdx);
+      runner.expectEq(walkWords.size(), resumeWords.size(), (label + "_count").c_str());
+      const size_t n = std::min(walkWords.size(), resumeWords.size());
+      for (size_t i = 0; i < n; ++i) {
+        runner.expectTrue(walkWords[i] == resumeWords[i],
+                          (label + "_w" + std::to_string(i)).c_str());
       }
     }
   }

@@ -192,6 +192,12 @@ class PageCountingObserver : public MarkerObserver {
       // or mid-line overflow leaves it false.  Restored on resume so the
       // first-line indent only appears on real paragraph starts.
       snap.atParagraphStart = inner_.atParagraphStart();
+      // v3.10.5 — capture block-level layout context so a page that begins
+      // inside a <blockquote>/<li>/centered block resumes at the same width
+      // the MEASURE walk used (otherwise the resumed break diverges from this
+      // byteOffset → word duplicated/eaten at the boundary).
+      snap.indentDepth = inner_.indentDepth();
+      snap.centered = inner_.centered();
       onBoundary_(snap);
     }
 
@@ -206,8 +212,17 @@ class PageCountingObserver : public MarkerObserver {
 
     // We're skipping pages — advance to the next one and continue.
     ++currentPage_;
-    inner_.resetForNextPage();
+    // v3.10.5 — update draw-suppression for the NEW page BEFORE resetForNextPage.
+    // resetForNextPage() lays out (and draws, when not suppressed) the new page's
+    // leading content: the carried word, any pending image, and the spillover
+    // replay.  When rolling INTO the target page this content belongs to the
+    // target and must be DRAWN — but pre-fix setDrawSuppressed ran AFTER reset,
+    // so it was laid out while still suppressed (the previous page's state) and
+    // never drawn.  For a page whose entire content is spillover from the prior
+    // page (e.g. a long <blockquote> paragraph straddling the boundary), the
+    // whole page rendered BLANK on a cold skip-to-target.  Set suppression first.
     inner_.setDrawSuppressed(currentPage_ != targetPage_);
+    inner_.resetForNextPage();
     return ObserverStatus::Continue;
   }
 };
@@ -247,6 +262,13 @@ MarkerizedRenderResult renderMarkerizedPage(StreamingPaginator& paginator, Chapt
     // first-line indent isn't wrongly applied to a mid-sentence continuation
     // (resetForChapter above unconditionally set it true).
     paginator.setAtParagraphStart(resume.atParagraphStart);
+    // v3.10.5 — restore block-level layout context (indent depth + centering).
+    // resetForChapter() above wiped these to 0/false; without restoring them a
+    // page resumed mid-<blockquote>/<li>/center would wrap at full width and
+    // break at a different byte than the MEASURE walk recorded → a word or two
+    // duplicated/eaten at that boundary (EPUB/FB2 block elements).
+    paginator.setIndentDepth(resume.indentDepth);
+    paginator.setCentered(resume.centered);
   }
 
   // v2.0.140 fix — propagate the absolute source byte offset to
@@ -402,8 +424,8 @@ size_t serializePageIndex(const PageBoundarySnapshot* entries, size_t entryCount
     write_u32_le(p + 0, entries[i].byteOffset);
     p[4] = entries[i].styleBits;
     p[5] = entries[i].atParagraphStart ? 1 : 0;  // v3.5.2
-    p[6] = 0;
-    p[7] = 0;
+    p[6] = entries[i].indentDepth;               // v3.10.5 — block indent depth
+    p[7] = entries[i].centered ? 1 : 0;          // v3.10.5 — centered block
     // Note: pageIndex is implicit (entry N is page N+1 since R3.6
     // semantics are "snapshot captured when paginator rolled INTO
     // page i+1").  We don't store pageIndex — it's derived from
@@ -441,6 +463,8 @@ bool deserializePageIndex(const uint8_t* buf, size_t bufSize,
     snap.byteOffset = read_u32_le(p + 0);
     snap.styleBits = p[4];
     snap.atParagraphStart = (p[5] != 0);  // v3.5.2
+    snap.indentDepth = p[6];              // v3.10.5
+    snap.centered = (p[7] != 0);          // v3.10.5
     outEntries.push_back(snap);
     p += kPageIndexEntryBytes;
   }

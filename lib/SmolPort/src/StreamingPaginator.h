@@ -261,6 +261,19 @@ class StreamingPaginator : public MarkerObserver {
   bool atParagraphStart() const { return atParagraphStart_; }
   void setAtParagraphStart(bool v) { atParagraphStart_ = v; }
 
+  // v3.10.5 — block-level layout context (NOT packed into styleBits_), captured
+  // into each .idx boundary and restored on resume.  Without this, a page that
+  // STARTS inside a <blockquote>/<li> (indentDepth_>0) or a centered block had
+  // its context wiped by resetForChapter() on resume → the resumed render wrapped
+  // at the full width instead of the indented width, so its page break diverged
+  // from the byteOffset the continuous MEASURE walk recorded → a word or two got
+  // duplicated/eaten at that boundary.  EPUB/FB2 only (lists, blockquotes, verse,
+  // centered titles); plain TXT never sets these.
+  uint8_t indentDepth() const { return indentDepth_; }
+  void setIndentDepth(uint8_t d) { indentDepth_ = d; }
+  bool centered() const { return centered_; }
+  void setCentered(bool c) { centered_ = c; }
+
   uint16_t cursorX() const { return cursorX_; }
   uint16_t cursorY() const { return cursorY_; }
 

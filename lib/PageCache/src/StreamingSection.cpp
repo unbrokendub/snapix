@@ -210,6 +210,12 @@ uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCac
     resume.byteOffset = last.byteOffset;
     resume.styleBits = last.styleBits;
     resume.atParagraphStart = last.atParagraphStart;
+    // v3.10.5 — restore block-level layout context so idx entries appended by
+    // this extend (resuming mid-<blockquote>/<li>/centered block) use the same
+    // wrap width as a continuous walk would; otherwise the extended boundaries
+    // diverge and a word gets duplicated/eaten at those page breaks.
+    resume.indentDepth = last.indentDepth;
+    resume.centered = last.centered;
     if (!reader.seekGlobal(last.byteOffset)) {
       LOG_ERR(TAG, "[STREAM] extend: seek to resume offset %u failed",
               static_cast<unsigned>(last.byteOffset));
