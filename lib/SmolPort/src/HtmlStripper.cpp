@@ -276,7 +276,13 @@ void HtmlStripper::dispatchTag() {
     }
     // <image>, <a>, <binary>, <description>, <stylesheet>: handled in
     // attribute capture / onTagComplete raw-body switching.
-    return;
+    //
+    // v3.10.7 — FALL THROUGH to the common dispatch below for tags FB2 shares
+    // with HTML (sup/sub, b/i, h1-h6, table/tr/td, br/hr, …).  Pre-fix a blanket
+    // `return` here swallowed them, so FB2 <sup>/<sub> rendered as plain text and
+    // FB2 <table> cells ran together — even though the sup/sub comment below
+    // claimed FB2 fell through.  Every FB2-specific tag above already returned,
+    // so only the shared/unknown tags reach the common table.
   }
 
   // ----- HTML dispatch table (existing Phase 3b) -----
@@ -402,6 +408,72 @@ void HtmlStripper::dispatchTag() {
       static const uint8_t kBulletBytes[] = {0xE2, 0x80, 0xA2, ' '};
       sink_.emit(kBulletBytes, sizeof(kBulletBytes));
     }
+    return;
+  }
+  // v3.10.7 — HTML5 semantic block containers + <figure>/<figcaption>.  These
+  // are block-level like <div>; without a break their content collapses into the
+  // surrounding text (same class as the pre-v3.10.6 <h1>-<h6> bug — modern EPUBs
+  // wrap chapters/scene-blocks in <section>/<article>/<header> etc.).  Treat like
+  // <div>: paragraph break on CLOSE (open break would double-break a wrapped <p>).
+  if (eqIc(tagName_, tagNameLen_, "section", 7) ||
+      eqIc(tagName_, tagNameLen_, "article", 7) ||
+      eqIc(tagName_, tagNameLen_, "header", 6) ||
+      eqIc(tagName_, tagNameLen_, "footer", 6) ||
+      eqIc(tagName_, tagNameLen_, "aside", 5) ||
+      eqIc(tagName_, tagNameLen_, "figure", 6) ||
+      eqIc(tagName_, tagNameLen_, "figcaption", 10) ||
+      eqIc(tagName_, tagNameLen_, "nav", 3) ||
+      eqIc(tagName_, tagNameLen_, "main", 4)) {
+    if (isEndTag_) emitMarker(kParagraphBreak);
+    return;
+  }
+  // v3.10.7 — tables.  No real column layout on a 1-bit reader, but emit
+  // row/cell breaks so cells don't concatenate into one run.  <table>/<caption>
+  // isolate the block (paragraph break both sides); each <tr> starts a new line;
+  // each cell close emits a 2-space gap so adjacent cells read as separate words.
+  // <thead>/<tbody>/<tfoot> are structural only — rows handle the layout.
+  if (eqIc(tagName_, tagNameLen_, "table", 5) ||
+      eqIc(tagName_, tagNameLen_, "caption", 7)) {
+    emitMarker(kParagraphBreak);
+    return;
+  }
+  if (eqIc(tagName_, tagNameLen_, "tr", 2)) {
+    if (!isEndTag_) emitMarker(kLineBreak);
+    return;
+  }
+  if (eqIc(tagName_, tagNameLen_, "td", 2) || eqIc(tagName_, tagNameLen_, "th", 2)) {
+    if (isEndTag_) {
+      static const uint8_t kCellGap[] = {' ', ' '};
+      sink_.emit(kCellGap, sizeof(kCellGap));
+    }
+    return;
+  }
+  // v3.10.7 — definition lists.  <dl> isolates the block; <dt> term on its own
+  // line; <dd> description on its own line, indented (matches the usual visual).
+  if (eqIc(tagName_, tagNameLen_, "dl", 2)) {
+    emitMarker(kParagraphBreak);
+    return;
+  }
+  if (eqIc(tagName_, tagNameLen_, "dt", 2)) {
+    if (!isEndTag_) emitMarker(kLineBreak);
+    return;
+  }
+  if (eqIc(tagName_, tagNameLen_, "dd", 2)) {
+    if (isEndTag_) {
+      emitMarker(kIndentOff);
+    } else {
+      emitMarker(kLineBreak);
+      emitMarker(kIndentOn);
+    }
+    return;
+  }
+  // v3.10.7 — HTML <cite> is conventionally italic (a referenced title); the FB2
+  // dispatch above maps its own <cite> to a block quote, so this only applies to
+  // HTML.  Other inline tags we deliberately leave unstyled (text still shown):
+  // <u>/<s>/<strike>/<del>/<code>/<tt>/<kbd>/<samp>/<span>/<mark>/<small>/<q> —
+  // no underline/strike/mono support, but the words render normally.
+  if (eqIc(tagName_, tagNameLen_, "cite", 4)) {
+    emitMarker(isEndTag_ ? kItalicOff : kItalicOn);
     return;
   }
   // Unknown / unhandled tag — text content still emitted by outer loop.

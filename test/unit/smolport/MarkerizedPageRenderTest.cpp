@@ -934,6 +934,56 @@ int main() {
     runner.expectTrue(subY >= 0 && bodyY > subY, "heading_body_below_h2");
   }
 
+  // -----------------------------------------------------------------------
+  // v3.10.7 — HTML5 semantic block container isolates its content (own line).
+  // <section>/<article>/<header>/… were unhandled → ran inline (same class as
+  // the h1 bug).  Now treated like <div> (paragraph break on close).
+  // -----------------------------------------------------------------------
+  {
+    auto sm = markerizeAll("<section>SECWORD</section><p>AFTERWORD trailing body text</p>");
+    StreamingPaginatorConfig tall = smallConfig();
+    tall.pageHeight = 400;
+    FakeRenderer fr;
+    StreamingPaginator pag(tall, fr);
+    size_t pos = 0;
+    uint8_t buf[256];
+    renderMarkerizedPage(pag, makeReader(sm, pos), buf, sizeof(buf), 0);
+    int secY = -1, afterY = -1;
+    for (const auto& d : fr.draws) {
+      if (d.text == "SECWORD" && secY < 0) secY = d.y;
+      if (d.text == "AFTERWORD" && afterY < 0) afterY = d.y;
+    }
+    runner.expectTrue(secY >= 0 && afterY >= 0, "section_both_drawn");
+    runner.expectTrue(secY >= 0 && afterY > secY, "section_content_isolated");
+  }
+
+  // -----------------------------------------------------------------------
+  // v3.10.7 — tables: cells in a row stay on one line; rows stack on separate
+  // lines.  Pre-fix table/tr/td were unhandled → every cell concatenated.
+  // -----------------------------------------------------------------------
+  {
+    auto tm = markerizeAll(
+        "<table><tr><td>RoneCone</td><td>RoneCtwo</td></tr>"
+        "<tr><td>RtwoCone</td><td>RtwoCtwo</td></tr></table>");
+    StreamingPaginatorConfig tall = smallConfig();
+    tall.pageHeight = 400;
+    tall.pageWidth = 400;  // wide enough that both cells of a row fit on one line
+    FakeRenderer fr;
+    StreamingPaginator pag(tall, fr);
+    size_t pos = 0;
+    uint8_t buf[256];
+    renderMarkerizedPage(pag, makeReader(tm, pos), buf, sizeof(buf), 0);
+    int r1c1 = -1, r1c2 = -1, r2c1 = -1;
+    for (const auto& d : fr.draws) {
+      if (d.text == "RoneCone" && r1c1 < 0) r1c1 = d.y;
+      if (d.text == "RoneCtwo" && r1c2 < 0) r1c2 = d.y;
+      if (d.text == "RtwoCone" && r2c1 < 0) r2c1 = d.y;
+    }
+    runner.expectTrue(r1c1 >= 0 && r1c2 >= 0 && r2c1 >= 0, "table_cells_drawn");
+    runner.expectTrue(r1c1 >= 0 && r1c2 == r1c1, "table_row1_cells_same_line");
+    runner.expectTrue(r2c1 >= 0 && r1c1 >= 0 && r2c1 > r1c1, "table_row2_below_row1");
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }
