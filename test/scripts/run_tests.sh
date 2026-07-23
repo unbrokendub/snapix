@@ -20,4 +20,4 @@ fi
 # CTest runs only targets configured by the current source tree.  Iterating the
 # output directory also executed stale binaries left behind by renamed/removed
 # tests and could make CI results misleading.
-ctest --test-dir "$BUILD_DIR" --output-on-failure
+ctest --test-dir "$BUILD_DIR" --output-on-failure --timeout 30

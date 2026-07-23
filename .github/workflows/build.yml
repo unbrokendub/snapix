@@ -43,14 +43,24 @@ jobs:
         run: pip install --upgrade platformio esptool
 
       - name: Install host-test dependencies
+        if: github.ref_type != 'tag'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake libexpat1-dev
 
-      - name: Build and run host unit tests
-        run: |
-          test/scripts/build_tests.sh
-          test/scripts/run_tests.sh
+      # Branch pushes validate the complete host suite. A release tag points at
+      # an already validated main commit, so repeating this expensive cold
+      # build only delays asset publication and used to make simultaneous
+      # main/tag pushes compete for runners.
+      - name: Build host unit tests
+        if: github.ref_type != 'tag'
+        timeout-minutes: 30
+        run: test/scripts/build_tests.sh
+
+      - name: Run host unit tests
+        if: github.ref_type != 'tag'
+        timeout-minutes: 5
+        run: test/scripts/run_tests.sh
 
       - name: Build release firmware
         run: pio run -e release
