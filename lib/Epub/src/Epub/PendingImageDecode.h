@@ -32,6 +32,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace snapix {
@@ -39,6 +40,11 @@ namespace snapix {
 struct PendingImageDecode {
   std::string tempJpegPath;    // /cache/epub_<hash>/images/.tmp_<srcHash>.jpg
   std::string targetBmpPath;   // /cache/epub_<hash>/images/<srcHash>.bmp
+  // Optional lazy source preparation.  Foreground streaming render enqueues
+  // this callback instead of inflating the EPUB entry synchronously.  The
+  // ReaderAsync worker invokes it immediately before conversion.
+  std::function<bool(const std::string&, const std::function<bool()>&)>
+      prepareInput;
   uint16_t maxWidth;
   uint16_t maxHeight;
   uint32_t srcHash;            // session-blacklist key
@@ -54,21 +60,36 @@ struct PendingImageDecode {
 
 namespace pendingImage {
 
+enum class Priority : uint8_t {
+  Background = 0,
+  CurrentPage = 1,
+};
+
 // Push a new pending decode.  Returns false if the queue is full (current
 // cap is 32 entries — enough for any single chapter we've seen, and small
 // enough that worst-case temp-file disk usage stays under 2 MB on LittleFS).
-bool enqueue(PendingImageDecode item);
+// Duplicate target paths are coalesced; a CurrentPage duplicate is promoted.
+bool enqueue(PendingImageDecode item, Priority priority = Priority::Background);
+
+// Move an already-queued target to the front.  drainTarget atomically removes
+// and drains that exact item (or reports true when another task is already
+// decoding it); it never accidentally drains a different image.
+bool promote(const std::string& targetBmpPath);
+bool drainTarget(
+    const std::string& targetBmpPath,
+    const std::function<bool()>& shouldAbort = {});
+bool isPendingOrActive(const std::string& targetBmpPath);
 
 // Pop one pending decode off the queue, run the JPEG→BMP convert, delete
 // the temp JPEG on success, blacklist on hard failure.  Returns true if it
 // did work, false if the queue was empty.  Designed to be called from the
 // BG cache task in a loop until it returns false or shouldAbort fires.
-bool drainOne();
+bool drainOne(const std::function<bool()>& shouldAbort = {});
 
 // Drain everything currently queued.  Caller passes a `shouldAbort` to
 // allow cooperative cancellation between decodes (each decode is 3-10 s and
 // can't be interrupted internally; we yield between items, not within).
-size_t drainAll();
+size_t drainAll(const std::function<bool()>& shouldAbort = {});
 
 // Inspect.
 size_t pendingCount();

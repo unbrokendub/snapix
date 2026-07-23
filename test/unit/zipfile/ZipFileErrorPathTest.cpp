@@ -9,6 +9,7 @@
 
 #include "test_utils.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -26,6 +27,7 @@
 std::vector<uint8_t> createMinimalZip();
 std::vector<uint8_t> createZipWithInvalidOffset(const char* name);
 std::vector<uint8_t> createZipWithUnsupportedCompression(const char* name);
+std::vector<uint8_t> createCentralDirectoryOnlyZip();
 
 // Mock Print for stream testing
 class MockPrint : public Print {
@@ -172,6 +174,22 @@ int main() {
     runner.expectFalse(zip.getInflatedFileSize("nonexistent.txt", &size), "GetSizeNonExistent_ReturnsFalse");
   }
 
+  {
+    SdMan.reset();
+    SdMan.setFileData("/sizes.zip", createCentralDirectoryOnlyZip());
+    ZipFile zip("/sizes.zip");
+    std::vector<ZipFile::SizeTarget> targets = {
+        {ZipFile::fnvHash64("OPS/a.xhtml", 11), 11, 2},
+        {ZipFile::fnvHash64("OPS/b.xhtml", 11), 11, 0},
+    };
+    std::sort(targets.begin(), targets.end());
+    std::vector<uint32_t> sizes(3, 0);
+    runner.expectEq<int>(2, zip.fillUncompressedSizes(targets, sizes),
+                         "BatchSizes_MatchesBothTargets");
+    runner.expectEq<uint32_t>(5678, sizes[0], "BatchSizes_MapsSecondTargetIndex");
+    runner.expectEq<uint32_t>(1234, sizes[2], "BatchSizes_MapsFirstTargetIndex");
+  }
+
   // ========================================================================
   // Memory Safety Tests
   // ========================================================================
@@ -222,6 +240,58 @@ std::vector<uint8_t> createMinimalZip() {
   data[80] = 0x05;
   data[81] = 0x06;
   data[92] = 0x00;  // 0 entries
+  return data;
+}
+
+std::vector<uint8_t> createCentralDirectoryOnlyZip() {
+  std::vector<uint8_t> data;
+  auto append16 = [&data](uint16_t value) {
+    data.push_back(static_cast<uint8_t>(value));
+    data.push_back(static_cast<uint8_t>(value >> 8));
+  };
+  auto append32 = [&data](uint32_t value) {
+    data.push_back(static_cast<uint8_t>(value));
+    data.push_back(static_cast<uint8_t>(value >> 8));
+    data.push_back(static_cast<uint8_t>(value >> 16));
+    data.push_back(static_cast<uint8_t>(value >> 24));
+  };
+  auto appendEntry = [&data, &append16, &append32](const char* name,
+                                                   uint32_t size) {
+    const uint16_t nameLen = static_cast<uint16_t>(strlen(name));
+    append32(0x02014b50);
+    append16(20);  // version made by
+    append16(20);  // version needed
+    append16(0);   // flags
+    append16(0);   // stored
+    append16(0);   // time
+    append16(0);   // date
+    append32(0);   // crc
+    append32(size);
+    append32(size);
+    append16(nameLen);
+    append16(0);  // extra len
+    append16(0);  // comment len
+    append16(0);  // disk
+    append16(0);  // internal attrs
+    append32(0);  // external attrs
+    append32(0);  // local-header offset
+    data.insert(data.end(), name, name + nameLen);
+  };
+
+  const uint32_t centralOffset = static_cast<uint32_t>(data.size());
+  appendEntry("OPS/a.xhtml", 1234);
+  appendEntry("OPS/b.xhtml", 5678);
+  const uint32_t centralSize =
+      static_cast<uint32_t>(data.size()) - centralOffset;
+
+  append32(0x06054b50);
+  append16(0);
+  append16(0);
+  append16(2);
+  append16(2);
+  append32(centralSize);
+  append32(centralOffset);
+  append16(0);
   return data;
 }
 

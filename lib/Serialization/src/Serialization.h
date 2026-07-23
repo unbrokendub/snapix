@@ -2,6 +2,7 @@
 #include <Logging.h>
 
 #include <iostream>
+#include <type_traits>
 
 // v2.0.60: file-based overloads were FsFile-specific (SdFat).  PageCache
 // migrating to LittleFS needs Arduino-File-based versions too.  Solution:
@@ -15,7 +16,8 @@ static void writePod(std::ostream& os, const T& value) {
   os.write(reinterpret_cast<const char*>(&value), sizeof(T));
 }
 
-template <typename FileT, typename T>
+template <typename FileT, typename T,
+          std::enable_if_t<!std::is_base_of<std::ios_base, std::decay_t<FileT>>::value, int> = 0>
 static void writePod(FileT& file, const T& value) {
   file.write(reinterpret_cast<const uint8_t*>(&value), sizeof(T));
 }
@@ -25,12 +27,14 @@ static void readPod(std::istream& is, T& value) {
   is.read(reinterpret_cast<char*>(&value), sizeof(T));
 }
 
-template <typename FileT, typename T>
+template <typename FileT, typename T,
+          std::enable_if_t<!std::is_base_of<std::ios_base, std::decay_t<FileT>>::value, int> = 0>
 static void readPod(FileT& file, T& value) {
   file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T));
 }
 
-template <typename FileT, typename T>
+template <typename FileT, typename T,
+          std::enable_if_t<!std::is_base_of<std::ios_base, std::decay_t<FileT>>::value, int> = 0>
 [[nodiscard]] static bool readPodChecked(FileT& file, T& value) {
   return file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T)) == sizeof(T);
 }
@@ -41,7 +45,8 @@ static void writeString(std::ostream& os, const std::string& s) {
   os.write(s.data(), len);
 }
 
-template <typename FileT>
+template <typename FileT,
+          std::enable_if_t<!std::is_base_of<std::ios_base, std::decay_t<FileT>>::value, int> = 0>
 static void writeString(FileT& file, const std::string& s) {
   const uint32_t len = s.size();
   writePod(file, len);
@@ -65,7 +70,8 @@ static void writeString(FileT& file, const std::string& s) {
   return is.good();
 }
 
-template <typename FileT>
+template <typename FileT,
+          std::enable_if_t<!std::is_base_of<std::ios_base, std::decay_t<FileT>>::value, int> = 0>
 [[nodiscard]] static bool readString(FileT& file, std::string& s) {
   uint32_t len;
   if (file.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != static_cast<int>(sizeof(len))) {
@@ -85,7 +91,8 @@ template <typename FileT>
   return true;
 }
 
-template <typename FileT>
+template <typename FileT,
+          std::enable_if_t<!std::is_base_of<std::ios_base, std::decay_t<FileT>>::value, int> = 0>
 [[nodiscard]] static bool skipString(FileT& file) {
   uint32_t len;
   if (file.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != static_cast<int>(sizeof(len))) {
@@ -101,10 +108,14 @@ template <typename FileT>
   return len == 0 || file.seek(file.position() + len);
 }
 
-template <typename FileT, typename T>
+template <typename FileT, typename T,
+          std::enable_if_t<!std::is_base_of<std::ios_base, std::decay_t<FileT>>::value, int> = 0>
 static void readPodValidated(FileT& file, T& value, T maxValue) {
-  T temp;
-  file.read(reinterpret_cast<uint8_t*>(&temp), sizeof(T));
+  T temp{};
+  if (file.read(reinterpret_cast<uint8_t*>(&temp), sizeof(T)) !=
+      static_cast<int>(sizeof(T))) {
+    return;
+  }
   if (temp < maxValue) {
     value = temp;
   }

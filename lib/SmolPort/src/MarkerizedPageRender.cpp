@@ -35,7 +35,7 @@ class PageCountingObserver : public MarkerObserver {
  public:
   PageCountingObserver(StreamingPaginator& inner, uint16_t targetPage,
                         uint16_t startPage, uint32_t startByteOffset,
-                        OnPageBoundaryFn onBoundary)
+                        OnPageBoundaryFn onBoundary, OnAnchorPageFn onAnchorPage)
       : inner_(inner), targetPage_(targetPage), currentPage_(startPage),
         // v2.0.140 fix — when resuming from a non-zero file seek, start
         // `bytesSeen_` at the seek's source position so all boundary
@@ -44,7 +44,8 @@ class PageCountingObserver : public MarkerObserver {
         // seek — cumulative resume drift on every page-turn past the
         // cold-walked range.
         bytesSeen_(startByteOffset),
-        onBoundary_(std::move(onBoundary)) {
+        onBoundary_(std::move(onBoundary)),
+        onAnchorPage_(std::move(onAnchorPage)) {
     // Page 0 is the initial page — start drawing immediately if target=0.
     inner_.setDrawSuppressed(currentPage_ != targetPage_);
   }
@@ -96,7 +97,11 @@ class PageCountingObserver : public MarkerObserver {
     bytesSeen_ += static_cast<uint32_t>(4 + len);
     return checkAdvance(inner_.onImageRef(path, len));
   }
-  ObserverStatus onAnchor(const uint8_t* id, uint16_t len) override {
+  ObserverStatus onAnchorAt(const uint8_t* id, uint16_t len,
+                            uint32_t /*sourceOffset*/) override {
+    if (onAnchorPage_) {
+      onAnchorPage_(id, len, currentPage_);
+    }
     bytesSeen_ += static_cast<uint32_t>(4 + len);
     return checkAdvance(inner_.onAnchor(id, len));
   }
@@ -115,6 +120,7 @@ class PageCountingObserver : public MarkerObserver {
   // when the underlying file was seeked past the start of the chapter.
   uint32_t bytesSeen_ = 0;
   OnPageBoundaryFn onBoundary_;
+  OnAnchorPageFn onAnchorPage_;
 
   ObserverStatus checkAdvance(ObserverStatus innerStatus) {
     if (!inner_.isPageFull()) {
@@ -234,7 +240,8 @@ MarkerizedRenderResult renderMarkerizedPage(StreamingPaginator& paginator, Chapt
                                               const ChapterAbortFn& shouldAbort,
                                               MarkerizedRenderStats* outStats,
                                               const MarkerizedRenderResume& resume,
-                                              const OnPageBoundaryFn& onPageBoundary) {
+                                              const OnPageBoundaryFn& onPageBoundary,
+                                              const OnAnchorPageFn& onAnchorPage) {
   if (!readChunk || chunkBuf == nullptr || chunkBufSize == 0) {
     if (outStats) {
       outStats->pagesAdvancedThrough = 0;
@@ -279,7 +286,7 @@ MarkerizedRenderResult renderMarkerizedPage(StreamingPaginator& paginator, Chapt
   const uint32_t effectiveStartByteOffset =
       (effectiveStart > 0) ? resume.byteOffset : 0;
   PageCountingObserver counter(paginator, targetPage, effectiveStart,
-                                effectiveStartByteOffset, onPageBoundary);
+                                effectiveStartByteOffset, onPageBoundary, onAnchorPage);
   StreamingChapterRenderer chapterRenderer(counter);
 
   RenderStats rstats{};

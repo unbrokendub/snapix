@@ -39,6 +39,9 @@ namespace snapix {
 // Forward declarations
 class Core;
 struct Event;
+namespace unifiedcache {
+class UnifiedCache;
+}
 
 // ReaderState - unified reader for all content types
 // Uses ContentHandle to abstract Epub/Xtc/Txt/Markdown differences
@@ -201,13 +204,15 @@ class ReaderState : public State {
   void updateGlobalPageMetrics(Core& core, int currentSectionTotalPages, bool currentSectionIsPartial);
   void recalibrateGlobalPageEstimates();
   void recomputeGlobalPageMetricTotal();
-  // v2.0.153 — persist `globalSectionPageMetrics_` between sessions to avoid
-  // re-probing every cached section file at book open (which was ~200 ms/file
-  // on LittleFS and added 11 s of latency on Fire_in_the_Valley.fb2's 55 TOC
-  // entries).  Returns true on a successful load (caller can skip the probe
-  // loop entirely).  saveGlobalPageMetricsToDisk is best-effort and silent.
-  bool loadGlobalPageMetricsFromDisk(const std::string& bookCachePath, uint32_t configHash, int spineCount);
-  void saveGlobalPageMetricsToDisk(const std::string& bookCachePath, uint32_t configHash) const;
+  // Persist `globalSectionPageMetrics_` between sessions.  A cache hit is
+  // checked before any per-section I/O; a miss uses one batch metadata pass
+  // and estimates uncached sections instead of probing every page-cache file
+  // synchronously during the first visible render.
+  bool loadGlobalPageMetricsFromDisk(unifiedcache::UnifiedCache& cache,
+                                     const std::string& bookCachePath,
+                                     uint32_t configHash, int spineCount);
+  void saveGlobalPageMetricsToDisk(unifiedcache::UnifiedCache& cache,
+                                   uint32_t configHash) const;
   GlobalPageMetrics resolveGlobalPageMetrics(Core& core, int currentSectionTotalPages, bool currentSectionIsPartial);
 
   // Cache management
@@ -298,7 +303,7 @@ class ReaderState : public State {
   uint8_t& pendingTocJumpRetryCount_;
   uint32_t& pendingTocJumpStartedMs_;
   uint32_t& pendingTocJumpLastDiagMs_;
-  bool& pendingTocFirstPageReady_;  // v2.0.104: worker→main signal for deferred-display
+  std::atomic<bool>& pendingTocFirstPageReady_;  // worker→main signal for deferred-display
   bool& pendingEpubPageLoadActive_;
   bool& pendingEpubPageLoadMessageShown_;
   bool& pendingEpubPageLoadRequireComplete_;
@@ -309,9 +314,6 @@ class ReaderState : public State {
   uint32_t& pendingEpubPageLoadStartedMs_;
   uint32_t& pendingEpubPageLoadLastDiagMs_;
   uint32_t& pendingEpubPageLoadNextRetryMs_;
-  bool& pendingBackgroundEpubRefresh_;
-  int& pendingBackgroundEpubRefreshSpine_;
-  int& pendingBackgroundEpubRefreshPage_;
   int& queuedPendingEpubTurn_;
   uint32_t& queuedPendingEpubTurnQueuedMs_;
   uint32_t& lastCachePreemptRequestedMs_;

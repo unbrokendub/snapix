@@ -53,6 +53,11 @@ bool Markdown::load() {
     return false;
   }
 
+  if (!cache_fs::ensureSourceFingerprint(filepath, cachePath)) {
+    LOG_ERR(TAG, "Could not verify source fingerprint");
+    return false;
+  }
+
   // Default: read directly from SD source.
   effectiveContentPath_ = filepath;
   useLittleFsForContent_ = false;

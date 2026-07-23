@@ -1,21 +1,23 @@
 // CssParser class tests - exercises the actual CssParser implementation
-// with mock SDCardManager to test safety limits (rule count, selector
+// with mock LittleFS to test safety limits (rule count, selector
 // length, file size).
 
 #include "test_utils.h"
 
 #include <HardwareSerial.h>
-#include <SDCardManager.h>
+#include <LittleFS.h>
 
 #include <CssParser.h>
 
 #include <string>
 
+#define SdMan LittleFS
+
 int main() {
   TestUtils::TestRunner runner("CssParser Class");
 
   // ============================================
-  // Basic parseFile() with mock SDCardManager
+  // Basic parseFile() with mock LittleFS
   // ============================================
 
   // Test 1: Parse a simple CSS file via mock

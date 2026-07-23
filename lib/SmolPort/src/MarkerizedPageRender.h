@@ -108,6 +108,12 @@ struct PageBoundarySnapshot {
 
 using OnPageBoundaryFn = std::function<void(const PageBoundarySnapshot&)>;
 
+// Fired during the pagination walk for every anchor in the marker stream.
+// pageIndex is the exact current zero-based page, allowing EPUB TOC maps to
+// share the already-required index walk instead of paginating twice.
+using OnAnchorPageFn =
+    std::function<void(const uint8_t* id, uint16_t len, uint16_t pageIndex)>;
+
 // Resume parameters — all default-zero means "render from scratch
 // (fresh chapter)" and behaviour is identical to v2.0.121-122.
 //
@@ -414,6 +420,7 @@ MarkerizedRenderResult renderMarkerizedPage(
     const ChapterAbortFn& shouldAbort = {},
     MarkerizedRenderStats* outStats = nullptr,
     const MarkerizedRenderResume& resume = {},
-    const OnPageBoundaryFn& onPageBoundary = {});
+    const OnPageBoundaryFn& onPageBoundary = {},
+    const OnAnchorPageFn& onAnchorPage = {});
 
 }  // namespace snapix::smolport

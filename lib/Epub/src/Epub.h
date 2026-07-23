@@ -87,6 +87,10 @@ class Epub {
   std::unique_ptr<ZipItemReader> openItemStream(const std::string& itemHref, size_t chunkSize = 8192,
                                                 uint8_t* dictBuffer = nullptr) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
+  // Resolve every spine entry's uncompressed size with one ZIP central-
+  // directory scan.  This is substantially faster than getItemSize() in a
+  // loop because the latter reopens and rescans the archive for every href.
+  bool getSpineItemSizes(std::vector<size_t>& sizes) const;
   BookMetadataCache::SpineEntry getSpineItem(int spineIndex) const;
   BookMetadataCache::TocEntry getTocItem(int tocIndex) const;
   int getSpineItemsCount() const;

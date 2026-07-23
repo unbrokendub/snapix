@@ -12,6 +12,9 @@
 class Page;
 class GfxRenderer;
 class Fb2;
+namespace snapix::unifiedcache {
+class UnifiedCache;
+}
 
 /**
  * Content parser for FB2 sections.
@@ -95,7 +98,7 @@ class Fb2Parser : public ContentParser {
   // markerize the section's byte range into UnifiedCache::Markers (key =
   // startingSectionIndex_).  One-shot; cache-hit short-circuits.  Used by the
   // section-scoped (TOC) path.
-  bool tryMarkerizeSection();
+  bool tryMarkerizeSection(snapix::unifiedcache::UnifiedCache& cache);
 
   // ---- v3.10 — no-TOC (whole-book) LAZY/progressive markerize ----------------
   // A big no-TOC FB2 used to markerize the whole file before page 0.  Now the
@@ -115,6 +118,6 @@ class Fb2Parser : public ContentParser {
 
   bool parsePagesProgressive(const std::function<void(std::unique_ptr<Page>)>& onPageComplete,
                              uint16_t maxPages);
-  bool ensureProgressiveInit();  // recover chunk cursor + load existing idx
-  bool markerizeNextChunk();     // markerize one element-bounded chunk → key chunkIdx_
+  bool ensureProgressiveInit(snapix::unifiedcache::UnifiedCache& cache);
+  bool markerizeNextChunk(snapix::unifiedcache::UnifiedCache& cache);
 };

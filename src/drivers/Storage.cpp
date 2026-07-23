@@ -2,6 +2,8 @@
 
 #include <SDCardManager.h>
 
+#include <string>
+
 namespace snapix {
 namespace drivers {
 
@@ -28,11 +30,26 @@ Result<void> Storage::openRead(const char* path, FsFile& out) {
     return ErrVoid(Error::SdCardNotFound);
   }
 
-  if (!SdMan.openFileForRead("DRV", path, out)) {
-    return ErrVoid(Error::FileNotFound);
+  if (SdMan.openFileForRead("DRV", path, out)) {
+    return Ok();
   }
 
-  return Ok();
+  // Finish or roll back an interrupted recoverable replace.  A backup is
+  // always preferred over a temp file: it is the last version known to have
+  // been fully committed.  A lone `.tmp` is promoted for first-time saves.
+  const std::string backupPath = std::string(path) + ".bak";
+  const std::string tmpPath = std::string(path) + ".tmp";
+  if (SdMan.exists(backupPath.c_str()) &&
+      SdMan.rename(backupPath.c_str(), path) &&
+      SdMan.openFileForRead("DRV", path, out)) {
+    return Ok();
+  }
+  if (SdMan.exists(tmpPath.c_str()) &&
+      SdMan.rename(tmpPath.c_str(), path) &&
+      SdMan.openFileForRead("DRV", path, out)) {
+    return Ok();
+  }
+  return ErrVoid(Error::FileNotFound);
 }
 
 Result<void> Storage::openWrite(const char* path, FsFile& out) {
@@ -93,19 +110,27 @@ Result<void> Storage::rmdir(const char* path) {
 
 bool Storage::rename(const char* fromPath, const char* toPath) {
   if (!mounted_) return false;
-  // v2.0.76 hotfix: SDFat `rename(from, to)` REFUSES to overwrite an existing
-  // destination — it fails silently and the .tmp file lingers.  v2.0.75
-  // assumed atomic overwrite (LittleFS does this), so every Settings /
-  // Progress / Bookmark save after the first failed → user saw the same
-  // "rename failed; keeping old file" error on every device run.  Remove
-  // the destination first.  Not strictly atomic across the two ops, but
-  // power loss between them leaves the .tmp file intact for manual recovery;
-  // the partial corrupt state (no destination, .tmp present) is detectable
-  // and safer than the alternative of failing to update altogether.
-  if (SdMan.exists(toPath)) {
-    SdMan.remove(toPath);
+
+  const std::string backupPath = std::string(toPath) + ".bak";
+  const bool hadDestination = SdMan.exists(toPath);
+  bool hasBackup = SdMan.exists(backupPath.c_str());
+  if (hadDestination) {
+    if (hasBackup && !SdMan.remove(backupPath.c_str())) return false;
+    if (!SdMan.rename(toPath, backupPath.c_str())) return false;
+    hasBackup = true;
   }
-  return SdMan.rename(fromPath, toPath);
+
+  if (SdMan.rename(fromPath, toPath)) {
+    if (hasBackup) SdMan.remove(backupPath.c_str());
+    return true;
+  }
+
+  // Best-effort rollback.  If power is lost before this point, openRead()
+  // performs the same recovery from `.bak` on the next boot.
+  if (hasBackup && !SdMan.exists(toPath)) {
+    SdMan.rename(backupPath.c_str(), toPath);
+  }
+  return false;
 }
 
 Result<void> Storage::openDir(const char* path, FsFile& out) {

@@ -10,6 +10,7 @@
 
 #include <LittleFS.h>  // Internal-flash image cache (v2.0.53+) — see flashImageCacheDir below
 
+#include <CacheFs.h>
 #include <CoverHelpers.h>
 #include <FsHelpers.h>
 #include <JpegToBmpConverter.h>
@@ -387,6 +388,11 @@ bool Fb2::load() {
 
   if (!SdMan.exists(filepath.c_str())) {
     LOG_ERR(TAG, "File does not exist");
+    return false;
+  }
+
+  if (!cache_fs::ensureSourceFingerprint(filepath, cachePath)) {
+    LOG_ERR(TAG, "Could not verify source fingerprint");
     return false;
   }
 
@@ -1961,6 +1967,30 @@ Fb2::TocItem Fb2::getTocItem(uint16_t index) const {
   }
   file.close();
   return item;
+}
+
+bool Fb2::getTocSourceOffsets(std::vector<uint32_t>& offsets) const {
+  offsets.assign(tocItemCount_, 0);
+  if (tocItemCount_ == 0 || tocLut_.size() < tocItemCount_) return false;
+
+  File file = LittleFS.open(metaCachePath().c_str(), "r");
+  if (!file) return false;
+
+  bool ok = true;
+  for (uint16_t i = 0; i < tocItemCount_; ++i) {
+    int16_t sectionIndex = -1;
+    uint32_t sourceOffset = 0;
+    if (!file.seek(tocLut_[i]) || !serialization::skipString(file) ||
+        !serialization::readPodChecked(file, sectionIndex) ||
+        !serialization::readPodChecked(file, sourceOffset)) {
+      ok = false;
+      break;
+    }
+    offsets[i] = sourceOffset;
+  }
+  file.close();
+  if (!ok) offsets.clear();
+  return ok;
 }
 
 size_t Fb2::readContent(uint8_t* buffer, size_t offset, size_t length) const {

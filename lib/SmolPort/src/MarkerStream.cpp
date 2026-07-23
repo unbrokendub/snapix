@@ -18,9 +18,12 @@ void MarkerStreamReader::reset() {
   pendingTag_ = 0;
   payloadLen_ = 0;
   payloadRecvd_ = 0;
+  sourceBytesSeen_ = 0;
+  pendingMarkerOffset_ = 0;
 }
 
 bool MarkerStreamReader::feed(const uint8_t* data, const size_t len) {
+  const uint32_t feedBaseOffset = sourceBytesSeen_;
   // State-machine invariant (v2.0.101 architectural fix — diagnosed from
   // Phase 3e step 2's "perma-stuck after Stop" regression on spine=20):
   //
@@ -65,6 +68,7 @@ bool MarkerStreamReader::feed(const uint8_t* data, const size_t len) {
         }
         if (i >= len) break;
         // data[i] must be kMarker — consume it and transition.
+        pendingMarkerOffset_ = feedBaseOffset + static_cast<uint32_t>(i);
         ++i;
         state_ = State::InMarkerEscape;
         break;
@@ -141,6 +145,7 @@ bool MarkerStreamReader::feed(const uint8_t* data, const size_t len) {
       }
     }
   }
+  sourceBytesSeen_ += static_cast<uint32_t>(len);
   return true;
 }
 
@@ -234,7 +239,7 @@ bool MarkerStreamReader::emitPayloadEvent() {
       rc = observer_.onImageRef(payloadBuf_, payloadLen_);
       break;
     case kAnchor:
-      rc = observer_.onAnchor(payloadBuf_, payloadLen_);
+      rc = observer_.onAnchorAt(payloadBuf_, payloadLen_, pendingMarkerOffset_);
       break;
     case kHeadingOn: {
       // payloadBuf_[0] holds the digit byte; treat '2' as default if

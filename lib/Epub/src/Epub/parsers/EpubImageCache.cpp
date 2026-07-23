@@ -343,6 +343,76 @@ EpubImageCache::CachedImageResult EpubImageCache::cacheImage(const std::string& 
     // Extract image to LittleFS temp file (hash in name for uniqueness).
     const std::string tempExt = FsHelpers::isPngFile(src) ? ".png" : ".jpg";
     tempPath = imageCachePath + "/.tmp_" + std::to_string(srcHash) + tempExt;
+
+    // Foreground streaming mode: enqueue BOTH ZIP extraction and conversion.
+    // Previously quick mode still inflated every encountered image before it
+    // returned.  On a saved page inside a 213-page image-heavy chapter that
+    // meant 14 serial extractions and four 15-second timeouts before any text
+    // appeared.  The ReaderAsync worker now prepares only images referenced by
+    // the visible render and repaints when their BMPs are ready.
+    if (quickImageDecode_) {
+      if (snapix::pendingImage::isPendingOrActive(result.cachedBmpPath)) {
+        (void)snapix::pendingImage::promote(result.cachedBmpPath);
+        result.success = true;
+        result.retryable = false;
+        result.status = CachedImageStatus::Success;
+        result.failureClass = ImageFailureClass::None;
+        result.failureReason = "async-pending";
+        return result;
+      }
+
+      snapix::PendingImageDecode item;
+      item.tempJpegPath = tempPath;
+      item.targetBmpPath = result.cachedBmpPath;
+      item.maxWidth = static_cast<uint16_t>(config.viewportWidth);
+      item.maxHeight = static_cast<uint16_t>(config.viewportHeight);
+      item.srcHash = static_cast<uint32_t>(srcHash);
+      item.quickMode = true;
+      item.logTag = "EHP";
+
+      const auto deferredReadItem = readItemFn;
+      const std::string deferredHref = result.resolvedPath;
+      item.prepareInput =
+          [deferredReadItem, deferredHref](
+              const std::string& deferredTempPath,
+              const std::function<bool()>& abort) -> bool {
+        File tempFile = LittleFS.open(deferredTempPath.c_str(), "w");
+        if (!tempFile) return false;
+        static constexpr size_t kDeferredImageZipStreamChunk = 8192;
+        const ReadItemStatus status =
+            deferredReadItem(deferredHref, tempFile,
+                             kDeferredImageZipStreamChunk, abort);
+        tempFile.close();
+        if (status != ReadItemStatus::Success) {
+          LittleFS.remove(deferredTempPath.c_str());
+          LOG_INF(TAG,
+                  "[CONTENT][IMAGE] deferred extract result resolved=%s result=%s",
+                  deferredHref.c_str(), readItemStatusToString(status));
+          return false;
+        }
+        return true;
+      };
+
+      if (!snapix::pendingImage::enqueue(
+              std::move(item),
+              snapix::pendingImage::Priority::CurrentPage)) {
+        setRetryable("async-queue-full", ImageFailureClass::TempOpenFailed);
+        return result;
+      }
+
+      consecutiveImageFailures_ = 0;
+      result.success = true;
+      result.retryable = false;
+      result.status = CachedImageStatus::Success;
+      result.failureClass = ImageFailureClass::None;
+      result.failureReason = "async-extract-deferred";
+      LOG_INF(TAG,
+              "[CONTENT][IMAGE] deferred extraction src=%s resolved=%s target=%s",
+              src.c_str(), result.resolvedPath.c_str(),
+              result.cachedBmpPath.c_str());
+      return result;
+    }
+
     File tempFile = LittleFS.open(tempPath.c_str(), "w");
     if (!tempFile) {
       LOG_ERR(TAG, "Failed to create temp file for image");
@@ -429,82 +499,6 @@ EpubImageCache::CachedImageResult EpubImageCache::cacheImage(const std::string& 
   // auto-detects the input filesystem internally (no flag needed here).
   const int maxImageHeight = config.viewportHeight;
   const int maxImageWidth = static_cast<int>(config.viewportWidth);
-
-  // v2.0.83: async-decode path.  In quick mode (used during background cache
-  // build / TOC-jump indexing) the parser only needs DIMENSIONS to lay out
-  // pages — the actual JPEG → BMP pixel work can wait.  Peek the source
-  // dimensions from the just-extracted temp JPEG (~30-50 ms), compute the
-  // aspect-fit target dims, enqueue the deferred decode, and return a
-  // synthetic success.  The page gets serialised pointing at the future BMP
-  // path; ImageBlock::render falls back to a "Loading image..." placeholder
-  // until the BG worker drains the queue and the BMP appears.
-  //
-  // This collapses the per-image indexing cost from ~5-8 s (extract+decode)
-  // down to ~2-3 s (extract+peek), and shifts the decode work to after the
-  // page has rendered.  On a heavy chapter (Calibre EPUB with 5+ images)
-  // that's the difference between "TOC jump in 2 minutes" and "TOC jump in
-  // 30 seconds".
-  if (quickImageDecode_) {
-    int srcW = 0, srcH = 0;
-    bool dimsKnown = false;
-    if (FsHelpers::isJpegFile(src)) {
-      // v2.0.89: route through ImageConverterFactory so v3_alpha builds use
-      // the SmolJpeg streaming peeker (no ~25 KB JPEGDEC workspace alloc).
-      // Pre-fix, every peek allocated a fresh JPEGDEC instance which OOM'd
-      // mid-chapter once the heap fragmented; the sync-decode fallback then
-      // OOM'd on the same singleton, producing the placeholder cascade
-      // observed on image/2.jpg–image/6.jpg.
-      dimsKnown = ImageConverterFactory::peekJpegDimensionsLittleFs(tempPath, srcW, srcH);
-    }
-    // PNG peek path could go here once PngToBmpConverter::peekDimensions has
-    // an fs::File variant; for now PNG falls through to sync decode.
-
-    if (dimsKnown && srcW > 0 && srcH > 0) {
-      // Aspect-fit to the viewport box.  This matches the same scaled-fit
-      // math inside decodeImplCallbacks so the page layout's reserved
-      // height matches what the BG worker eventually produces.
-      int targetW = srcW;
-      int targetH = srcH;
-      if (srcW > maxImageWidth || srcH > maxImageHeight) {
-        const double sx = static_cast<double>(maxImageWidth) / static_cast<double>(srcW);
-        const double sy = static_cast<double>(maxImageHeight) / static_cast<double>(srcH);
-        const double scaleD = sx < sy ? sx : sy;
-        targetW = std::max(1, static_cast<int>(srcW * scaleD));
-        targetH = std::max(1, static_cast<int>(srcH * scaleD));
-      }
-
-      snapix::PendingImageDecode item;
-      item.tempJpegPath = tempPath;
-      item.targetBmpPath = result.cachedBmpPath;
-      item.maxWidth = static_cast<uint16_t>(maxImageWidth);
-      item.maxHeight = static_cast<uint16_t>(maxImageHeight);
-      item.srcHash = static_cast<uint32_t>(srcHash);
-      item.quickMode = true;
-      item.logTag = "EHP";
-
-      if (snapix::pendingImage::enqueue(std::move(item))) {
-        // tempPath is NOT removed — the BG worker reads it.  ImageBlock will
-        // render a placeholder until the BMP materialises.
-        consecutiveImageFailures_ = 0;
-        result.width = static_cast<uint16_t>(targetW);
-        result.height = static_cast<uint16_t>(targetH);
-        result.success = true;
-        result.retryable = false;
-        result.status = CachedImageStatus::Success;
-        result.failureClass = ImageFailureClass::None;
-        result.failureReason = "async-deferred";
-        LOG_INF(TAG, "[CONTENT][IMAGE] deferred src=%s resolved=%s target=%dx%d (src=%dx%d) → %s",
-                src.c_str(), result.resolvedPath.c_str(), targetW, targetH, srcW, srcH,
-                result.cachedBmpPath.c_str());
-        return result;
-      }
-      // Enqueue failed (queue full) — fall through to sync decode.
-      LOG_INF(TAG, "[CONTENT][IMAGE] async queue full; sync-decoding src=%s", src.c_str());
-    } else {
-      LOG_INF(TAG, "[CONTENT][IMAGE] peek failed; sync-decoding src=%s (probably PNG or malformed JPEG)",
-              src.c_str());
-    }
-  }
 
   auto tryConvert = [&](int maxWidth, int maxHeight, bool quickMode) -> bool {
     ImageConvertConfig convertConfig;

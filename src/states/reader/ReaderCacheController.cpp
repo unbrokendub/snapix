@@ -4,6 +4,7 @@
 #include <EpubChapterParser.h>
 #include <Fb2Parser.h>
 #include <GfxRenderer.h>
+#include <HtmlParser.h>
 #include <LittleFS.h>  // v2.0.61: anchors file moved to LittleFS alongside page cache
 #include <Logging.h>
 #include <MarkdownParser.h>
@@ -782,7 +783,7 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
       if (!state.lookaheadParser || state.lookaheadParserSpineIndex != spine) {
         state.lookaheadParser = tryNewUnique<EpubChapterParser>("EpubChapterParser (lookahead)",
                                                                 epub, spine, resources_.renderer(), config,
-                                                                imageCachePath, true);
+                                                                imageCachePath);
         if (!state.lookaheadParser) return didWork;
         // v2.0.131 — plumb real viewport margins so R4.c .idx build
         // uses the same paginator config as the render path.  Caller
@@ -799,7 +800,7 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
       }
       auto transientParser = tryNewUnique<EpubChapterParser>("EpubChapterParser (transient)",
                                                              epub, spine, resources_.renderer(), config,
-                                                             imageCachePath, true);
+                                                             imageCachePath);
       if (!transientParser) return didWork;
       // v2.0.131 — plumb real viewport margins (see persistent path above).
       transientParser->setStreamingViewport(viewport.marginTop, viewport.marginBottom,
@@ -1072,7 +1073,7 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
         const std::string imageCachePath = core.settings.showImages ? (provider->getEpub()->getCachePath() + "/images") : "";
         state.parser = tryNewUnique<ContentParser, EpubChapterParser>("EpubChapterParser (fg)",
                                                                        provider->getEpubShared(), targetSpine,
-                                                                       resources_.renderer(), config, imageCachePath, false);
+                                                                       resources_.renderer(), config, imageCachePath);
         if (!state.parser) return;
         state.parserSpineIndex = targetSpine;
       }
@@ -1136,9 +1137,18 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     }
     parser = state.parser.get();
   } else if (type == ContentType::Html) {
-    // v2.0.162 — standalone HTML reading was dropped along with the
-    // legacy ChapterHtmlSlimParser pipeline; no parser is created so
-    // `parser` stays null below and the cache build path early-returns.
+    if (!state.parser) {
+      const auto* htmlProv = core.content.asHtml();
+      const Html* html = htmlProv ? htmlProv->getHtml() : nullptr;
+      const std::string parserPath = html ? html->getPath() : std::string(contentPath_);
+      const std::string htmlCachePath = html ? html->getCachePath() : std::string();
+      state.parser = tryNewUnique<ContentParser, HtmlParser>(
+          "HtmlParser", parserPath, htmlCachePath, resources_.renderer(), config);
+      if (!state.parser) return;
+      state.parserSpineIndex = 0;
+    }
+    cachePath = contentCachePath(core.content.cacheDir(), config.fontId);
+    parser = state.parser.get();
   } else if (type == ContentType::Txt) {
     if (!state.parser) {
       // v2.0.189 — route the parser through the Txt object's effective

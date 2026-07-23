@@ -9,24 +9,24 @@
 
 // Link stubs for virtual methods we don't exercise
 void PageLine::render(GfxRenderer&, int, int, int, bool) {}
-bool PageLine::serialize(FsFile&) { return false; }
-std::unique_ptr<PageLine> PageLine::deserialize(FsFile&) { return nullptr; }
+bool PageLine::serialize(File&) { return false; }
+std::unique_ptr<PageLine> PageLine::deserialize(File&) { return nullptr; }
 
 void PageImage::render(GfxRenderer&, int, int, int, bool) {}
-bool PageImage::serialize(FsFile&) { return false; }
-std::unique_ptr<PageImage> PageImage::deserialize(FsFile&) { return nullptr; }
+bool PageImage::serialize(File&) { return false; }
+std::unique_ptr<PageImage> PageImage::deserialize(File&) { return nullptr; }
 
 void Page::render(GfxRenderer&, int, int, int, bool) const {}
-bool Page::serialize(FsFile&) const { return false; }
-std::unique_ptr<Page> Page::deserialize(FsFile&) { return nullptr; }
+bool Page::serialize(File&) const { return false; }
+std::unique_ptr<Page> Page::deserialize(File&) { return nullptr; }
 
 void ImageBlock::render(GfxRenderer&, int, int, int) const {}
-bool ImageBlock::serialize(FsFile&) const { return false; }
-std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile&) { return nullptr; }
+bool ImageBlock::serialize(File&) const { return false; }
+std::unique_ptr<ImageBlock> ImageBlock::deserialize(File&) { return nullptr; }
 
 void TextBlock::render(const GfxRenderer&, int, int, int, bool) const {}
-bool TextBlock::serialize(FsFile&) const { return false; }
-std::unique_ptr<TextBlock> TextBlock::deserialize(FsFile&) { return nullptr; }
+bool TextBlock::serialize(File&) const { return false; }
+std::unique_ptr<TextBlock> TextBlock::deserialize(File&) { return nullptr; }
 
 static std::unique_ptr<PageImage> makeImage(int16_t x, int16_t y, uint16_t w, uint16_t h) {
   auto block = std::make_shared<ImageBlock>("img.bmp", w, h);

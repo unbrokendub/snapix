@@ -17,6 +17,7 @@
 #include <ContentParser.h>
 #include <RenderConfig.h>
 #include <SdFat.h>
+#include <StreamingSection.h>
 
 #include <cstdint>
 #include <functional>
@@ -25,6 +26,9 @@
 
 class Page;
 class GfxRenderer;
+namespace snapix::unifiedcache {
+class UnifiedCache;
+}
 
 class MarkdownParser : public ContentParser {
  public:
@@ -39,7 +43,7 @@ class MarkdownParser : public ContentParser {
                   const AbortCallback& shouldAbort = nullptr) override;
   bool hasMoreContent() const override { return hasMore_; }
   bool canResume() const override {
-    return shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_;
+    return initialized_ && (emitCursor_ < pagesAvailable_ || !sourceExhausted_);
   }
   void reset() override;
 
@@ -60,16 +64,27 @@ class MarkdownParser : public ContentParser {
   bool useLittleFs_ = false;
   bool hasMore_ = true;
 
-  // Streaming state (mirrors EpubChapterParser / PlainTextParser).
-  bool markerizeAttempted_ = false;
-  bool shortCircuitActive_ = false;
-  uint16_t shortCircuitTotalPages_ = 0;
-  uint16_t shortCircuitNextPage_ = 0;
+  // Lazy markerize + incremental idx state.  The live markerizer is a pimpl so
+  // this public header does not expose MarkdownStripper/HtmlStripper internals.
+  struct ProgressiveMarkerizer;
+  std::unique_ptr<ProgressiveMarkerizer> markerizer_;
+  bool initialized_ = false;
+  uint32_t fileSize_ = 0;
+  int chunkIdx_ = 0;
+  uint32_t srcOffset_ = 0;
+  bool sourceExhausted_ = false;
+  snapix::pagecache::ChunkedIdxState idxState_;
+  uint16_t pagesAvailable_ = 0;
+  uint16_t emitCursor_ = 0;
 
   int streamingViewportMarginTop_ = 4;
   int streamingViewportMarginBottom_ = 4;
   int streamingViewportMarginLeft_ = 4;
   int streamingViewportMarginRight_ = 4;
 
-  bool tryMarkerize();
+  bool ensureInit(snapix::unifiedcache::UnifiedCache& cache,
+                  const AbortCallback& shouldAbort);
+  bool restoreMarkerizer(const AbortCallback& shouldAbort);
+  bool markerizeNextChunk(snapix::unifiedcache::UnifiedCache& cache,
+                          const AbortCallback& shouldAbort);
 };

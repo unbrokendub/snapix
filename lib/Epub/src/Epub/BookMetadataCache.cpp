@@ -14,6 +14,8 @@ constexpr uint8_t BOOK_CACHE_VERSION = 7;
 constexpr char bookBinFile[] = "/book.bin";
 constexpr char tmpSpineBinFile[] = "/spine.bin.tmp";
 constexpr char tmpTocBinFile[] = "/toc.bin.tmp";
+constexpr uint16_t kMaxSpineEntries = 4096;
+constexpr uint16_t kMaxTocEntries = 8192;
 }  // namespace
 
 /* ============= WRITING / BUILDING FUNCTIONS ================ */
@@ -264,17 +266,32 @@ bool BookMetadataCache::load() {
     return false;
   }
 
-  uint8_t version;
-  serialization::readPod(bookFile, version);
+  loaded = false;
+  const size_t fileSize = bookFile.size();
+  uint8_t version = 0;
+  if (!serialization::readPodChecked(bookFile, version)) {
+    LOG_ERR(TAG, "Truncated cache header");
+    bookFile.close();
+    return false;
+  }
   if (version != BOOK_CACHE_VERSION) {
     LOG_ERR(TAG, "Cache version mismatch: expected %d, got %d", BOOK_CACHE_VERSION, version);
     bookFile.close();
     return false;
   }
 
-  serialization::readPod(bookFile, lutOffset);
-  serialization::readPod(bookFile, spineCount);
-  serialization::readPod(bookFile, tocCount);
+  if (!serialization::readPodChecked(bookFile, lutOffset) ||
+      !serialization::readPodChecked(bookFile, spineCount) ||
+      !serialization::readPodChecked(bookFile, tocCount)) {
+    LOG_ERR(TAG, "Truncated cache header");
+    bookFile.close();
+    return false;
+  }
+  if (spineCount > kMaxSpineEntries || tocCount > kMaxTocEntries) {
+    LOG_ERR(TAG, "Implausible cache counts: spine=%u toc=%u", spineCount, tocCount);
+    bookFile.close();
+    return false;
+  }
 
   if (!serialization::readString(bookFile, coreMetadata.title) ||
       !serialization::readString(bookFile, coreMetadata.author) ||
@@ -282,7 +299,31 @@ bool BookMetadataCache::load() {
       !serialization::readString(bookFile, coreMetadata.coverItemHref) ||
       !serialization::readString(bookFile, coreMetadata.textReferenceHref)) {
     LOG_ERR(TAG, "Failed to read metadata strings");
+    bookFile.close();
     return false;
+  }
+
+  const uint64_t lutEntries = static_cast<uint64_t>(spineCount) + tocCount;
+  const uint64_t lutBytes = lutEntries * sizeof(uint32_t);
+  const uint64_t dataStart = static_cast<uint64_t>(lutOffset) + lutBytes;
+  if (lutOffset != bookFile.position() || dataStart > fileSize) {
+    LOG_ERR(TAG, "Invalid cache LUT bounds: offset=%u entries=%u file=%u", lutOffset,
+            static_cast<unsigned>(lutEntries), static_cast<unsigned>(fileSize));
+    bookFile.close();
+    return false;
+  }
+
+  // Validate all random-access offsets before exposing the cache.  Otherwise a
+  // truncated/corrupt LUT can seek into arbitrary bytes and turn them into
+  // attacker-sized strings during a later TOC lookup.
+  for (uint32_t i = 0; i < lutEntries; ++i) {
+    uint32_t entryPos = 0;
+    if (!serialization::readPodChecked(bookFile, entryPos) ||
+        entryPos < dataStart || entryPos >= fileSize) {
+      LOG_ERR(TAG, "Invalid cache LUT entry %u", static_cast<unsigned>(i));
+      bookFile.close();
+      return false;
+    }
   }
 
   loaded = true;
@@ -302,10 +343,12 @@ BookMetadataCache::SpineEntry BookMetadataCache::getSpineEntry(const int index) 
   }
 
   // Seek to spine LUT item, read from LUT and get out data
-  bookFile.seek(lutOffset + sizeof(uint32_t) * index);
-  uint32_t spineEntryPos;
-  serialization::readPod(bookFile, spineEntryPos);
-  bookFile.seek(spineEntryPos);
+  if (!bookFile.seek(lutOffset + sizeof(uint32_t) * index)) return {};
+  uint32_t spineEntryPos = 0;
+  if (!serialization::readPodChecked(bookFile, spineEntryPos) ||
+      spineEntryPos >= bookFile.size() || !bookFile.seek(spineEntryPos)) {
+    return {};
+  }
   return readSpineEntry(bookFile);
 }
 
@@ -321,10 +364,14 @@ BookMetadataCache::TocEntry BookMetadataCache::getTocEntry(const int index) {
   }
 
   // Seek to TOC LUT item, read from LUT and get out data
-  bookFile.seek(lutOffset + sizeof(uint32_t) * spineCount + sizeof(uint32_t) * index);
-  uint32_t tocEntryPos;
-  serialization::readPod(bookFile, tocEntryPos);
-  bookFile.seek(tocEntryPos);
+  if (!bookFile.seek(lutOffset + sizeof(uint32_t) * spineCount + sizeof(uint32_t) * index)) {
+    return {};
+  }
+  uint32_t tocEntryPos = 0;
+  if (!serialization::readPodChecked(bookFile, tocEntryPos) ||
+      tocEntryPos >= bookFile.size() || !bookFile.seek(tocEntryPos)) {
+    return {};
+  }
   return readTocEntry(bookFile);
 }
 

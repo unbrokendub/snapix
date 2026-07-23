@@ -177,7 +177,7 @@ void PlainTextParser::reset() {
   emitCursor_ = 0;
 }
 
-bool PlainTextParser::ensureInit() {
+bool PlainTextParser::ensureInit(snapix::unifiedcache::UnifiedCache& cache) {
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
   if (initialized_) return true;
 
@@ -196,7 +196,6 @@ bool PlainTextParser::ensureInit() {
   reflow_ = sampleN > 0 && sampleHasBlankLines(sample, sampleN);
 
   // Probe how many Markers chunks already exist → that's where to resume.
-  auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath_);
   int existing = 0;
   for (;; ++existing) {
     size_t sz = 0;
@@ -236,10 +235,10 @@ bool PlainTextParser::ensureInit() {
   pagesAvailable_ = 0;
   if (existing > 0) {
     const uint16_t loaded = snapix::pagecache::loadChunkedSectionIdx(
-        idxState_, bookCachePath_, renderer_, config_, streamingViewportMarginTop_,
+        idxState_, cache, renderer_, config_, streamingViewportMarginTop_,
         streamingViewportMarginBottom_, streamingViewportMarginLeft_, streamingViewportMarginRight_,
         /*hyphenLang=*/"");
-    if (loaded > 0) {
+    if (idxState_.configHashValid) {
       pagesAvailable_ = static_cast<uint16_t>(loaded + (sourceExhausted_ ? 1 : 0));
     }
   }
@@ -256,11 +255,9 @@ bool PlainTextParser::ensureInit() {
 #endif
 }
 
-bool PlainTextParser::markerizeNextChunk() {
+bool PlainTextParser::markerizeNextChunk(snapix::unifiedcache::UnifiedCache& cache) {
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
   if (sourceExhausted_) return false;
-
-  auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath_);
 
   AnyFile file;
   const bool opened = useLittleFs_ ? file.openLittleFs(filepath_) : file.openSd(filepath_);
@@ -340,9 +337,21 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
   (void)shouldAbort;  // markerize is per-chunk; abort is honoured between calls
 
-  if (!ensureInit()) {
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath_);
+  if (!ensureInit(cache)) {
     hasMore_ = false;
     return false;
+  }
+
+  // Markers can survive an interrupted/failed idx write.  Re-measure the
+  // already-published chunks instead of getting stuck after reboot with source
+  // exhausted but zero pages available.
+  if (chunkIdx_ > 0 && !idxState_.configHashValid) {
+    pagesAvailable_ = snapix::pagecache::extendChunkedSectionIdx(
+        idxState_, cache, sourceExhausted_, renderer_, config_,
+        streamingViewportMarginTop_, streamingViewportMarginBottom_,
+        streamingViewportMarginLeft_, streamingViewportMarginRight_,
+        /*hyphenLang=*/"");
   }
 
   // Make pages available to emit: if the emit cursor has caught up to what the
@@ -351,12 +360,13 @@ bool PlainTextParser::parsePages(const std::function<void(std::unique_ptr<Page>)
   // chunk yields no new complete page (e.g. a single huge paragraph).
   uint16_t guard = 0;
   while (emitCursor_ >= pagesAvailable_ && !sourceExhausted_) {
-    if (!markerizeNextChunk()) break;  // markerize failure → stop growing (emit what we have)
+    if (!markerizeNextChunk(cache)) break;  // markerize failure → stop growing (emit what we have)
     const uint16_t avail = snapix::pagecache::extendChunkedSectionIdx(
-        idxState_, bookCachePath_, sourceExhausted_, renderer_, config_, streamingViewportMarginTop_,
+        idxState_, cache, sourceExhausted_, renderer_, config_, streamingViewportMarginTop_,
         streamingViewportMarginBottom_, streamingViewportMarginLeft_, streamingViewportMarginRight_,
         /*hyphenLang=*/"");
     if (avail == 0) {
+      if (!sourceExhausted_ && ++guard <= 8192) continue;
       LOG_ERR(TAG, "[STREAM] idx extend produced 0 pages (chunk %d)", chunkIdx_ - 1);
       break;
     }

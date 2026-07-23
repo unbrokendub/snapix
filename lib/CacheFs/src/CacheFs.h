@@ -22,4 +22,12 @@ bool ensureFlashDir(const std::string& path);
 // handles into the tree) propagate through as `false` from rmdir/remove.
 bool rmTree(const std::string& path);
 
+// Verify that a per-book cache belongs to the current source file revision.
+// The fingerprint includes the source path, size, FAT modification time and
+// samples from the beginning/middle/end of the file.  A missing or mismatched
+// fingerprint invalidates the entire cache tree before a new marker is
+// published, preventing stale metadata/pages/covers after a file is replaced
+// in-place (and making std::hash cache-key collisions fail safe).
+bool ensureSourceFingerprint(const std::string& sourcePath, const std::string& cachePath);
+
 }  // namespace cache_fs

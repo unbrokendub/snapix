@@ -42,6 +42,11 @@ bool Html::load() {
     return false;
   }
 
+  if (!cache_fs::ensureSourceFingerprint(filepath, cachePath)) {
+    LOG_ERR(TAG, "Could not verify source fingerprint");
+    return false;
+  }
+
   FsFile file;
   if (!SdMan.openFileForRead("HTML", filepath, file)) {
     LOG_ERR(TAG, "Failed to open file");

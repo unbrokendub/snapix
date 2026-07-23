@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string>
 
+#include "../../core/EventQueue.h"
+
 namespace snapix::reader {
 
 struct HeapState {
@@ -62,9 +64,32 @@ constexpr size_t kPrefetchRetryLargestHeadroomBytes = 12 * 1024;
 constexpr uint16_t kDefaultCacheBatchPages = 5;
 constexpr uint16_t kEpubInteractiveHotExtendBatchPages = 2;
 constexpr uint16_t kEpubInteractivePageFillHeadroomPages = 2;
+// Once EpubChapterParser has built its page-boundary index, emitted Page
+// objects are empty streaming placeholders.  Materialise a distant resume
+// target in larger batches to avoid reopening and rewriting the cache LUT
+// every five pages.
+constexpr uint16_t kEpubIndexedPageFillBatchPages = 50;
 constexpr uint16_t kNonResumableCacheBatchPages = 10;
 constexpr int kHorizontalPadding = 5;
 constexpr int kStatusBarMargin = 23;
+
+// A TOC selection is handled on Center press.  Its matching Center release
+// can arrive while the e-ink frame is being rendered and must not be mistaken
+// for a new user action: doing so cancels the exact-anchor follow-up as soon as
+// page 0 becomes visible.  Page-turn releases remain actionable because page
+// navigation is intentionally performed on release.
+inline bool cancelsDeferredTocFollowup(const Event& event) {
+  if (event.type == EventType::ButtonPress ||
+      event.type == EventType::ButtonRepeat) {
+    return true;
+  }
+  if (event.type != EventType::ButtonRelease) {
+    return false;
+  }
+  return event.button == Button::Left || event.button == Button::Right ||
+         event.button == Button::Up || event.button == Button::Down ||
+         event.button == Button::Power;
+}
 
 
 uint32_t perfMsNow();

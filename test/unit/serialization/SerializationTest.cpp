@@ -327,6 +327,17 @@ int main() {
     runner.expectEq(static_cast<uint16_t>(199), result, "readPodValidated: just below boundary accepted");
   }
 
+  // Truncated input must preserve the caller's existing/default value.
+  {
+    FsFile file;
+    file.setBuffer("\x64");  // one byte, but uint16_t needs two
+
+    uint16_t result = 42;
+    serialization::readPodValidated(file, result, static_cast<uint16_t>(200));
+    runner.expectEq(static_cast<uint16_t>(42), result,
+                    "readPodValidated: truncated POD keeps original");
+  }
+
   // ============================================
   // Multiple values in sequence
   // ============================================

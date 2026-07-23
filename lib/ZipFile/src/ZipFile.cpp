@@ -326,7 +326,10 @@ int ZipFile::fillUncompressedSizes(std::vector<SizeTarget>& targets, std::vector
   int matched = 0;
 
   while (file.available()) {
-    if (file.read(&sig, 4) != 4) break;
+    if (file.read(reinterpret_cast<uint8_t*>(&sig), sizeof(sig)) !=
+        static_cast<int>(sizeof(sig))) {
+      break;
+    }
     if (sig != 0x02014b50) break;  // End of central directory
 
     // Skip: version made by (2), version needed (2), flags (2), method (2), time (2), date (2), crc32 (4)
@@ -334,11 +337,24 @@ int ZipFile::fillUncompressedSizes(std::vector<SizeTarget>& targets, std::vector
     // Skip compressedSize (4), read uncompressedSize (4)
     file.seekCur(4);
     uint32_t uncompressedSize;
-    if (file.read(&uncompressedSize, 4) != 4) break;
+    if (file.read(reinterpret_cast<uint8_t*>(&uncompressedSize),
+                  sizeof(uncompressedSize)) !=
+        static_cast<int>(sizeof(uncompressedSize))) {
+      break;
+    }
     uint16_t nameLen, m, k;
-    if (file.read(&nameLen, 2) != 2) break;
-    if (file.read(&m, 2) != 2) break;
-    if (file.read(&k, 2) != 2) break;
+    if (file.read(reinterpret_cast<uint8_t*>(&nameLen), sizeof(nameLen)) !=
+        static_cast<int>(sizeof(nameLen))) {
+      break;
+    }
+    if (file.read(reinterpret_cast<uint8_t*>(&m), sizeof(m)) !=
+        static_cast<int>(sizeof(m))) {
+      break;
+    }
+    if (file.read(reinterpret_cast<uint8_t*>(&k), sizeof(k)) !=
+        static_cast<int>(sizeof(k))) {
+      break;
+    }
     // Skip: comment len already read in k, disk# (2), internal attr (2), external attr (4), local header offset (4)
     file.seekCur(12);
 

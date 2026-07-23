@@ -25,6 +25,57 @@ constexpr uint8_t MIN_SETTINGS_VERSION = 3;
 constexpr uint8_t SETTINGS_FILE_VERSION = 12;
 // Increment this when adding new persisted settings fields
 constexpr uint8_t SETTINGS_COUNT = 30;
+constexpr uint16_t SETTINGS_FIELD_SIZES[SETTINGS_COUNT] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    32, 256, 1, 1, 1, 256, 128, 2, 1, 1, 1, 1, 1, 1,
+};
+
+constexpr uint32_t settingsSerializedSize(const uint8_t fieldCount) {
+  uint32_t size = sizeof(SETTINGS_MAGIC) + sizeof(SETTINGS_FILE_VERSION) +
+                  sizeof(SETTINGS_COUNT);
+  for (uint8_t i = 0; i < fieldCount && i < SETTINGS_COUNT; ++i) {
+    size += SETTINGS_FIELD_SIZES[i];
+  }
+  return size;
+}
+
+constexpr uint32_t SETTINGS_SERIALIZED_SIZE = settingsSerializedSize(SETTINGS_COUNT);
+static_assert(SETTINGS_SERIALIZED_SIZE == 705, "Unexpected settings layout");
+
+bool recoverDirectSettingsFile() {
+  if (SdMan.exists(SNAPIX_SETTINGS_FILE)) return true;
+
+  const std::string backupPath = std::string(SNAPIX_SETTINGS_FILE) + ".bak";
+  const std::string tmpPath = std::string(SNAPIX_SETTINGS_FILE) + ".tmp";
+  if (SdMan.exists(backupPath.c_str()) &&
+      SdMan.rename(backupPath.c_str(), SNAPIX_SETTINGS_FILE)) {
+    return true;
+  }
+  if (SdMan.exists(tmpPath.c_str()) &&
+      SdMan.rename(tmpPath.c_str(), SNAPIX_SETTINGS_FILE)) {
+    return true;
+  }
+  return false;
+}
+
+bool replaceDirectSettingsFile(const std::string& tmpPath) {
+  const std::string backupPath = std::string(SNAPIX_SETTINGS_FILE) + ".bak";
+  const bool hadDestination = SdMan.exists(SNAPIX_SETTINGS_FILE);
+  bool hasBackup = SdMan.exists(backupPath.c_str());
+  if (hadDestination) {
+    if (hasBackup && !SdMan.remove(backupPath.c_str())) return false;
+    if (!SdMan.rename(SNAPIX_SETTINGS_FILE, backupPath.c_str())) return false;
+    hasBackup = true;
+  }
+  if (SdMan.rename(tmpPath.c_str(), SNAPIX_SETTINGS_FILE)) {
+    if (hasBackup) SdMan.remove(backupPath.c_str());
+    return true;
+  }
+  if (hasBackup && !SdMan.exists(SNAPIX_SETTINGS_FILE)) {
+    SdMan.rename(backupPath.c_str(), SNAPIX_SETTINGS_FILE);
+  }
+  return false;
+}
 }  // namespace
 
 Result<void> Settings::save(drivers::Storage& storage) const {
@@ -80,10 +131,16 @@ Result<void> Settings::save(drivers::Storage& storage) const {
   serialization::writePod(outputFile, bionicReading);
   serialization::writePod(outputFile, fakeBold);
   outputFile.flush();
+  const uint32_t writtenBytes = outputFile.size();
   outputFile.close();
+  if (writtenBytes != SETTINGS_SERIALIZED_SIZE) {
+    LOG_ERR(TAG, "Short settings write %u/%u", static_cast<unsigned>(writtenBytes),
+            static_cast<unsigned>(SETTINGS_SERIALIZED_SIZE));
+    storage.remove(tmpPath.c_str());
+    return ErrVoid(Error::IOError);
+  }
 
-  // v2.0.75: atomic rename.  SDFat rename overwrites the destination if it
-  // exists.  On failure, leave the .tmp around — old settings survive.
+  // Commit through Storage's backup/rollback replace.
   if (!storage.rename(tmpPath.c_str(), SNAPIX_SETTINGS_FILE)) {
     LOG_ERR(TAG, "Settings rename %s -> %s failed; keeping old file", tmpPath.c_str(), SNAPIX_SETTINGS_FILE);
     storage.remove(tmpPath.c_str());
@@ -101,8 +158,11 @@ Result<void> Settings::load(drivers::Storage& storage) {
   }
 
   // Check magic signature to detect incompatible settings files (e.g., from Crosspoint firmware)
-  uint32_t magic;
-  serialization::readPod(inputFile, magic);
+  uint32_t magic = 0;
+  if (!serialization::readPodChecked(inputFile, magic)) {
+    inputFile.close();
+    return ErrVoid(Error::FileCorrupted);
+  }
   if (magic != SETTINGS_MAGIC) {
     LOG_ERR(TAG, "Invalid settings file (wrong magic 0x%08X), deleting", magic);
     inputFile.close();
@@ -110,8 +170,11 @@ Result<void> Settings::load(drivers::Storage& storage) {
     return ErrVoid(Error::UnsupportedVersion);
   }
 
-  uint8_t version;
-  serialization::readPod(inputFile, version);
+  uint8_t version = 0;
+  if (!serialization::readPodChecked(inputFile, version)) {
+    inputFile.close();
+    return ErrVoid(Error::FileCorrupted);
+  }
   if (version < MIN_SETTINGS_VERSION || version > SETTINGS_FILE_VERSION) {
     LOG_ERR(TAG, "Deserialization failed: Unknown version %u", version);
     inputFile.close();
@@ -119,12 +182,23 @@ Result<void> Settings::load(drivers::Storage& storage) {
   }
 
   uint8_t fileSettingsCount = 0;
-  serialization::readPod(inputFile, fileSettingsCount);
+  if (!serialization::readPodChecked(inputFile, fileSettingsCount)) {
+    inputFile.close();
+    return ErrVoid(Error::FileCorrupted);
+  }
 
-  // Cap fileSettingsCount to prevent reading garbage from corrupted files
+  // Reject impossible counts and truncated payloads before mutating any
+  // settings fields.  This keeps a torn file from producing a half-old,
+  // half-default configuration that is then persisted as if it were valid.
   if (fileSettingsCount > SETTINGS_COUNT) {
-    LOG_ERR(TAG, "fileSettingsCount %u exceeds max %u, capping", fileSettingsCount, SETTINGS_COUNT);
-    fileSettingsCount = SETTINGS_COUNT;
+    LOG_ERR(TAG, "fileSettingsCount %u exceeds max %u", fileSettingsCount, SETTINGS_COUNT);
+    inputFile.close();
+    return ErrVoid(Error::FileCorrupted);
+  }
+  if (inputFile.size() < settingsSerializedSize(fileSettingsCount)) {
+    LOG_ERR(TAG, "Truncated settings file");
+    inputFile.close();
+    return ErrVoid(Error::FileCorrupted);
   }
 
   // Load settings that exist (support older files with fewer fields)
@@ -277,8 +351,9 @@ bool Settings::saveToFile() const {
   SdMan.mkdir(SNAPIX_DIR);
   // v2.0.60: page cache lives on LittleFS now; no SD cache dir to mkdir here.
 
+  const std::string tmpPath = std::string(SNAPIX_SETTINGS_FILE) + ".tmp";
   FsFile outputFile;
-  if (!SdMan.openFileForWrite("SET", SNAPIX_SETTINGS_FILE, outputFile)) {
+  if (!SdMan.openFileForWrite("SET", tmpPath.c_str(), outputFile)) {
     return false;
   }
 
@@ -315,21 +390,38 @@ bool Settings::saveToFile() const {
   serialization::writePod(outputFile, sleepHoldTime);
   serialization::writePod(outputFile, bionicReading);
   serialization::writePod(outputFile, fakeBold);
+  outputFile.flush();
+  const uint32_t writtenBytes = outputFile.size();
   outputFile.close();
+
+  if (writtenBytes != SETTINGS_SERIALIZED_SIZE) {
+    LOG_ERR(TAG, "Short settings write %u/%u", static_cast<unsigned>(writtenBytes),
+            static_cast<unsigned>(SETTINGS_SERIALIZED_SIZE));
+    SdMan.remove(tmpPath.c_str());
+    return false;
+  }
+  if (!replaceDirectSettingsFile(tmpPath)) {
+    LOG_ERR(TAG, "Settings replace failed; previous version restored");
+    return false;
+  }
 
   LOG_INF(TAG, "Settings saved to file");
   return true;
 }
 
 bool Settings::loadFromFile() {
+  recoverDirectSettingsFile();
   FsFile inputFile;
   if (!SdMan.openFileForRead("SET", SNAPIX_SETTINGS_FILE, inputFile)) {
     return false;
   }
 
   // Check magic signature to detect incompatible settings files (e.g., from Crosspoint firmware)
-  uint32_t magic;
-  serialization::readPod(inputFile, magic);
+  uint32_t magic = 0;
+  if (!serialization::readPodChecked(inputFile, magic)) {
+    inputFile.close();
+    return false;
+  }
   if (magic != SETTINGS_MAGIC) {
     LOG_ERR(TAG, "Invalid settings file (wrong magic 0x%08X), deleting", magic);
     inputFile.close();
@@ -337,8 +429,11 @@ bool Settings::loadFromFile() {
     return false;
   }
 
-  uint8_t version;
-  serialization::readPod(inputFile, version);
+  uint8_t version = 0;
+  if (!serialization::readPodChecked(inputFile, version)) {
+    inputFile.close();
+    return false;
+  }
   if (version < MIN_SETTINGS_VERSION || version > SETTINGS_FILE_VERSION) {
     LOG_ERR(TAG, "Deserialization failed: Unknown version %u", version);
     inputFile.close();
@@ -346,12 +441,20 @@ bool Settings::loadFromFile() {
   }
 
   uint8_t fileSettingsCount = 0;
-  serialization::readPod(inputFile, fileSettingsCount);
+  if (!serialization::readPodChecked(inputFile, fileSettingsCount)) {
+    inputFile.close();
+    return false;
+  }
 
-  // Cap fileSettingsCount to prevent reading garbage from corrupted files
   if (fileSettingsCount > SETTINGS_COUNT) {
-    LOG_ERR(TAG, "fileSettingsCount %u exceeds max %u, capping", fileSettingsCount, SETTINGS_COUNT);
-    fileSettingsCount = SETTINGS_COUNT;
+    LOG_ERR(TAG, "fileSettingsCount %u exceeds max %u", fileSettingsCount, SETTINGS_COUNT);
+    inputFile.close();
+    return false;
+  }
+  if (inputFile.size() < settingsSerializedSize(fileSettingsCount)) {
+    LOG_ERR(TAG, "Truncated settings file");
+    inputFile.close();
+    return false;
   }
 
   uint8_t settingsRead = 0;

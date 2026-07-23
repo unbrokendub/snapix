@@ -11,6 +11,9 @@
 #include "ContentParser.h"
 
 class GfxRenderer;
+namespace snapix::unifiedcache {
+class UnifiedCache;
+}
 
 /**
  * Content parser for EPUB chapters.
@@ -37,7 +40,6 @@ class EpubChapterParser : public ContentParser {
   GfxRenderer& renderer_;
   RenderConfig config_;
   std::string imageCachePath_;
-  bool quickImageDecode_ = false;
   bool hasMore_ = true;
 
   std::string chapterBasePath_;
@@ -51,20 +53,11 @@ class EpubChapterParser : public ContentParser {
   uint16_t pagesCreated_ = 0;
   bool hitMaxPages_ = false;
 
-  // v2.0.186 — anchorMap_ field removed.  In v2.0.161 the legacy parser
-  // was deleted but the (now-permanently-empty) anchorMap_ vector stayed
-  // as a class member with an explicit getAnchorMap() override that
-  // returned it.  ContentParser's default getAnchorMap() ALREADY returns
-  // a reference to a static empty vector — the override added zero
-  // semantic value, just a per-instance 24-byte vector struct + a 24-byte
-  // override slot in vtable.  Inheriting the default frees that storage
-  // and removes a misleading member that suggested EPUB anchor support
-  // exists when it doesn't.
-  //
-  // When/if streaming-render anchor capture is wired up (the "future
-  // work" the original comment mentioned), the right place is to override
-  // getAnchorMap() again at that point — not to keep a vestigial field
-  // in the meantime.
+  // Streaming anchor map populated during the same MEASURE walk that builds
+  // the page index.  v2.0.186 removed the old legacy-parser map, but the
+  // replacement streaming path never wired anchors back in; every cold TOC
+  // jump therefore remained unresolved and fell back to page 0.
+  std::vector<std::pair<std::string, uint16_t>> anchorMap_;
 
   // v2.0.118 Phase R2.8 — markerize one-shot guard.  Set on first
   // tryMarkerizeChapter call regardless of outcome (success, write
@@ -116,6 +109,12 @@ class EpubChapterParser : public ContentParser {
   uint16_t shortCircuitTotalPages_ = 0;
   uint16_t shortCircuitNextPage_ = 0;
 
+  // Cold TOC jumps ask for a one-page first batch.  Publish that page after
+  // markerization, before the expensive whole-chapter MEASURE walk, then
+  // resume the same parser in the background to build the complete idx.
+  bool bootstrapPageEmitted_ = false;
+  bool awaitingIndexBuild_ = false;
+
   // v2.0.116 Phase R2 — markerize side-channel, now (v2.0.159) the
   // ONLY chapter ingestion path.  Streams chapter source straight from
   // the ZIP archive through HtmlStripper into `markers/N.bin`.  Returns
@@ -128,11 +127,11 @@ class EpubChapterParser : public ContentParser {
   // pass — otherwise the sidecar never gets written for the user's
   // most-pressured chapters.  markerizeAttempted_ guards in-instance
   // retry; cross-instance retry happens via the file-existence check.
-  bool tryMarkerizeChapter();
+  bool tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& cache);
 
  public:
   EpubChapterParser(std::shared_ptr<Epub> epub, int spineIndex, GfxRenderer& renderer, const RenderConfig& config,
-                    const std::string& imageCachePath = "", bool quickImageDecode = false);
+                    const std::string& imageCachePath = "");
   ~EpubChapterParser() override;
 
   bool parsePages(const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages = 0,
@@ -140,8 +139,13 @@ class EpubChapterParser : public ContentParser {
   bool hasMoreContent() const override { return hasMore_; }
   bool canResume() const override;
   void reset() override;
-  // v2.0.186 — getAnchorMap() override removed; inherits ContentParser's
-  // default empty-static return.  See header note on anchorMap_ removal.
+  const std::vector<std::pair<std::string, uint16_t>>& getAnchorMap() const override {
+    return anchorMap_;
+  }
+
+  // Compatibility for caches produced by v3.11.2 and older: map anchor marker
+  // offsets onto an existing current page index without rerunning pagination.
+  bool rebuildAnchorMapFromCachedIndex();
 
   // v2.0.131 — caller (ReaderStateAsyncJobs) plumbs the actual reader
   // viewport margins here right after construction so the R4.c upfront

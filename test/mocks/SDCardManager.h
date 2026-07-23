@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -45,14 +47,56 @@ class SDCardManager {
     mallocFailCount_ = 0;
     readLimit_ = 0;
     readLimitActive_ = false;
+    renameFailSource_.clear();
   }
 
   bool exists(const char* path) { return files_.find(path) != files_.end(); }
 
   bool exists(const std::string& path) { return files_.find(path) != files_.end(); }
 
+  bool remove(const char* path) {
+    const bool removedFile = files_.erase(path) > 0;
+    const bool removedWrite = writtenFiles_.erase(path) > 0;
+    return removedFile || removedWrite;
+  }
+
+  bool rename(const char* fromPath, const char* toPath) {
+    if (!renameFailSource_.empty() && renameFailSource_ == fromPath) {
+      renameFailSource_.clear();
+      return false;
+    }
+    if (exists(toPath)) return false;  // Match SdFat: no destination overwrite.
+
+    auto fileIt = files_.find(fromPath);
+    if (fileIt != files_.end()) {
+      files_[toPath] = std::move(fileIt->second);
+      files_.erase(fileIt);
+      return true;
+    }
+
+    auto writeIt = writtenFiles_.find(fromPath);
+    if (writeIt != writtenFiles_.end()) {
+      files_[toPath] = writeIt->second ? *writeIt->second : std::string();
+      writtenFiles_.erase(writeIt);
+      return true;
+    }
+    return false;
+  }
+
+  bool mkdir(const char*) { return true; }
+  bool removeDir(const char*) { return true; }
+
+  size_t readFileToBuffer(const char* path, char* buffer, size_t bufferSize) {
+    auto it = files_.find(path);
+    if (it == files_.end() || !buffer || bufferSize == 0) return 0;
+    const size_t bytes = std::min(bufferSize, it->second.size());
+    std::memcpy(buffer, it->second.data(), bytes);
+    return bytes;
+  }
+
   // Failure injection: first N open() calls for a path return an invalid FsFile
   void setOpenFailCount(int count) { openFailCount_ = count; }
+  void setRenameFailSource(std::string path) { renameFailSource_ = std::move(path); }
 
   // Failure injection: first N openFileForRead() calls for a path fail
   void setOpenFileForReadFailCount(int count) { openFileForReadFailCount_ = count; }
@@ -148,6 +192,7 @@ class SDCardManager {
   int mallocFailCount_ = 0;
   size_t readLimit_ = 0;
   bool readLimitActive_ = false;
+  std::string renameFailSource_;
 };
 
 #define SdMan SDCardManager::getInstance()

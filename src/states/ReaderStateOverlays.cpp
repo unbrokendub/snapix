@@ -317,9 +317,7 @@ void ReaderState::jumpToTocEntry(Core& core, int tocIndex) {
       currentSectionPage_ = page;
       asyncJobs_.clearPendingTocJump();
       clearPendingEpubPageLoad();
-      pendingBackgroundEpubRefresh_ = false;
-      pendingBackgroundEpubRefreshSpine_ = -1;
-      pendingBackgroundEpubRefreshPage_ = -1;
+      asyncJobs_.pendingRefresh().clear();
       asyncJobs_.clearQueuedPageTurns();
     } else {
       // v2.0.84: optimistic TOC navigation.  Anchor wasn't in the cached
@@ -368,9 +366,7 @@ void ReaderState::jumpToTocEntry(Core& core, int tocIndex) {
       currentPage_ = 0;
       asyncJobs_.clearPendingTocJump();
       clearPendingEpubPageLoad();
-      pendingBackgroundEpubRefresh_ = false;
-      pendingBackgroundEpubRefreshSpine_ = -1;
-      pendingBackgroundEpubRefreshPage_ = -1;
+      asyncJobs_.pendingRefresh().clear();
       asyncJobs_.clearQueuedPageTurns();
     } else {
       // Legacy fallback for TOC-less FB2 files that still use a flat page cache.
@@ -655,16 +651,11 @@ void ReaderState::processPendingTocJump(Core& core) {
     return;
   }
 
-  if (type == ContentType::Epub && pendingTocJumpDeferredDisplay_ &&
-      pendingTocJumpRetryCount_ > 0) {
-    LOG_INF(TAG,
-            "[ASYNC] TOC anchor unresolved after deferred display; releasing input spine=%d anchor=%s retries=%u",
-            pendingTocJumpTargetSpine_, pendingTocJumpAnchor_.c_str(),
-            static_cast<unsigned>(pendingTocJumpRetryCount_));
-    asyncJobs_.clearPendingTocJump();
-    return;
-  }
-
+  // Keep the pending jump alive after page 0 becomes visible.  The parser's
+  // next resumable worker pass builds the complete idx + anchor map at low
+  // priority; user input cancels this refinement in ReaderState::update().
+  // v3.11.2 cleared the pending state here, so the selected anchor could
+  // never resolve and the reader remained on the wrong page 0.
   if ((!pageCache_ || pageCache_->isPartial()) && pendingTocJumpRetryCount_ < kPendingTocJumpMaxRetries) {
     startPendingTocJumpBackgroundWork(core);
     return;

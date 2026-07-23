@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(snapix-tests LANGUAGES C CXX)
+enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -53,6 +54,7 @@ include_directories(
   ${PROJECT_ROOT}/lib/Epub/src/Epub
   ${PROJECT_ROOT}/lib/Epub/src/Epub/css
   ${PROJECT_ROOT}/lib/PageCache/src
+  ${PROJECT_ROOT}/lib/UnifiedCache/src
   ${PROJECT_ROOT}/lib/FsHelpers/src
   ${PROJECT_ROOT}/lib/ScriptDetector/src
   ${PROJECT_ROOT}/lib/Markdown/src
@@ -74,6 +76,11 @@ set(TEST_HELPERS
 
 # Auto-discover and build tests
 file(GLOB_RECURSE TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cpp)
+# Helper translation units are linked into selected tests and must not become
+# standalone executables.  StripDataUriTest targets a parser removed with the
+# legacy EPUB pipeline; data-URI rejection now lives in EpubImageCache.
+list(FILTER TEST_SOURCES EXCLUDE REGEX "/mock_hyphenation\\.cpp$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX "/StripDataUriTest\\.cpp$")
 
 foreach(TEST_SRC ${TEST_SOURCES})
   get_filename_component(TEST_NAME ${TEST_SRC} NAME_WE)
@@ -261,15 +268,50 @@ foreach(TEST_SRC ${TEST_SOURCES})
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/src
     )
+  elseif(TEST_NAME STREQUAL "StorageRecoveryTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/src/drivers/Storage.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/src
+      ${PROJECT_ROOT}/src/drivers
+    )
+  elseif(TEST_NAME STREQUAL "UnifiedCacheTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/UnifiedCache/src/UnifiedCache.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/UnifiedCache/src
+    )
+  elseif(TEST_NAME STREQUAL "ProgressiveMarkerizerTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${PROJECT_ROOT}/lib/Markdown/src/MarkdownStripper.cpp
+      ${PROJECT_ROOT}/lib/Markdown/src/md_parser.c
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/PageCache/src
+      ${PROJECT_ROOT}/lib/SmolPort/src
+      ${PROJECT_ROOT}/lib/Markdown/src
+    )
   elseif(TEST_NAME STREQUAL "ReaderButtonDispatchTest")
     add_executable(${TEST_NAME}
       ${TEST_SRC}
       ${PROJECT_ROOT}/src/states/reader/ReaderNavigationController.cpp
+      ${PROJECT_ROOT}/src/states/reader/ReaderAsyncJobsController.cpp
+      ${PROJECT_ROOT}/lib/AsyncTask/src/BackgroundTask.cpp
       ${TEST_HELPERS}
     )
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/src
       ${PROJECT_ROOT}/src/states/reader
+      ${PROJECT_ROOT}/lib/AsyncTask/src
     )
   elseif(TEST_NAME STREQUAL "RenderCachedPageLogicTest")
     add_executable(${TEST_NAME}
@@ -292,6 +334,15 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/src
       ${PROJECT_ROOT}/src/states/reader
       ${PROJECT_ROOT}/lib/AsyncTask/src
+    )
+  elseif(TEST_NAME STREQUAL "PendingImageDecodeTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/Epub/src/Epub/PendingImageDecode.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/Epub/src/Epub
     )
   elseif(TEST_NAME STREQUAL "LoggingDisabledTest")
     add_executable(${TEST_NAME}
@@ -407,6 +458,8 @@ foreach(TEST_SRC ${TEST_SOURCES})
   )
   set_target_properties(${TEST_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/build/bin)
+  add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endforeach()
 
-message(STATUS "Configured ${TEST_SOURCES} tests")
+list(LENGTH TEST_SOURCES TEST_COUNT)
+message(STATUS "Configured ${TEST_COUNT} tests")

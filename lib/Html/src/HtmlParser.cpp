@@ -1,17 +1,6 @@
-/**
- * MarkdownParser.cpp
- *
- * Progressive streaming parser.  MarkdownStripper state is preserved across
- * ~32 KB source chunks while each chunk's marker output is published as its
- * own UnifiedCache segment.  Page 0 can therefore surface before the rest of a
- * large document has been markerized and measured.
- */
+#include "HtmlParser.h"
 
-#include "MarkdownParser.h"
-
-#include <FS.h>
 #include <GfxRenderer.h>
-#include <LittleFS.h>
 #include <Logging.h>
 #include <Page.h>
 #include <SDCardManager.h>
@@ -24,12 +13,11 @@
 
 #include "ProgressiveMarkerizer.h"
 
-#define TAG "MD_PARSE"
+#define TAG "HTML_PARSE"
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+#include <HtmlStripper.h>
 #include <UnifiedCache.h>
-
-#include "MarkdownStripper.h"
 #endif
 
 namespace {
@@ -37,80 +25,56 @@ namespace {
 constexpr uint32_t kSourceChunkBytes = 32768;
 constexpr size_t kReadBufferBytes = 4096;
 
-class AnyFile {
+class SdSource {
  public:
-  AnyFile() = default;
-  AnyFile(const AnyFile&) = delete;
-  AnyFile& operator=(const AnyFile&) = delete;
-  ~AnyFile() { close(); }
-
-  bool openSd(const std::string& path) {
-    if (!SdMan.openFileForRead("MD", path, sdFile_)) return false;
-    useLittleFs_ = false;
-    open_ = true;
-    return true;
-  }
-  bool openLittleFs(const std::string& path) {
-    lfsFile_ = LittleFS.open(path.c_str(), "r");
-    if (!lfsFile_) return false;
-    useLittleFs_ = true;
-    open_ = true;
-    return true;
+  ~SdSource() { close(); }
+  bool open(const std::string& path) {
+    open_ = SdMan.openFileForRead("HTML", path, file_);
+    return open_;
   }
   int read(uint8_t* buf, size_t len) {
-    if (useLittleFs_) return lfsFile_.read(buf, len);
     snapix::spi::SharedBusLock lock;
-    return sdFile_.read(buf, len);
+    return file_.read(buf, len);
   }
   bool seekTo(uint32_t offset) {
-    if (useLittleFs_) return lfsFile_.seek(offset, SeekSet);
     snapix::spi::SharedBusLock lock;
-    return sdFile_.seekSet(offset);
+    return file_.seek(offset);
   }
   uint32_t size() {
-    if (useLittleFs_) return static_cast<uint32_t>(lfsFile_.size());
     snapix::spi::SharedBusLock lock;
-    return static_cast<uint32_t>(sdFile_.fileSize());
+    return static_cast<uint32_t>(file_.fileSize());
   }
   void close() {
     if (!open_) return;
-    if (useLittleFs_) {
-      lfsFile_.close();
-    } else {
-      sdFile_.close();
-    }
+    file_.close();
     open_ = false;
   }
 
  private:
-  FsFile sdFile_;
-  File lfsFile_;
-  bool useLittleFs_ = false;
+  FsFile file_;
   bool open_ = false;
 };
 
 }  // namespace
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
-struct MarkdownParser::ProgressiveMarkerizer {
-  snapix::pagecache::StatefulMarkerizer<snapix::markdown::MarkdownStripper> impl;
+struct HtmlParser::ProgressiveMarkerizer {
+  snapix::pagecache::StatefulMarkerizer<snapix::smolport::HtmlStripper> impl;
 };
 #else
-struct MarkdownParser::ProgressiveMarkerizer {};
+struct HtmlParser::ProgressiveMarkerizer {};
 #endif
 
-MarkdownParser::MarkdownParser(std::string filepath, std::string bookCachePath,
-                               GfxRenderer& renderer, const RenderConfig& config,
-                               bool useLittleFs)
+HtmlParser::HtmlParser(std::string filepath, std::string bookCachePath,
+                       GfxRenderer& renderer, const RenderConfig& config)
     : filepath_(std::move(filepath)),
       bookCachePath_(std::move(bookCachePath)),
       renderer_(renderer),
-      config_(config),
-      useLittleFs_(useLittleFs) {}
+      config_(config) {}
 
-MarkdownParser::~MarkdownParser() = default;
+HtmlParser::~HtmlParser() = default;
 
-void MarkdownParser::reset() {
+void HtmlParser::reset() {
   hasMore_ = true;
   markerizer_.reset();
   initialized_ = false;
@@ -125,17 +89,14 @@ void MarkdownParser::reset() {
   emitCursor_ = 0;
 }
 
-bool MarkdownParser::restoreMarkerizer(const AbortCallback& shouldAbort) {
+bool HtmlParser::restoreMarkerizer(const AbortCallback& shouldAbort) {
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
   std::unique_ptr<ProgressiveMarkerizer> rebuilt(
       new (std::nothrow) ProgressiveMarkerizer);
   if (!rebuilt) return false;
 
-  AnyFile file;
-  const bool opened =
-      useLittleFs_ ? file.openLittleFs(filepath_) : file.openSd(filepath_);
-  if (!opened) return false;
-
+  SdSource source;
+  if (!source.open(filepath_)) return false;
   std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[kReadBufferBytes]);
   if (!buf) return false;
 
@@ -149,9 +110,10 @@ bool MarkdownParser::restoreMarkerizer(const AbortCallback& shouldAbort) {
         if (shouldAbort && shouldAbort()) return false;
         const size_t want =
             std::min<size_t>(kReadBufferBytes, static_cast<size_t>(end - cursor));
-        const int n = file.read(buf.get(), want);
+        const int n = source.read(buf.get(), want);
         if (n <= 0) return false;
-        const size_t consumed = rebuilt->impl.feed(buf.get(), static_cast<size_t>(n));
+        const size_t consumed =
+            rebuilt->impl.feed(buf.get(), static_cast<size_t>(n));
         if (consumed != static_cast<size_t>(n)) return false;
         cursor += static_cast<uint32_t>(n);
       }
@@ -172,21 +134,18 @@ bool MarkdownParser::restoreMarkerizer(const AbortCallback& shouldAbort) {
 #endif
 }
 
-bool MarkdownParser::ensureInit(snapix::unifiedcache::UnifiedCache& cache,
-                                const AbortCallback& shouldAbort) {
+bool HtmlParser::ensureInit(snapix::unifiedcache::UnifiedCache& cache,
+                            const AbortCallback& shouldAbort) {
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
   if (initialized_) return markerizer_ != nullptr || sourceExhausted_;
 
-  AnyFile file;
-  const bool opened =
-      useLittleFs_ ? file.openLittleFs(filepath_) : file.openSd(filepath_);
-  if (!opened) {
-    LOG_ERR(TAG, "Failed to open source (%s): %s",
-            useLittleFs_ ? "LittleFS" : "SD", filepath_.c_str());
+  SdSource source;
+  if (!source.open(filepath_)) {
+    LOG_ERR(TAG, "Failed to open source: %s", filepath_.c_str());
     return false;
   }
-  fileSize_ = file.size();
-  file.close();
+  fileSize_ = source.size();
+  source.close();
 
   int existing = 0;
   for (;; ++existing) {
@@ -230,18 +189,15 @@ bool MarkdownParser::ensureInit(snapix::unifiedcache::UnifiedCache& cache,
 #endif
 }
 
-bool MarkdownParser::markerizeNextChunk(
+bool HtmlParser::markerizeNextChunk(
     snapix::unifiedcache::UnifiedCache& cache,
     const AbortCallback& shouldAbort) {
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
   if (sourceExhausted_) return false;
   if (!markerizer_ && !restoreMarkerizer(shouldAbort)) return false;
 
-  AnyFile file;
-  const bool opened =
-      useLittleFs_ ? file.openLittleFs(filepath_) : file.openSd(filepath_);
-  if (!opened || !file.seekTo(srcOffset_)) return false;
-
+  SdSource source;
+  if (!source.open(filepath_) || !source.seekTo(srcOffset_)) return false;
   std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[kReadBufferBytes]);
   if (!buf) return false;
 
@@ -265,7 +221,7 @@ bool MarkdownParser::markerizeNextChunk(
             }
             const size_t want = std::min<size_t>(
                 kReadBufferBytes, static_cast<size_t>(end - newOffset));
-            const int n = file.read(buf.get(), want);
+            const int n = source.read(buf.get(), want);
             if (n <= 0) {
               markerizer_->impl.detach();
               return false;
@@ -288,13 +244,13 @@ bool MarkdownParser::markerizeNextChunk(
         markerizer_->impl.detach();
         return success;
       });
-  file.close();
+  source.close();
 
   if (!ok) {
-    markerizer_.reset();  // state advanced; reconstruct at srcOffset_ on retry
+    markerizer_.reset();
     if (reachedEof && newOffset >= fileSize_) {
       srcOffset_ = fileSize_;
-      sourceExhausted_ = true;  // empty/whitespace-only tail
+      sourceExhausted_ = true;
     }
     LOG_INF(TAG, "markerize chunk %d stopped src=[%u,%u) abort=%u",
             thisChunk, static_cast<unsigned>(start),
@@ -316,7 +272,7 @@ bool MarkdownParser::markerizeNextChunk(
 #endif
 }
 
-bool MarkdownParser::parsePages(
+bool HtmlParser::parsePages(
     const std::function<void(std::unique_ptr<Page>)>& onPageComplete,
     uint16_t maxPages, const AbortCallback& shouldAbort) {
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER

@@ -19,6 +19,8 @@
 #include "Epub/parsers/TocNavParser.h"
 #include "Epub/parsers/TocNcxParser.h"
 
+#include <algorithm>
+
 extern GfxRenderer renderer;
 
 namespace {
@@ -328,6 +330,11 @@ bool Epub::parseCssFiles() {
 // load in the meta data for the epub file
 bool Epub::load(const bool buildIfMissing) {
   LOG_INF(TAG, "Loading ePub: %s", filepath.c_str());
+
+  if (!cache_fs::ensureSourceFingerprint(filepath, cachePath)) {
+    LOG_ERR(TAG, "Could not verify source fingerprint");
+    return false;
+  }
 
   // Initialize spine/TOC cache
   bookMetadataCache.reset(new BookMetadataCache(cachePath));
@@ -1018,6 +1025,32 @@ std::unique_ptr<ZipItemReader> Epub::openItemStream(const std::string& itemHref,
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {
   const std::string path = FsHelpers::normalisePath(itemHref);
   return ZipFile(filepath).getInflatedFileSize(path.c_str(), size);
+}
+
+bool Epub::getSpineItemSizes(std::vector<size_t>& sizes) const {
+  const int spineCount = getSpineItemsCount();
+  sizes.assign(spineCount > 0 ? static_cast<size_t>(spineCount) : 0, 0);
+  if (spineCount <= 0) return false;
+
+  std::vector<ZipFile::SizeTarget> targets;
+  targets.reserve(static_cast<size_t>(spineCount));
+  for (int i = 0; i < spineCount; ++i) {
+    const auto spineItem = getSpineItem(i);
+    const std::string path = FsHelpers::normalisePath(spineItem.href);
+    if (path.empty() || path.size() >= 255) continue;
+    targets.push_back(
+        {ZipFile::fnvHash64(path.data(), path.size()),
+         static_cast<uint16_t>(path.size()), static_cast<uint16_t>(i)});
+  }
+  if (targets.empty()) return false;
+  std::sort(targets.begin(), targets.end());
+
+  std::vector<uint32_t> rawSizes(static_cast<size_t>(spineCount), 0);
+  const int matched = ZipFile(filepath).fillUncompressedSizes(targets, rawSizes);
+  for (int i = 0; i < spineCount; ++i) {
+    sizes[static_cast<size_t>(i)] = rawSizes[static_cast<size_t>(i)];
+  }
+  return matched > 0;
 }
 
 int Epub::getSpineItemsCount() const {

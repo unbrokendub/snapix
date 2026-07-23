@@ -84,7 +84,14 @@ uint16_t ensureStreamingSectionIdx(const std::string& bookCachePath, uint16_t se
                                    GfxRenderer& renderer, const RenderConfig& config, int mT, int mB,
                                    int mL, int mR, const char* hyphenLang) {
   auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+  return ensureStreamingSectionIdx(cache, sectionKey, renderer, config, mT, mB, mL, mR,
+                                   hyphenLang);
+}
 
+uint16_t ensureStreamingSectionIdx(snapix::unifiedcache::UnifiedCache& cache,
+                                   uint16_t sectionKey, GfxRenderer& renderer,
+                                   const RenderConfig& config, int mT, int mB, int mL, int mR,
+                                   const char* hyphenLang) {
   size_t markersSize = 0;
   if (!cache.segmentSize(snapix::unifiedcache::Kind::Markers, sectionKey, &markersSize) ||
       markersSize == 0) {
@@ -185,7 +192,15 @@ uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCac
                                  const char* hyphenLang,
                                  std::function<std::string(const uint8_t*, size_t)> resolveImage) {
   auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+  return extendChunkedSectionIdx(st, cache, sourceExhausted, renderer, config, mT, mB, mL,
+                                 mR, hyphenLang, std::move(resolveImage));
+}
 
+uint16_t extendChunkedSectionIdx(
+    ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache, bool sourceExhausted,
+    GfxRenderer& renderer, const RenderConfig& config, int mT, int mB, int mL, int mR,
+    const char* hyphenLang,
+    std::function<std::string(const uint8_t*, size_t)> resolveImage) {
   const snapix::smolport::StreamingPaginatorConfig cfg =
       makeSectionConfig(renderer, config, mT, mB, mL, mR, hyphenLang);
   st.configHash = snapix::smolport::computePageIndexConfigHash(cfg, config.fontId, config.fakeBold);
@@ -289,6 +304,15 @@ uint16_t loadChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCache
                                GfxRenderer& renderer, const RenderConfig& config, int mT, int mB,
                                int mL, int mR, const char* hyphenLang) {
   auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+  return loadChunkedSectionIdx(st, cache, renderer, config, mT, mB, mL, mR, hyphenLang);
+}
+
+uint16_t loadChunkedSectionIdx(ChunkedIdxState& st,
+                               snapix::unifiedcache::UnifiedCache& cache,
+                               GfxRenderer& renderer, const RenderConfig& config, int mT, int mB,
+                               int mL, int mR, const char* hyphenLang) {
+  st.boundaries.clear();
+  st.configHashValid = false;
   const snapix::smolport::StreamingPaginatorConfig cfg =
       makeSectionConfig(renderer, config, mT, mB, mL, mR, hyphenLang);
   const uint16_t hash = snapix::smolport::computePageIndexConfigHash(cfg, config.fontId, config.fakeBold);

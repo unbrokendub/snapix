@@ -6,48 +6,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIN_DIR="$PROJECT_ROOT/test/build/bin"
+BUILD_DIR="$PROJECT_ROOT/test/build"
 
 echo "=== Running Snapix Unit Tests ==="
 echo "Binary directory: $BIN_DIR"
 echo ""
 
-if [ ! -d "$BIN_DIR" ]; then
+if [ ! -d "$BIN_DIR" ] || [ ! -f "$BUILD_DIR/CTestTestfile.cmake" ]; then
     echo "ERROR: Build directory not found. Run build_tests.sh first."
     exit 1
 fi
 
-FAILED=0
-PASSED=0
-TOTAL=0
-
-for test_exe in "$BIN_DIR"/*; do
-    if [ -x "$test_exe" ] && [ -f "$test_exe" ]; then
-        TEST_NAME=$(basename "$test_exe")
-        echo "----------------------------------------"
-        echo "Running: $TEST_NAME"
-        echo "----------------------------------------"
-
-        TOTAL=$((TOTAL + 1))
-
-        if "$test_exe"; then
-            PASSED=$((PASSED + 1))
-        else
-            FAILED=$((FAILED + 1))
-            echo "FAILED: $TEST_NAME (exit code: $?)"
-        fi
-        echo ""
-    fi
-done
-
-echo "========================================"
-echo "=== Test Run Summary ==="
-echo "========================================"
-echo "Total test suites: $TOTAL"
-echo "Passed: $PASSED"
-echo "Failed: $FAILED"
-echo "========================================"
-
-if [ $FAILED -gt 0 ]; then
-    exit 1
-fi
-exit 0
+# CTest runs only targets configured by the current source tree.  Iterating the
+# output directory also executed stale binaries left behind by renamed/removed
+# tests and could make CI results misleading.
+ctest --test-dir "$BUILD_DIR" --output-on-failure

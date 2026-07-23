@@ -1,6 +1,7 @@
 #include "test_utils.h"
 
 #include <HardwareSerial.h>
+#include <LittleFS.h>
 #include <SDCardManager.h>
 #include <SdFat.h>
 #include <XtcCoverHelper.h>
@@ -167,7 +168,7 @@ int main() {
   // ---- Test: 1-bit cover generation with small image ----
   {
     SdMan.clearFiles();
-    SdMan.clearWrittenFiles();
+    LittleFS.clearWrittenFiles();
 
     const uint16_t w = 16, h = 8;
     // 1-bit: 2 bytes per row, 8 rows = 16 bytes
@@ -185,7 +186,7 @@ int main() {
     bool result = xtc::generateCoverBmpFromParser(parser, "/cache/cover.bmp");
     runner.expectTrue(result, "1-bit: cover generation succeeds");
 
-    std::string bmpData = SdMan.getWrittenData("/cache/cover.bmp");
+    std::string bmpData = LittleFS.getWrittenData("/cache/cover.bmp");
     runner.expectTrue(bmpData.size() > 62, "1-bit: BMP data has header");
 
     BmpInfo bmp = parseBmpHeader(bmpData);
@@ -210,7 +211,7 @@ int main() {
   // ---- Test: 2-bit cover generation ----
   {
     SdMan.clearFiles();
-    SdMan.clearWrittenFiles();
+    LittleFS.clearWrittenFiles();
 
     const uint16_t w = 8, h = 8;
     // 2-bit: bitmapSize = ((8*8+7)/8)*2 = 16 bytes (8 per plane)
@@ -227,7 +228,7 @@ int main() {
     bool result = xtc::generateCoverBmpFromParser(parser, "/cache/cover2.bmp");
     runner.expectTrue(result, "2-bit: cover generation succeeds");
 
-    std::string bmpData = SdMan.getWrittenData("/cache/cover2.bmp");
+    std::string bmpData = LittleFS.getWrittenData("/cache/cover2.bmp");
     runner.expectTrue(bmpData.size() > 62, "2-bit: BMP data has header");
 
     BmpInfo bmp = parseBmpHeader(bmpData);
@@ -242,7 +243,7 @@ int main() {
   // ---- Test: 1-bit pixel data roundtrip ----
   {
     SdMan.clearFiles();
-    SdMan.clearWrittenFiles();
+    LittleFS.clearWrittenFiles();
 
     const uint16_t w = 8, h = 2;
     // Row 0: 0xAA = 10101010 (alternating black/white)
@@ -255,7 +256,7 @@ int main() {
     parser.open("/test_px.xtc");
 
     xtc::generateCoverBmpFromParser(parser, "/cache/px.bmp");
-    std::string bmpData = SdMan.getWrittenData("/cache/px.bmp");
+    std::string bmpData = LittleFS.getWrittenData("/cache/px.bmp");
 
     // Data starts at offset 62 (14+40+8)
     // Row size for 8px wide = ((8+31)/32)*4 = 4 bytes (padded)
@@ -274,7 +275,7 @@ int main() {
   // ---- Test: 2-bit pixel conversion ----
   {
     SdMan.clearFiles();
-    SdMan.clearWrittenFiles();
+    LittleFS.clearWrittenFiles();
 
     // 8x8 image, 2-bit mode
     // Two planes of 8 bytes each. Column-major, right-to-left, 8 vertical pixels per byte
@@ -293,7 +294,7 @@ int main() {
     parser.open("/test_2b.xtch");
 
     xtc::generateCoverBmpFromParser(parser, "/cache/2b.bmp");
-    std::string bmpData = SdMan.getWrittenData("/cache/2b.bmp");
+    std::string bmpData = LittleFS.getWrittenData("/cache/2b.bmp");
 
     // All pixels should be black (0x00 in BMP 1-bit)
     // Data at offset 62, row size = 4 bytes (8px width padded to 32-bit)
@@ -308,7 +309,7 @@ int main() {
   // ---- Test: all-white 2-bit image ----
   {
     SdMan.clearFiles();
-    SdMan.clearWrittenFiles();
+    LittleFS.clearWrittenFiles();
 
     const uint16_t w = 8, h = 8;
     // Both planes all zeros → pixelValue = 0 → white (threshold: >= 1 is black)
@@ -321,7 +322,7 @@ int main() {
     parser.open("/test_2bw.xtch");
 
     xtc::generateCoverBmpFromParser(parser, "/cache/2bw.bmp");
-    std::string bmpData = SdMan.getWrittenData("/cache/2bw.bmp");
+    std::string bmpData = LittleFS.getWrittenData("/cache/2bw.bmp");
 
     runner.expectTrue(bmpData.size() >= 62 + 4, "2-bit white: BMP large enough");
     // All pixels white = 0xFF in BMP 1-bit
@@ -334,7 +335,7 @@ int main() {
   // ---- Test: BMP palette (black=0, white=1) ----
   {
     SdMan.clearFiles();
-    SdMan.clearWrittenFiles();
+    LittleFS.clearWrittenFiles();
 
     const uint16_t w = 8, h = 1;
     std::vector<uint8_t> pixels(1, 0x00);
@@ -344,7 +345,7 @@ int main() {
     xtc::XtcParser parser;
     parser.open("/test_pal.xtc");
     xtc::generateCoverBmpFromParser(parser, "/cache/pal.bmp");
-    std::string bmpData = SdMan.getWrittenData("/cache/pal.bmp");
+    std::string bmpData = LittleFS.getWrittenData("/cache/pal.bmp");
 
     // Palette starts at offset 54 (14+40)
     // Color 0 (black): B=0, G=0, R=0, A=0
@@ -362,7 +363,7 @@ int main() {
   // ---- Test: row padding to 4-byte boundary ----
   {
     SdMan.clearFiles();
-    SdMan.clearWrittenFiles();
+    LittleFS.clearWrittenFiles();
 
     // 10px wide → 2 bytes per row in source, but BMP needs 4-byte alignment = 4 bytes per row
     const uint16_t w = 10, h = 2;
@@ -373,7 +374,7 @@ int main() {
     xtc::XtcParser parser;
     parser.open("/test_pad.xtc");
     xtc::generateCoverBmpFromParser(parser, "/cache/pad.bmp");
-    std::string bmpData = SdMan.getWrittenData("/cache/pad.bmp");
+    std::string bmpData = LittleFS.getWrittenData("/cache/pad.bmp");
 
     BmpInfo bmp = parseBmpHeader(bmpData);
     const uint32_t expectedRowSize = ((w + 31) / 32) * 4;  // 4 bytes

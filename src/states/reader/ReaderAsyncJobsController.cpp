@@ -47,7 +47,7 @@ bool ReaderAsyncJobsController::stopWorker() {
   if (stopped) {
     clearQueuedCommands();
     currentJob_.store(JobType::None, std::memory_order_release);
-    cancelCurrentJob_.store(false, std::memory_order_release);
+    outstandingJobs_.store(0, std::memory_order_release);
     if (stateEvents_) {
       xEventGroupSetBits(stateEvents_, EVENT_IDLE);
     }
@@ -64,9 +64,15 @@ bool ReaderAsyncJobsController::waitUntilIdle(const uint32_t maxWaitMs) {
   return (bits & EVENT_IDLE) != 0;
 }
 
-bool ReaderAsyncJobsController::isJobRunning() const { return currentJob_.load(std::memory_order_acquire) != JobType::None; }
+bool ReaderAsyncJobsController::isJobRunning() const {
+  return outstandingJobs_.load(std::memory_order_acquire) != 0 ||
+         currentJob_.load(std::memory_order_acquire) != JobType::None;
+}
 
-void ReaderAsyncJobsController::requestCancelCurrentJob() { cancelCurrentJob_.store(true, std::memory_order_release); }
+void ReaderAsyncJobsController::requestCancelCurrentJob() {
+  cancelGeneration_.fetch_add(1, std::memory_order_acq_rel);
+  clearQueuedCommands();
+}
 
 bool ReaderAsyncJobsController::queueBackgroundCache(const BackgroundCacheRequest& request) {
   Command cmd;
@@ -239,11 +245,17 @@ bool ReaderAsyncJobsController::enqueue(const Command& cmd) {
   if (!workerTask_.isRunning() && !startWorker()) {
     return false;
   }
-  if (stateEvents_) {
-    xEventGroupClearBits(stateEvents_, EVENT_IDLE);
-  }
-  if (xQueueSend(commandQueue_, &cmd, 0) != pdTRUE) {
+  Command queuedCmd = cmd;
+  // Stamp work before publishing it to the queue.  If cancellation races
+  // between this load and xQueueSend(), the old generation makes the handler's
+  // abort callback fire immediately; a dequeue can no longer "adopt" the new
+  // generation and accidentally survive the cancellation.
+  queuedCmd.generation = cancelGeneration_.load(std::memory_order_acquire);
+  outstandingJobs_.fetch_add(1, std::memory_order_acq_rel);
+  if (stateEvents_) xEventGroupClearBits(stateEvents_, EVENT_IDLE);
+  if (xQueueSend(commandQueue_, &queuedCmd, 0) != pdTRUE) {
     LOG_ERR(TAG, "[ASYNC] command queue full type=%d", static_cast<int>(cmd.type));
+    decrementOutstanding(1);
     if (!isJobRunning() && stateEvents_) {
       xEventGroupSetBits(stateEvents_, EVENT_IDLE);
     }
@@ -264,14 +276,34 @@ size_t ReaderAsyncJobsController::clearQueuedCommands() {
   }
 
   if (cleared > 0) {
+    decrementOutstanding(static_cast<uint16_t>(cleared));
     LOG_DBG(TAG, "[ASYNC] dropped %u stale queued command(s)", static_cast<unsigned>(cleared));
+  }
+  if (currentJob_.load(std::memory_order_acquire) == JobType::None &&
+      outstandingJobs_.load(std::memory_order_acquire) == 0 && stateEvents_) {
+    xEventGroupSetBits(stateEvents_, EVENT_IDLE);
   }
   return cleared;
 }
 
-ReaderAsyncJobsController::AbortCallback ReaderAsyncJobsController::abortCallback() const {
-  return [this]() {
-    if (cancelCurrentJob_.load(std::memory_order_acquire) || workerTask_.shouldStop()) return true;
+uint16_t ReaderAsyncJobsController::decrementOutstanding(const uint16_t count) {
+  uint16_t current = outstandingJobs_.load(std::memory_order_acquire);
+  for (;;) {
+    const uint16_t next = current > count ? static_cast<uint16_t>(current - count) : 0;
+    if (outstandingJobs_.compare_exchange_weak(current, next, std::memory_order_acq_rel,
+                                               std::memory_order_acquire)) {
+      return next;
+    }
+  }
+}
+
+ReaderAsyncJobsController::AbortCallback ReaderAsyncJobsController::abortCallback(
+    const uint32_t generation) const {
+  return [this, generation]() {
+    if (cancelGeneration_.load(std::memory_order_acquire) != generation ||
+        workerTask_.shouldStop()) {
+      return true;
+    }
     // Abort parsing early when heap is dangerously low to prevent std::bad_alloc.
     //
     // v2.0.157: lowered the free-heap threshold from 15 KB to 6 KB.  The old
@@ -311,8 +343,10 @@ ReaderAsyncJobsController::AbortCallback ReaderAsyncJobsController::abortCallbac
 }
 
 ReaderAsyncJobsController::AbortCallback ReaderAsyncJobsController::abortCallbackUiOnly() const {
-  return [this]() {
-    return cancelCurrentJob_.load(std::memory_order_acquire) || workerTask_.shouldStop();
+  const uint32_t generation = currentJobGeneration_.load(std::memory_order_acquire);
+  return [this, generation]() {
+    return cancelGeneration_.load(std::memory_order_acquire) != generation ||
+           workerTask_.shouldStop();
   };
 }
 
@@ -323,7 +357,8 @@ void ReaderAsyncJobsController::workerLoop() {
       continue;
     }
 
-    cancelCurrentJob_.store(false, std::memory_order_release);
+    const uint32_t jobGeneration = cmd.generation;
+    currentJobGeneration_.store(jobGeneration, std::memory_order_release);
     currentJob_.store(cmd.type, std::memory_order_release);
     if (stateEvents_) {
       xEventGroupClearBits(stateEvents_, EVENT_IDLE);
@@ -332,7 +367,7 @@ void ReaderAsyncJobsController::workerLoop() {
     const int priority = cmd.type == JobType::BackgroundCache ? 0 : kInteractiveCacheTaskPriority;
     vTaskPrioritySet(nullptr, priority);
 
-    const AbortCallback abort = abortCallback();
+    const AbortCallback abort = abortCallback(jobGeneration);
     try {
       switch (cmd.type) {
         case JobType::BackgroundCache:
@@ -355,7 +390,9 @@ void ReaderAsyncJobsController::workerLoop() {
     }
 
     currentJob_.store(JobType::None, std::memory_order_release);
-    if (stateEvents_) {
+    const uint16_t remaining = decrementOutstanding(1);
+    if (stateEvents_ && remaining == 0 &&
+        outstandingJobs_.load(std::memory_order_acquire) == 0) {
       xEventGroupSetBits(stateEvents_, EVENT_IDLE);
     }
   }

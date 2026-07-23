@@ -11,6 +11,9 @@
 
 class GfxRenderer;
 class Page;
+namespace snapix::unifiedcache {
+class UnifiedCache;
+}
 
 /**
  * Content parser for plain-text files (.txt).
@@ -69,13 +72,13 @@ class PlainTextParser : public ContentParser {
   // cursor (chunkIdx_/srcOffset_/sourceExhausted_) + any existing idx so a cold
   // (post-reboot) parser resumes mid-document.  Returns false if the source
   // can't be opened.
-  bool ensureInit();
+  bool ensureInit(snapix::unifiedcache::UnifiedCache& cache);
 
   // Markerize the next source chunk [srcOffset_, end) into UnifiedCache::Markers
   // (key = chunkIdx_), where `end` is the next paragraph boundary past
   // CHUNK_BYTES (or EOF).  Advances srcOffset_/chunkIdx_ and sets
   // sourceExhausted_ when end == fileSize.  Returns true on success/cache-hit.
-  bool markerizeNextChunk();
+  bool markerizeNextChunk(snapix::unifiedcache::UnifiedCache& cache);
 
  public:
   // `bookCachePath` is the book's cache directory (Txt::getCachePath()), where

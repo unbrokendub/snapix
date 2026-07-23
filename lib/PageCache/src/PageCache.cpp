@@ -18,7 +18,7 @@
 #include "ContentParser.h"
 
 namespace {
-constexpr uint8_t CACHE_FILE_VERSION = 40;  // v40: v3.10.7 more basic block tags emit breaks (HTML5 semantic blocks, tables, definition lists) + FB2 falls through to the common dispatch — markerization changed again; re-bumped over v39 (paired with UnifiedCache kFormatVersion 2→3) so devices that re-markerized at v3.10.6 pick these up.  // v39: v3.10.6 HTML <h1>-<h6> headings now emit a paragraph break + centering around the heading (were inline → EPUB chapter title/number/epigraph collapsed onto ONE line).  Markerization output changed → page caches rebuild; PAIRED with a UnifiedCache kFormatVersion bump (1→2) that wipes cached MARKERS too — CACHE_FILE_VERSION alone rebuilds pages from EXISTING markers, which would keep the stale inline-heading bytes.  // v38: v3.8.0 legacy ParsedText/Expat path fully removed — ALL formats (incl. TXT/MD + every FB2, TOC and TOC-less) now render via the v3 streaming pipeline.  Invalidates pre-v3.8 page caches so existing TXT/MD/FB2 books re-markerize into streaming instead of the (now-deleted) ParsedText block renderer; EPUB/section-FB2 just rebuild the page cache from their existing markers.  // v37: v3.6.0 superscript/subscript (<sup>/<sub>) render in a smaller font, shifting word widths/page boundaries; rebuild caches built under v36.  // v36: v3.5.2 Text Layout + paragraph-start flag.  // v35: v3.5.1 lineCompression applied to streaming bodyLineHeight.  // v34: v3.5.0 status-bar reserve + numeric line spacing.  // v33: v3.3.0 word hyphenation.  // v32: v3.2.0 scene-break ornament.  // v31: v3.1.0 "красная строка".  // v30: v2.0.206 off-by-one page-count fix.  The streaming short-circuit (R4.b) now emits `boundaryCount + 1` Pages instead of `boundaryCount` — the final partial page of every multi-page chapter/section was previously never created (the MEASURE walk fires boundaries only on overflow rolls, so page 0 and the EOF-terminated last page are implicit).  Existing v29 page caches were built with the short count and would keep dropping each chapter's tail; bumping forces a rebuild through the fixed parser so the recovered last page is materialised.  (v29: v2.0.60 page cache moved from SD to LittleFS.)
+constexpr uint8_t CACHE_FILE_VERSION = 41;  // v41: v3.11.0 standalone Markdown/HTML marker storage changed from one whole-file segment to progressive chunks; paired with UnifiedCache kFormatVersion 3→4 so page objects and marker/index data rebuild together instead of briefly rendering an old empty streaming page against a wiped marker cache.  // v40: v3.10.7 more basic block tags emit breaks (HTML5 semantic blocks, tables, definition lists) + FB2 falls through to the common dispatch — markerization changed again; re-bumped over v39 (paired with UnifiedCache kFormatVersion 2→3) so devices that re-markerized at v3.10.6 pick these up.  // v39: v3.10.6 HTML <h1>-<h6> headings now emit a paragraph break + centering around the heading (were inline → EPUB chapter title/number/epigraph collapsed onto ONE line).  Markerization output changed → page caches rebuild; PAIRED with a UnifiedCache kFormatVersion bump (1→2) that wipes cached MARKERS too — CACHE_FILE_VERSION alone rebuilds pages from EXISTING markers, which would keep the stale inline-heading bytes.  // v38: v3.8.0 legacy ParsedText/Expat path fully removed — ALL formats (incl. TXT/MD + every FB2, TOC and TOC-less) now render via the v3 streaming pipeline.  Invalidates pre-v3.8 page caches so existing TXT/MD/FB2 books re-markerize into streaming instead of the (now-deleted) ParsedText block renderer; EPUB/section-FB2 just rebuild the page cache from their existing markers.  // v37: v3.6.0 superscript/subscript (<sup>/<sub>) render in a smaller font, shifting word widths/page boundaries; rebuild caches built under v36.  // v36: v3.5.2 Text Layout + paragraph-start flag.  // v35: v3.5.1 lineCompression applied to streaming bodyLineHeight.  // v34: v3.5.0 status-bar reserve + numeric line spacing.  // v33: v3.3.0 word hyphenation.  // v32: v3.2.0 scene-break ornament.  // v31: v3.1.0 "красная строка".  // v30: v2.0.206 off-by-one page-count fix.  The streaming short-circuit (R4.b) now emits `boundaryCount + 1` Pages instead of `boundaryCount` — the final partial page of every multi-page chapter/section was previously never created (the MEASURE walk fires boundaries only on overflow rolls, so page 0 and the EOF-terminated last page are implicit).  Existing v29 page caches were built with the short count and would keep dropping each chapter's tail; bumping forces a rebuild through the fixed parser so the recovered last page is materialised.  (v29: v2.0.60 page cache moved from SD to LittleFS.)
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 #ifndef SNAPIX_PERF_LOG
@@ -63,6 +63,26 @@ inline void perfLog(const char* phase, uint32_t startedMs, const char* fmt = nul
 // - lutOffset (4 bytes)
 constexpr uint32_t HEADER_SIZE = 1 + 4 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 4;
 
+bool readCacheHeader(File& file, uint8_t& version, RenderConfig& config, uint16_t& pageCount,
+                     uint8_t& partial, uint32_t& lutOffset) {
+  if (!file.seek(0)) return false;
+  return serialization::readPodChecked(file, version) &&
+         serialization::readPodChecked(file, config.fontId) &&
+         serialization::readPodChecked(file, config.lineCompression) &&
+         serialization::readPodChecked(file, config.indentLevel) &&
+         serialization::readPodChecked(file, config.spacingLevel) &&
+         serialization::readPodChecked(file, config.paragraphAlignment) &&
+         serialization::readPodChecked(file, config.hyphenation) &&
+         serialization::readPodChecked(file, config.showImages) &&
+         serialization::readPodChecked(file, config.bionicReading) &&
+         serialization::readPodChecked(file, config.fakeBold) &&
+         serialization::readPodChecked(file, config.viewportWidth) &&
+         serialization::readPodChecked(file, config.viewportHeight) &&
+         serialization::readPodChecked(file, pageCount) &&
+         serialization::readPodChecked(file, partial) &&
+         serialization::readPodChecked(file, lutOffset);
+}
+
 bool validateCacheIndexBounds(const char* cachePath, const size_t fileSize, const uint16_t pageCount,
                               const uint32_t lutOffset) {
   if (pageCount == 0) {
@@ -88,6 +108,25 @@ bool validateCacheIndexBounds(const char* cachePath, const size_t fileSize, cons
     return false;
   }
 
+  return true;
+}
+
+bool validateCacheLut(File& file, const char* cachePath, const uint16_t pageCount,
+                      const uint32_t lutOffset) {
+  if (!file.seek(lutOffset)) return false;
+
+  uint32_t previousPos = 0;
+  for (uint16_t i = 0; i < pageCount; ++i) {
+    uint32_t pos = 0;
+    if (!serialization::readPodChecked(file, pos) || pos < HEADER_SIZE ||
+        pos >= lutOffset || (i > 0 && pos <= previousPos)) {
+      LOG_ERR(TAG, "Invalid LUT entry %u/%u pos=%u path=%s",
+              static_cast<unsigned>(i), static_cast<unsigned>(pageCount),
+              static_cast<unsigned>(pos), cachePath);
+      return false;
+    }
+    previousPos = pos;
+  }
   return true;
 }
 
@@ -308,7 +347,10 @@ bool PageCache::loadLut(std::vector<uint32_t>& lut) {
 
   // Read lutOffset from header
   readFile_.seek(HEADER_SIZE - 4);
-  serialization::readPod(readFile_, lutOffset_);
+  if (!serialization::readPodChecked(readFile_, lutOffset_)) {
+    closeReadHandle();
+    return false;
+  }
 
   // Validate lutOffset before seeking
   if (lutOffset_ < HEADER_SIZE || lutOffset_ >= fileSize) {
@@ -319,7 +361,10 @@ bool PageCache::loadLut(std::vector<uint32_t>& lut) {
 
   // Read pageCount from header
   readFile_.seek(HEADER_SIZE - 4 - 1 - 2);
-  serialization::readPod(readFile_, pageCount_);
+  if (!serialization::readPodChecked(readFile_, pageCount_)) {
+    closeReadHandle();
+    return false;
+  }
 
   if (!validateCacheIndexBounds(cachePath_.c_str(), fileSize, pageCount_, lutOffset_)) {
     closeReadHandle();
@@ -339,18 +384,22 @@ bool PageCache::loadLut(std::vector<uint32_t>& lut) {
   readFile_.seek(lutOffset_);
   lut.clear();
   lut.reserve(pageCount_);
+  uint32_t previousPos = 0;
   for (uint16_t i = 0; i < pageCount_; i++) {
     uint32_t pos = 0;
-    if (!serialization::readPodChecked(readFile_, pos)) {
-      LOG_ERR(TAG, "[CACHE] LUT truncated at entry %u of %u (lutOffset=%u file=%zu) path=%s",
+    if (!serialization::readPodChecked(readFile_, pos) || pos < HEADER_SIZE ||
+        pos >= lutOffset_ || (i > 0 && pos <= previousPos)) {
+      LOG_ERR(TAG, "[CACHE] invalid LUT entry %u of %u pos=%u (lutOffset=%u file=%zu) path=%s",
               static_cast<unsigned>(i), static_cast<unsigned>(pageCount_),
-              static_cast<unsigned>(lutOffset_), fileSize, cachePath_.c_str());
+              static_cast<unsigned>(pos), static_cast<unsigned>(lutOffset_),
+              fileSize, cachePath_.c_str());
       lut.clear();
       pageLut_.clear();
       closeReadHandle();
       return false;
     }
     lut.push_back(pos);
+    previousPos = pos;
   }
   pageLut_ = lut;
   clearResidentPages();
@@ -366,30 +415,35 @@ bool PageCache::loadRaw() {
     return false;
   }
 
-  readFile_.seek(0);
-  uint8_t version;
-  serialization::readPod(readFile_, version);
+  uint8_t version = 0;
+  RenderConfig ignoredConfig;
+  uint8_t partial = 0;
+  if (readFileSize_ < HEADER_SIZE ||
+      !readCacheHeader(readFile_, version, ignoredConfig, pageCount_, partial, lutOffset_)) {
+    closeReadHandle();
+    LOG_ERR(TAG, "Truncated cache header: %s", cachePath_.c_str());
+    return false;
+  }
   if (version != CACHE_FILE_VERSION) {
     closeReadHandle();
     LOG_ERR(TAG, "Version mismatch: got %u, expected %u", version, CACHE_FILE_VERSION);
     return false;
   }
 
-  // Skip config fields, read pageCount and isPartial
-  readFile_.seek(HEADER_SIZE - 4 - 1 - 2);
-  serialization::readPod(readFile_, pageCount_);
   if (pageCount_ == 0) {
     closeReadHandle();
     LOG_ERR(TAG, "Rejecting empty cache file: %s", cachePath_.c_str());
     return false;
   }
-  uint8_t partial;
-  serialization::readPod(readFile_, partial);
   isPartial_ = (partial != 0);
-  readFile_.seek(HEADER_SIZE - 4);
-  serialization::readPod(readFile_, lutOffset_);
 
   if (!validateCacheIndexBounds(cachePath_.c_str(), readFileSize_, pageCount_, lutOffset_)) {
+    closeReadHandle();
+    pageCount_ = 0;
+    isPartial_ = false;
+    return false;
+  }
+  if (!validateCacheLut(readFile_, cachePath_.c_str(), pageCount_, lutOffset_)) {
     closeReadHandle();
     pageCount_ = 0;
     isPartial_ = false;
@@ -426,8 +480,16 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
     return result;
   }
 
-  uint8_t version;
-  serialization::readPod(readFile, version);
+  uint8_t version = 0;
+  RenderConfig fileConfig;
+  uint16_t pageCount = 0;
+  uint8_t partial = 0;
+  uint32_t lutOffset = 0;
+  if (!readCacheHeader(readFile, version, fileConfig, pageCount, partial, lutOffset)) {
+    readFile.close();
+    if (cleanupInvalid) LittleFS.remove(cachePath.c_str());
+    return result;
+  }
   if (version != CACHE_FILE_VERSION) {
     readFile.close();
     if (cleanupInvalid) {
@@ -436,18 +498,6 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
     return result;
   }
 
-  RenderConfig fileConfig;
-  serialization::readPod(readFile, fileConfig.fontId);
-  serialization::readPod(readFile, fileConfig.lineCompression);
-  serialization::readPod(readFile, fileConfig.indentLevel);
-  serialization::readPod(readFile, fileConfig.spacingLevel);
-  serialization::readPod(readFile, fileConfig.paragraphAlignment);
-  serialization::readPod(readFile, fileConfig.hyphenation);
-  serialization::readPod(readFile, fileConfig.showImages);
-  serialization::readPod(readFile, fileConfig.bionicReading);
-  serialization::readPod(readFile, fileConfig.fakeBold);
-  serialization::readPod(readFile, fileConfig.viewportWidth);
-  serialization::readPod(readFile, fileConfig.viewportHeight);
   if (config != fileConfig) {
     readFile.close();
     if (cleanupInvalid) {
@@ -456,16 +506,10 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
     return result;
   }
 
-  serialization::readPod(readFile, result.pageCount);
-  uint8_t partial;
-  serialization::readPod(readFile, partial);
+  result.pageCount = pageCount;
   result.partial = (partial != 0);
-
-  uint32_t lutOffset = 0;
-  serialization::readPod(readFile, lutOffset);
-  readFile.close();
-
   if (!validateCacheIndexBounds(cachePath.c_str(), fileSize, result.pageCount, lutOffset)) {
+    readFile.close();
     if (cleanupInvalid) {
       LittleFS.remove(cachePath.c_str());
     }
@@ -473,6 +517,14 @@ PageCache::ProbeResult PageCache::probe(const std::string& cachePath, const Rend
     result.pageCount = 0;
     return result;
   }
+  if (!validateCacheLut(readFile, cachePath.c_str(), result.pageCount, lutOffset)) {
+    readFile.close();
+    if (cleanupInvalid) LittleFS.remove(cachePath.c_str());
+    result.partial = false;
+    result.pageCount = 0;
+    return result;
+  }
+  readFile.close();
 
   result.valid = true;
   return result;
@@ -483,10 +535,17 @@ bool PageCache::load(const RenderConfig& config) {
     return false;
   }
 
-  // Read and validate header
-  readFile_.seek(0);
-  uint8_t version;
-  serialization::readPod(readFile_, version);
+  // Read and validate the complete header in one checked pass.
+  uint8_t version = 0;
+  RenderConfig fileConfig;
+  uint8_t partial = 0;
+  if (readFileSize_ < HEADER_SIZE ||
+      !readCacheHeader(readFile_, version, fileConfig, pageCount_, partial, lutOffset_)) {
+    closeReadHandle();
+    LOG_ERR(TAG, "Truncated cache header: %s", cachePath_.c_str());
+    clear();
+    return false;
+  }
   if (version != CACHE_FILE_VERSION) {
     closeReadHandle();
     LOG_ERR(TAG, "Version mismatch: got %u, expected %u", version, CACHE_FILE_VERSION);
@@ -495,19 +554,6 @@ bool PageCache::load(const RenderConfig& config) {
     clearResidentPages();
     return false;
   }
-
-  RenderConfig fileConfig;
-  serialization::readPod(readFile_, fileConfig.fontId);
-  serialization::readPod(readFile_, fileConfig.lineCompression);
-  serialization::readPod(readFile_, fileConfig.indentLevel);
-  serialization::readPod(readFile_, fileConfig.spacingLevel);
-  serialization::readPod(readFile_, fileConfig.paragraphAlignment);
-  serialization::readPod(readFile_, fileConfig.hyphenation);
-  serialization::readPod(readFile_, fileConfig.showImages);
-  serialization::readPod(readFile_, fileConfig.bionicReading);
-  serialization::readPod(readFile_, fileConfig.fakeBold);
-  serialization::readPod(readFile_, fileConfig.viewportWidth);
-  serialization::readPod(readFile_, fileConfig.viewportHeight);
 
   if (config != fileConfig) {
     closeReadHandle();
@@ -524,13 +570,18 @@ bool PageCache::load(const RenderConfig& config) {
     return false;
   }
 
-  serialization::readPod(readFile_, pageCount_);
-  uint8_t partial;
-  serialization::readPod(readFile_, partial);
   isPartial_ = (partial != 0);
-  serialization::readPod(readFile_, lutOffset_);
 
   if (!validateCacheIndexBounds(cachePath_.c_str(), readFileSize_, pageCount_, lutOffset_)) {
+    closeReadHandle();
+    clear();
+    pageCount_ = 0;
+    isPartial_ = false;
+    pageLut_.clear();
+    clearResidentPages();
+    return false;
+  }
+  if (!validateCacheLut(readFile_, cachePath_.c_str(), pageCount_, lutOffset_)) {
     closeReadHandle();
     clear();
     pageCount_ = 0;

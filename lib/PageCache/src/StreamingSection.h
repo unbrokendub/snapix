@@ -26,6 +26,10 @@
 
 class GfxRenderer;
 
+namespace snapix::unifiedcache {
+class UnifiedCache;
+}
+
 namespace snapix::pagecache {
 
 // Ensure a CURRENT (version + configHash matching) .idx exists for the section's
@@ -38,6 +42,10 @@ uint16_t ensureStreamingSectionIdx(const std::string& bookCachePath, uint16_t se
                                    GfxRenderer& renderer, const RenderConfig& config,
                                    int marginTop, int marginBottom, int marginLeft, int marginRight,
                                    const char* hyphenLang);
+uint16_t ensureStreamingSectionIdx(snapix::unifiedcache::UnifiedCache& cache,
+                                   uint16_t sectionKey, GfxRenderer& renderer,
+                                   const RenderConfig& config, int marginTop, int marginBottom,
+                                   int marginLeft, int marginRight, const char* hyphenLang);
 
 // =============================================================================
 // v3.9.0 — incremental (lazy / progressive) idx for chunked single-section docs.
@@ -79,12 +87,22 @@ uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCac
                                  const RenderConfig& config, int marginTop, int marginBottom,
                                  int marginLeft, int marginRight, const char* hyphenLang,
                                  std::function<std::string(const uint8_t*, size_t)> resolveImage = {});
+uint16_t extendChunkedSectionIdx(
+    ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache, bool sourceExhausted,
+    GfxRenderer& renderer, const RenderConfig& config, int marginTop, int marginBottom,
+    int marginLeft, int marginRight, const char* hyphenLang,
+    std::function<std::string(const uint8_t*, size_t)> resolveImage = {});
 
 // Load the CURRENT (version + configHash matching) idx into `st` so a cold
 // (post-reboot) parser skips re-measuring chunks it already indexed.  Returns
 // the number of boundaries loaded, or 0 if no current idx exists (caller then
 // measures from scratch via extendChunkedSectionIdx).
 uint16_t loadChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCachePath,
+                               GfxRenderer& renderer, const RenderConfig& config, int marginTop,
+                               int marginBottom, int marginLeft, int marginRight,
+                               const char* hyphenLang);
+uint16_t loadChunkedSectionIdx(ChunkedIdxState& st,
+                               snapix::unifiedcache::UnifiedCache& cache,
                                GfxRenderer& renderer, const RenderConfig& config, int marginTop,
                                int marginBottom, int marginLeft, int marginRight,
                                const char* hyphenLang);

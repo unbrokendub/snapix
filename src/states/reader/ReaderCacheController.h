@@ -89,6 +89,9 @@ class ReaderCacheController {
   const ReaderDocumentResources& resources() const { return resources_; }
   ReaderDocumentResources::State& resourceState() { return resources_.unsafeState(); }
   const ReaderDocumentResources::State& resourceState() const { return resources_.unsafeState(); }
+  ReaderDocumentResources::Session acquireForegroundResources(const char* reason) {
+    return resources_.acquireForeground(reason);
+  }
   WarmPageSlot& warmedNextPageRef() { return warmedNextPage_; }
   WarmPageSlot& warmedNextNextPageRef() { return warmedNextNextPage_; }
   WarmPageSlot& renderOverridePageRef() { return renderOverridePage_; }

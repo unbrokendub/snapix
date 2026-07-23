@@ -273,6 +273,10 @@ class Fb2 {
   // TOC access (lazy: reads from cache file on demand)
   uint16_t tocCount() const { return tocItemCount_; }
   TocItem getTocItem(uint16_t index) const;
+  // Read all TOC source offsets while holding one LittleFS handle.  Intended
+  // for global page estimates; avoids getTocItem() reopening meta.bin once or
+  // twice per section during the first status-bar render.
+  bool getTocSourceOffsets(std::vector<uint32_t>& offsets) const;
 
   // Binary (image) index access — returns nullptr if id not found.
   // v2.0.179 — delegates to the sorted-vector lookup helper.

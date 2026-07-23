@@ -3,6 +3,7 @@
 #include <HtmlStripper.h>
 #include <MarkerizeChapter.h>
 #include <MarkerizedPageRender.h>
+#include <MarkerStream.h>
 #include <StreamingPaginator.h>
 
 #include <cstring>
@@ -982,6 +983,75 @@ int main() {
     runner.expectTrue(r1c1 >= 0 && r1c2 >= 0 && r2c1 >= 0, "table_cells_drawn");
     runner.expectTrue(r1c1 >= 0 && r1c2 == r1c1, "table_row1_cells_same_line");
     runner.expectTrue(r2c1 >= 0 && r1c1 >= 0 && r2c1 > r1c1, "table_row2_below_row1");
+  }
+
+  // -----------------------------------------------------------------------
+  // v3.11.3 — the index walk must expose exact anchor→page mappings.  The
+  // streaming EPUB parser uses this callback to resolve TOC fragments such as
+  // #p196; without it every jump stayed on page 0.
+  // -----------------------------------------------------------------------
+  {
+    const std::string filler =
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu "
+        "nu xi omicron pi rho sigma tau upsilon phi chi psi omega ";
+    auto am = markerizeAll(
+        "<p id=\"first\">" + filler + filler + "</p>"
+        "<p id=\"middle\">" + filler + filler + "</p>"
+        "<p id=\"last\">" + filler + filler + "</p>");
+    FakeRenderer fr;
+    StreamingPaginator pag(smallConfig(), fr);
+    size_t pos = 0;
+    uint8_t buf[256];
+    std::map<std::string, uint16_t> anchorPages;
+    renderMarkerizedPage(
+        pag, makeReader(am, pos), buf, sizeof(buf), UINT16_MAX, {}, nullptr, {},
+        {}, [&](const uint8_t* id, uint16_t len, uint16_t page) {
+          anchorPages[std::string(reinterpret_cast<const char*>(id), len)] = page;
+        });
+    runner.expectEq(static_cast<size_t>(3), anchorPages.size(),
+                    "toc_anchor_all_captured");
+    runner.expectTrue(anchorPages["middle"] > anchorPages["first"],
+                      "toc_anchor_middle_after_first");
+    runner.expectTrue(anchorPages["last"] > anchorPages["middle"],
+                      "toc_anchor_last_after_middle");
+  }
+
+  // Existing v3.11.2 indices recover anchors by scanning marker offsets.  Feed
+  // tiny chunks so the anchor marker/payload crosses chunk boundaries and
+  // verify the reader still reports the absolute marker-start offset.
+  {
+    auto om = markerizeAll("<p>prefix</p><h2 id=\"p196\">target</h2>");
+    size_t expectedOffset = std::string::npos;
+    for (size_t i = 0; i + 1 < om.size(); ++i) {
+      if (om[i] == snapix::smolport::kMarker &&
+          om[i + 1] == snapix::smolport::kAnchor) {
+        expectedOffset = i;
+        break;
+      }
+    }
+    struct OffsetObserver final : snapix::smolport::MarkerObserver {
+      uint32_t offset = UINT32_MAX;
+      std::string id;
+      snapix::smolport::ObserverStatus onAnchorAt(
+          const uint8_t* data, uint16_t len, uint32_t sourceOffset) override {
+        id.assign(reinterpret_cast<const char*>(data), len);
+        offset = sourceOffset;
+        return snapix::smolport::ObserverStatus::Continue;
+      }
+    } observer;
+    snapix::smolport::MarkerStreamReader reader(observer);
+    bool allChunksAccepted = true;
+    for (size_t pos = 0; pos < om.size();) {
+      const size_t n = std::min<size_t>(3, om.size() - pos);
+      allChunksAccepted =
+          reader.feed(om.data() + pos, n) && allChunksAccepted;
+      pos += n;
+    }
+    runner.expectTrue(allChunksAccepted, "toc_offset_chunk_feed");
+    runner.expectTrue(reader.finish(), "toc_offset_finish");
+    runner.expectEqual("p196", observer.id, "toc_offset_anchor_id");
+    runner.expectEq(static_cast<uint32_t>(expectedOffset), observer.offset,
+                    "toc_offset_absolute");
   }
 
   runner.printSummary();

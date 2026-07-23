@@ -91,6 +91,13 @@ class MarkerObserver {
     return ObserverStatus::Continue;
   }
 
+  // Absolute encoded-stream offset of the anchor marker.  Existing
+  // observers keep working through the default onAnchor() delegation.
+  virtual ObserverStatus onAnchorAt(const uint8_t* id, uint16_t len,
+                                    uint32_t /*sourceOffset*/) {
+    return onAnchor(id, len);
+  }
+
   // Called once when the stream walker reaches end-of-input cleanly
   // (no truncation, no premature stop).  Override to flush any final
   // state (e.g. emit the last partial page).
@@ -143,6 +150,8 @@ class MarkerStreamReader {
   uint16_t payloadLen_ = 0;
   uint16_t payloadRecvd_ = 0;
   uint8_t payloadBuf_[kMaxPayloadBytes] = {};
+  uint32_t sourceBytesSeen_ = 0;
+  uint32_t pendingMarkerOffset_ = 0;
 
   // Walk a contiguous run of plain-text bytes (no marker escape inside).
   // Returns position of next non-text byte or end-of-input.

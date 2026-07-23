@@ -6,8 +6,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <algorithm>
 #include <atomic>
 #include <deque>
+#include <vector>
 
 #define TAG "ASYNC_IMG"
 
@@ -27,6 +29,11 @@ SemaphoreHandle_t& mutex() {
 std::deque<PendingImageDecode>& queue() {
   static std::deque<PendingImageDecode> q;
   return q;
+}
+
+std::vector<std::string>& activeTargets() {
+  static std::vector<std::string> targets;
+  return targets;
 }
 
 std::atomic<bool> gRefreshPending{false};
@@ -50,15 +57,127 @@ class ScopedLock {
   bool owned_;
 };
 
+void finishActive(const std::string& targetBmpPath) {
+  ScopedLock lock;
+  if (lock) {
+    auto& active = activeTargets();
+    active.erase(std::remove(active.begin(), active.end(), targetBmpPath),
+                 active.end());
+  }
+}
+
+bool decodeItem(PendingImageDecode item,
+                const std::function<bool()>& shouldAbort) {
+  const std::string activePath = item.targetBmpPath;
+  auto finish = [&activePath]() { finishActive(activePath); };
+
+  // If the BMP already exists (could happen if a sync decode won a race),
+  // skip and clean up.
+  if (LittleFS.exists(item.targetBmpPath.c_str())) {
+    LittleFS.remove(item.tempJpegPath.c_str());
+    finish();
+    return true;
+  }
+
+  // The foreground renderer can enqueue a path-only job so neither EPUB ZIP
+  // inflation nor JPEG conversion blocks the visible text page.
+  if (!LittleFS.exists(item.tempJpegPath.c_str())) {
+    if (!item.prepareInput) {
+      LOG_INF(TAG, "drain: temp image missing src=%s — skip",
+              item.tempJpegPath.c_str());
+      finish();
+      return true;
+    }
+    if (shouldAbort && shouldAbort()) {
+      finish();
+      return true;
+    }
+    LOG_INF(TAG, "drain: extract start temp=%s",
+            item.tempJpegPath.c_str());
+    const uint32_t extractStartedMs = millis();
+    if (!item.prepareInput(item.tempJpegPath, shouldAbort)) {
+      LittleFS.remove(item.tempJpegPath.c_str());
+      LOG_INF(TAG, "drain: extract stopped temp=%s (%u ms)",
+              item.tempJpegPath.c_str(),
+              static_cast<unsigned>(millis() - extractStartedMs));
+      finish();
+      return true;
+    }
+    LOG_INF(TAG, "drain: extract ok temp=%s (%u ms)",
+            item.tempJpegPath.c_str(),
+            static_cast<unsigned>(millis() - extractStartedMs));
+  }
+
+  if (shouldAbort && shouldAbort()) {
+    LittleFS.remove(item.tempJpegPath.c_str());
+    finish();
+    return true;
+  }
+
+  ImageConvertConfig config;
+  config.maxWidth = item.maxWidth;
+  config.maxHeight = item.maxHeight;
+  config.quickMode = item.quickMode;
+  config.oneBit = item.oneBit;
+  config.logTag = item.logTag ? item.logTag : TAG;
+  config.outputOnLittleFs = true;
+  config.shouldAbort = shouldAbort;
+
+  const std::string partPath = item.targetBmpPath + ".part";
+  LittleFS.remove(partPath.c_str());
+  LOG_INF(TAG, "drain: convert start temp=%s → %s (%ux%u quick=%u)", item.tempJpegPath.c_str(),
+          item.targetBmpPath.c_str(), static_cast<unsigned>(item.maxWidth), static_cast<unsigned>(item.maxHeight),
+          static_cast<unsigned>(item.quickMode));
+  const uint32_t startMs = millis();
+  const bool ok = ImageConverterFactory::convertToBmp(item.tempJpegPath, partPath, config);
+  const uint32_t elapsed = millis() - startMs;
+
+  if (ok) {
+    LittleFS.remove(item.tempJpegPath.c_str());
+    LittleFS.remove(item.targetBmpPath.c_str());
+    if (!LittleFS.rename(partPath.c_str(), item.targetBmpPath.c_str())) {
+      LOG_ERR(TAG, "drain: rename %s -> %s failed", partPath.c_str(), item.targetBmpPath.c_str());
+      LittleFS.remove(partPath.c_str());
+      finish();
+      return true;
+    }
+    LOG_INF(TAG, "drain: decode ok %s (%u ms; remaining=%u)", item.targetBmpPath.c_str(),
+            static_cast<unsigned>(elapsed), static_cast<unsigned>(pendingCount()));
+    gRefreshPending.store(true, std::memory_order_release);
+  } else {
+    LOG_ERR(TAG, "drain: decode failed %s (%u ms)", item.targetBmpPath.c_str(), static_cast<unsigned>(elapsed));
+    LittleFS.remove(item.tempJpegPath.c_str());
+    LittleFS.remove(partPath.c_str());
+  }
+
+  finish();
+  return true;
+}
+
 }  // namespace
 
-bool enqueue(PendingImageDecode item) {
+bool enqueue(PendingImageDecode item, Priority priority) {
   ScopedLock lock;
   if (!lock) {
     LOG_ERR(TAG, "enqueue: failed to acquire lock");
     return false;
   }
   auto& q = queue();
+  for (auto it = q.begin(); it != q.end(); ++it) {
+    if (it->targetBmpPath != item.targetBmpPath) continue;
+    // The existing entry owns its temp input.  Delete only a distinct duplicate
+    // temp file; deleting an identical path would strand the queued item.
+    if (item.tempJpegPath != it->tempJpegPath) {
+      LittleFS.remove(item.tempJpegPath.c_str());
+    }
+    if (priority == Priority::CurrentPage && it != q.begin()) {
+      PendingImageDecode existing = std::move(*it);
+      q.erase(it);
+      q.push_front(std::move(existing));
+    }
+    LOG_DBG(TAG, "enqueue: coalesced duplicate target=%s", item.targetBmpPath.c_str());
+    return true;
+  }
   if (q.size() >= kMaxQueueSize) {
     LOG_INF(TAG, "enqueue: queue full (%u entries) — dropping decode for %s", static_cast<unsigned>(q.size()),
             item.targetBmpPath.c_str());
@@ -69,11 +188,68 @@ bool enqueue(PendingImageDecode item) {
   LOG_INF(TAG, "enqueue: %s → %s (%ux%u, queue=%u)", item.tempJpegPath.c_str(),
           item.targetBmpPath.c_str(), static_cast<unsigned>(item.maxWidth), static_cast<unsigned>(item.maxHeight),
           static_cast<unsigned>(q.size() + 1));
-  q.push_back(std::move(item));
+  if (priority == Priority::CurrentPage) {
+    q.push_front(std::move(item));
+  } else {
+    q.push_back(std::move(item));
+  }
   return true;
 }
 
-bool drainOne() {
+bool promote(const std::string& targetBmpPath) {
+  ScopedLock lock;
+  if (!lock) return false;
+  auto& q = queue();
+  for (auto it = q.begin(); it != q.end(); ++it) {
+    if (it->targetBmpPath != targetBmpPath) continue;
+    if (it != q.begin()) {
+      PendingImageDecode item = std::move(*it);
+      q.erase(it);
+      q.push_front(std::move(item));
+    }
+    return true;
+  }
+  return false;
+}
+
+bool drainTarget(const std::string& targetBmpPath,
+                 const std::function<bool()>& shouldAbort) {
+  PendingImageDecode item;
+  {
+    ScopedLock lock;
+    if (!lock) return false;
+    const auto& active = activeTargets();
+    if (std::find(active.begin(), active.end(), targetBmpPath) != active.end()) {
+      return true;
+    }
+    auto& q = queue();
+    auto it = std::find_if(
+        q.begin(), q.end(), [&targetBmpPath](const PendingImageDecode& candidate) {
+          return candidate.targetBmpPath == targetBmpPath;
+        });
+    if (it == q.end()) return false;
+    item = std::move(*it);
+    q.erase(it);
+    activeTargets().push_back(targetBmpPath);
+  }
+  return decodeItem(std::move(item), shouldAbort);
+}
+
+bool isPendingOrActive(const std::string& targetBmpPath) {
+  ScopedLock lock;
+  if (!lock) return false;
+  const auto& active = activeTargets();
+  if (std::find(active.begin(), active.end(), targetBmpPath) != active.end()) {
+    return true;
+  }
+  const auto& q = queue();
+  return std::any_of(
+      q.begin(), q.end(), [&targetBmpPath](const PendingImageDecode& item) {
+        return item.targetBmpPath == targetBmpPath;
+      });
+}
+
+bool drainOne(const std::function<bool()>& shouldAbort) {
   PendingImageDecode item;
   {
     ScopedLock lock;
@@ -82,72 +258,16 @@ bool drainOne() {
     if (q.empty()) return false;
     item = std::move(q.front());
     q.pop_front();
+    activeTargets().push_back(item.targetBmpPath);
   }
-
-  // Verify the temp file still exists (could have been purged on book close).
-  if (!LittleFS.exists(item.tempJpegPath.c_str())) {
-    LOG_INF(TAG, "drainOne: temp jpeg missing src=%s — skip", item.tempJpegPath.c_str());
-    return true;  // count as "did work" so caller loops to the next entry
-  }
-
-  // If the BMP already exists (could happen if a sync decode raced via cache
-  // hit before we got here), skip and clean up.
-  if (LittleFS.exists(item.targetBmpPath.c_str())) {
-    LittleFS.remove(item.tempJpegPath.c_str());
-    return true;
-  }
-
-  ImageConvertConfig config;
-  config.maxWidth = item.maxWidth;
-  config.maxHeight = item.maxHeight;
-  config.quickMode = item.quickMode;
-  config.oneBit = item.oneBit;     // v2.0.88: route through SmolJpeg when true
-  config.logTag = item.logTag ? item.logTag : TAG;
-  config.outputOnLittleFs = true;
-
-  // v3.10.8 — ATOMIC BMP write.  convertToBmp streams the BMP straight to its
-  // output path, so this BG worker used to write directly to targetBmpPath while
-  // the FOREGROUND streaming render polls `LittleFS.exists(targetBmpPath)` and
-  // reads the file the instant it appears (GfxRendererPaginatorAdapter::drawImage
-  // / resolveImageSize).  On the first view of an image page the foreground then
-  // read a HALF-WRITTEN BMP → random noise over the image; flipping away and back
-  // looked clean only because the file had finished by then.  Decode to a `.part`
-  // file and rename on success: the target appears ONLY when complete, so the
-  // foreground sees either no file (draws nothing; gRefreshPending repaints once
-  // the BMP lands) or the whole file — never a partial one.
-  const std::string partPath = item.targetBmpPath + ".part";
-  LittleFS.remove(partPath.c_str());  // clear any stale partial from a prior abort/boot
-  LOG_INF(TAG, "drainOne: convert start temp=%s → %s (%ux%u quick=%u)", item.tempJpegPath.c_str(),
-          item.targetBmpPath.c_str(), static_cast<unsigned>(item.maxWidth), static_cast<unsigned>(item.maxHeight),
-          static_cast<unsigned>(item.quickMode));
-  const uint32_t startMs = millis();
-  const bool ok = ImageConverterFactory::convertToBmp(item.tempJpegPath, partPath, config);
-  const uint32_t elapsed = millis() - startMs;
-
-  if (ok) {
-    LittleFS.remove(item.tempJpegPath.c_str());
-    LittleFS.remove(item.targetBmpPath.c_str());  // drop any stale/invalid prior BMP
-    if (!LittleFS.rename(partPath.c_str(), item.targetBmpPath.c_str())) {
-      LOG_ERR(TAG, "drainOne: rename %s -> %s failed", partPath.c_str(), item.targetBmpPath.c_str());
-      LittleFS.remove(partPath.c_str());
-      return true;
-    }
-    LOG_INF(TAG, "drainOne: decode ok %s (%u ms; remaining=%u)", item.targetBmpPath.c_str(),
-            static_cast<unsigned>(elapsed), static_cast<unsigned>(pendingCount()));
-    gRefreshPending.store(true, std::memory_order_release);
-  } else {
-    LOG_ERR(TAG, "drainOne: decode failed %s (%u ms)", item.targetBmpPath.c_str(), static_cast<unsigned>(elapsed));
-    LittleFS.remove(item.tempJpegPath.c_str());
-    LittleFS.remove(partPath.c_str());  // drop the half-written temp
-  }
-
-  return true;
+  return decodeItem(std::move(item), shouldAbort);
 }
 
-size_t drainAll() {
+size_t drainAll(const std::function<bool()>& shouldAbort) {
   size_t done = 0;
-  while (drainOne()) {
+  while (drainOne(shouldAbort)) {
     ++done;
+    if (shouldAbort && shouldAbort()) break;
   }
   return done;
 }

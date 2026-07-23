@@ -32,11 +32,13 @@
 #include <HtmlStripper.h>
 #include <MarkerizedPageRender.h>
 #include <MarkerizeChapter.h>
+#include <MarkerStream.h>
 #include <StreamingPaginator.h>
 #endif
 
 #define TAG "EPUB_CHAP"
 
+#include <algorithm>
 #include <memory>   // unique_ptr — heap the MEASURE-walk buffers off the 20 KB task stack
 #include <new>      // std::nothrow
 #include <utility>
@@ -68,19 +70,72 @@ bool ensureCacheDirRecursive(const std::string& path) {
   }
   return LittleFS.mkdir(path.c_str());
 }
+
+snapix::smolport::StreamingPaginatorConfig makeEpubStreamingConfig(
+    GfxRenderer& renderer, const RenderConfig& config, int marginTop,
+    int marginBottom, int marginLeft, int marginRight,
+    const std::string& language) {
+  const uint16_t bodyLineH =
+      static_cast<uint16_t>(renderer.getLineHeight(config.fontId) *
+                            config.lineCompression);
+  snapix::smolport::StreamingPaginatorConfig cfg{};
+  cfg.pageWidth = static_cast<uint16_t>(renderer.getScreenWidth());
+  cfg.pageHeight = static_cast<uint16_t>(renderer.getScreenHeight());
+  cfg.marginTop = static_cast<uint16_t>(marginTop);
+  cfg.marginBottom = static_cast<uint16_t>(marginBottom);
+  cfg.marginLeft = static_cast<uint16_t>(marginLeft);
+  cfg.marginRight = static_cast<uint16_t>(marginRight);
+  cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
+  cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
+  cfg.paragraphSpacing = snapix::smolport::paragraphSpacingForLevel(
+      config.spacingLevel, cfg.bodyLineHeight);
+  cfg.firstLineIndent = snapix::smolport::firstLineIndentForLevel(
+      config.indentLevel, cfg.bodyLineHeight);
+  cfg.hyphenate = true;
+  std::strncpy(cfg.hyphenLang, language.c_str(), sizeof(cfg.hyphenLang) - 1);
+  cfg.hyphenLang[sizeof(cfg.hyphenLang) - 1] = '\0';
+  return cfg;
+}
+
+class IndexedAnchorObserver final : public snapix::smolport::MarkerObserver {
+ public:
+  IndexedAnchorObserver(
+      const std::vector<snapix::smolport::PageBoundarySnapshot>& boundaries,
+      std::vector<std::pair<std::string, uint16_t>>& anchors)
+      : boundaries_(boundaries), anchors_(anchors) {}
+
+  snapix::smolport::ObserverStatus onAnchorAt(
+      const uint8_t* id, uint16_t len, uint32_t sourceOffset) override {
+    while (nextBoundary_ < boundaries_.size() &&
+           boundaries_[nextBoundary_].byteOffset <= sourceOffset) {
+      currentPage_ = boundaries_[nextBoundary_].pageIndex;
+      ++nextBoundary_;
+    }
+    if (id != nullptr && len > 0) {
+      anchors_.emplace_back(
+          std::string(reinterpret_cast<const char*>(id), len), currentPage_);
+    }
+    return snapix::smolport::ObserverStatus::Continue;
+  }
+
+ private:
+  const std::vector<snapix::smolport::PageBoundarySnapshot>& boundaries_;
+  std::vector<std::pair<std::string, uint16_t>>& anchors_;
+  size_t nextBoundary_ = 0;
+  uint16_t currentPage_ = 0;
+};
 #endif
 
 }  // namespace
 
 EpubChapterParser::EpubChapterParser(std::shared_ptr<Epub> epub, int spineIndex, GfxRenderer& renderer,
-                                     const RenderConfig& config, const std::string& imageCachePath,
-                                     const bool quickImageDecode)
+                                     const RenderConfig& config,
+                                     const std::string& imageCachePath)
     : epub_(std::move(epub)),
       spineIndex_(spineIndex),
       renderer_(renderer),
       config_(config),
-      imageCachePath_(imageCachePath),
-      quickImageDecode_(quickImageDecode) {}
+      imageCachePath_(imageCachePath) {}
 
 EpubChapterParser::~EpubChapterParser() = default;
 
@@ -88,11 +143,13 @@ void EpubChapterParser::reset() {
   initialized_ = false;
   hasMore_ = true;
   chapterBasePath_.clear();
-  // v2.0.186 — anchorMap_.clear() removed alongside the field; see header.
+  anchorMap_.clear();
   // v2.0.132 — drop any in-flight short-circuit state too.
   shortCircuitActive_ = false;
   shortCircuitTotalPages_ = 0;
   shortCircuitNextPage_ = 0;
+  bootstrapPageEmitted_ = false;
+  awaitingIndexBuild_ = false;
   // v2.0.161 — also reset markerize-once guard so a fresh parser
   // instance re-evaluates the markers cache (file-existence check
   // inside tryMarkerizeChapter still short-circuits on disk hit).
@@ -105,11 +162,81 @@ bool EpubChapterParser::canResume() const {
   // extract pipeline); the cache controller treats canResume()==true as
   // "hot-extend OK, no need to cold-rebuild", which is exactly what the
   // mid-emit short-circuit wants.
-  return shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_;
+  return awaitingIndexBuild_ ||
+         (shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_);
 }
 
-// v2.0.186 — getAnchorMap() override deleted; inherits ContentParser's
-// default empty-static return.  See header for rationale.
+bool EpubChapterParser::rebuildAnchorMapFromCachedIndex() {
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  auto cache =
+      snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
+
+  std::vector<uint8_t> idxPayload;
+  if (!cache.readSegment(snapix::unifiedcache::Kind::Idx,
+                         static_cast<uint16_t>(spineIndex_), idxPayload)) {
+    return false;
+  }
+
+  const auto cfg = makeEpubStreamingConfig(
+      renderer_, config_, streamingViewportMarginTop_,
+      streamingViewportMarginBottom_, streamingViewportMarginLeft_,
+      streamingViewportMarginRight_, epub_->getLanguage());
+  const uint16_t configHash = snapix::smolport::computePageIndexConfigHash(
+      cfg, config_.fontId, config_.fakeBold);
+
+  std::vector<snapix::smolport::PageBoundarySnapshot> boundaries;
+  if (!snapix::smolport::deserializePageIndex(
+          idxPayload.data(), idxPayload.size(), configHash, boundaries)) {
+    return false;
+  }
+
+  File markerFile;
+  size_t markerBytes = 0;
+  if (!cache.openSegmentReader(snapix::unifiedcache::Kind::Markers,
+                               static_cast<uint16_t>(spineIndex_), markerFile,
+                               &markerBytes) ||
+      markerBytes == 0) {
+    return false;
+  }
+
+  anchorMap_.clear();
+  IndexedAnchorObserver observer(boundaries, anchorMap_);
+  snapix::smolport::MarkerStreamReader reader(observer);
+  constexpr size_t kScanBufferBytes = 4096;
+  std::unique_ptr<uint8_t[]> scanBuffer(
+      new (std::nothrow) uint8_t[kScanBufferBytes]);
+  if (!scanBuffer) {
+    markerFile.close();
+    return false;
+  }
+
+  size_t remaining = markerBytes;
+  bool ok = true;
+  while (remaining > 0) {
+    const size_t want = std::min(remaining, kScanBufferBytes);
+    const int got = markerFile.read(scanBuffer.get(), want);
+    if (got <= 0 ||
+        !reader.feed(scanBuffer.get(), static_cast<size_t>(got))) {
+      ok = false;
+      break;
+    }
+    remaining -= static_cast<size_t>(got);
+  }
+  if (ok) ok = reader.finish();
+  markerFile.close();
+
+  if (!ok) {
+    anchorMap_.clear();
+    return false;
+  }
+  LOG_INF(TAG,
+          "[CONTENT][EPUB] anchor map rebuilt from idx spine=%d anchors=%u",
+          spineIndex_, static_cast<unsigned>(anchorMap_.size()));
+  return !anchorMap_.empty();
+#else
+  return false;
+#endif
+}
 
 // =============================================================================
 // v2.0.161 — `prepareChapterHtml` is deleted.  See file-scope changelog for
@@ -130,7 +257,7 @@ bool EpubChapterParser::canResume() const {
 // ~200-500 ms per cold extend in v3_alpha; running it uninterrupted
 // is preferable to never producing the sidecar.
 // =============================================================================
-bool EpubChapterParser::tryMarkerizeChapter() {
+bool EpubChapterParser::tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& cache) {
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
   if (markerizeAttempted_) return true;
   markerizeAttempted_ = true;
@@ -138,7 +265,6 @@ bool EpubChapterParser::tryMarkerizeChapter() {
   // v2.0.167 — markers now live as a UnifiedCache::Markers segment in
   // <bookCachePath>/streaming.cache instead of per-spine <markers>/<N>.bin
   // files.  Cache-hit check: ask UnifiedCache for the segment size.
-  auto cache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
   size_t existingSize = 0;
   if (cache.segmentSize(snapix::unifiedcache::Kind::Markers,
                          static_cast<uint16_t>(spineIndex_), &existingSize)) {
@@ -153,10 +279,10 @@ bool EpubChapterParser::tryMarkerizeChapter() {
   //
   // Heap budget during this fast-path markerize:
   //   * 32 KB uzlib dict (inside InflateReader, freed when zipStream dies)
-  //   * 8 KB SD read buffer (inside ZipItemReader, freed in dtor)
+  //   * 4 KB SD read buffer (inside ZipItemReader, freed in dtor)
   //   * 4 KB markerize chunk buffer (stack-resident)
   //   * ~600 B HtmlStripper state (stack-resident inside markerizeChapter)
-  // Total ~45 KB transient, all freed before this method returns.  The
+  // Total ~41 KB transient, all freed before this method returns.  The
   // old path needed ~53 KB transient for extract (32 KB dict + 16 KB
   // I/O + state) PLUS a second pass over the just-written temp file for
   // markerize — so this is both lower-peak AND single-pass.
@@ -174,12 +300,21 @@ bool EpubChapterParser::tryMarkerizeChapter() {
   // dictBuffer = nullptr → InflateReader heap-allocates its own 32 KB.
   // Won't race with framebuffer (v2.0.155 lesson) and we don't pay a
   // permanent BSS reservation (v2.0.156 lesson).
-  auto zipStream = epub_->openItemStream(spineItem.href, 8192, /*dictBuffer=*/nullptr);
+  const size_t heapBeforeZip =
+      heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  // The hardware profile showed a 4.9 KB historical minimum while opening a
+  // cold EPUB chapter.  Match the compressed-input buffer to the 4 KB
+  // markerizer chunk and recover 4 KB of peak headroom; the modest increase
+  // in ZIP refill calls is preferable to operating within 5 KB of OOM.
+  auto zipStream =
+      epub_->openItemStream(spineItem.href, 4096, /*dictBuffer=*/nullptr);
   if (!zipStream) {
     LOG_ERR(TAG, "[CONTENT][EPUB] markerize open ZIP stream failed spine=%d href=%s", spineIndex_,
             spineItem.href.c_str());
     return false;
   }
+  const size_t heapWithZip =
+      heap_caps_get_free_size(MALLOC_CAP_8BIT);
 
   // v2.0.167 — write markers as a deferred-streaming UnifiedCache segment.
   // The markerize pass discovers payload size only after HtmlStripper finishes,
@@ -209,6 +344,13 @@ bool EpubChapterParser::tryMarkerizeChapter() {
       });
 
   zipStream.reset();  // free uzlib dict + ZIP file handle
+  const size_t heapAfterZip =
+      heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  LOG_INF(TAG,
+          "[PERF] markerize ZIP heap spine=%d before=%u active=%u after=%u",
+          spineIndex_, static_cast<unsigned>(heapBeforeZip),
+          static_cast<unsigned>(heapWithZip),
+          static_cast<unsigned>(heapAfterZip));
 
   if (!ok || status != snapix::smolport::MarkerizeStatus::Success) {
     LOG_ERR(TAG,
@@ -242,6 +384,11 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   // setup.  Cache's extend() loop hits us repeatedly with batches of
   // maxPages until hasMore_ goes false.
   if (shortCircuitActive_) {
+    // Do not scan/extract chapter images here.  This branch is the critical
+    // path for restoring a saved page, and image-heavy chapters can contain
+    // hundreds of slow ZIP entries.  The foreground streaming renderer queues
+    // only images it actually encounters; ReaderAsync decodes those after the
+    // text page is visible.
     onPageComplete_ = onPageComplete;
     maxPages_ = maxPages;
     pagesCreated_ = 0;
@@ -274,8 +421,6 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   // markers + idx, then short-circuit emit empty Pages from idx.  If a
   // future build needs a different (non-streaming) ingestion strategy,
   // it goes here.
-  (void)shouldAbort;  // unused in the streaming-only flow
-
   // INIT PATH: first call — markerize, build idx, short-circuit emit.
   // Hyphenation language is still set so HtmlStripper can hyphenate
   // long words during the markerize walk (HtmlStripper consults the
@@ -307,9 +452,71 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   // the corner cases (e.g. ZIP read error, HtmlStripper choke).
   // In default env (SNAPIX_MARKERIZER=0) this is a stub and we go
   // straight to the slow path.
-  (void)tryMarkerizeChapter();
+  // Keep one directory snapshot for this parse operation.  Writes update the
+  // snapshot in place, and the object is released before parsePages returns.
+  auto ucache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
+  (void)tryMarkerizeChapter(ucache);
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  const auto streamingCfg = makeEpubStreamingConfig(
+      renderer_, config_, streamingViewportMarginTop_,
+      streamingViewportMarginBottom_, streamingViewportMarginLeft_,
+      streamingViewportMarginRight_, epub_->getLanguage());
+  const uint16_t streamingConfigHash =
+      snapix::smolport::computePageIndexConfigHash(
+          streamingCfg, config_.fontId, config_.fakeBold);
+
+  auto hasCurrentIndex = [&]() -> bool {
+    File idxProbe;
+    size_t idxProbeSize = 0;
+    if (!ucache.openSegmentReader(snapix::unifiedcache::Kind::Idx,
+                                  static_cast<uint16_t>(spineIndex_), idxProbe,
+                                  &idxProbeSize)) {
+      return false;
+    }
+    uint8_t h[8] = {};
+    const bool readOk =
+        idxProbeSize >= sizeof(h) &&
+        idxProbe.read(h, sizeof(h)) == static_cast<int>(sizeof(h));
+    idxProbe.close();
+    if (!readOk) return false;
+    const bool magicOk =
+        h[0] == 0x53 && h[1] == 0x50 && h[2] == 0x49 && h[3] == 0x58;
+    const uint16_t version =
+        static_cast<uint16_t>(h[4]) | (static_cast<uint16_t>(h[5]) << 8);
+    const uint16_t configHash =
+        static_cast<uint16_t>(h[6]) | (static_cast<uint16_t>(h[7]) << 8);
+    return magicOk && version == snapix::smolport::kPageIndexVersion &&
+           configHash == streamingConfigHash;
+  };
+
+  // A cold TOC jump requests exactly one page so the target chapter can be
+  // displayed while its exact anchor is resolved.  The old flow still ran the
+  // full MEASURE walk before emitting that page (80.9 s in the hardware log).
+  // Once markerization has atomically published a readable stream, page 0 can
+  // render without an idx; leave the parser resumable so the next worker pass
+  // builds the complete index and anchor map in the background.
+  size_t markerBytesForBootstrap = 0;
+  const bool markersReady =
+      ucache.segmentSize(snapix::unifiedcache::Kind::Markers,
+                         static_cast<uint16_t>(spineIndex_),
+                         &markerBytesForBootstrap) &&
+      markerBytesForBootstrap > 0;
+  if (maxPages == 1 && !bootstrapPageEmitted_ && markersReady &&
+      !hasCurrentIndex()) {
+    onPageComplete(std::unique_ptr<Page>(new Page));
+    bootstrapPageEmitted_ = true;
+    awaitingIndexBuild_ = true;
+    initialized_ = true;
+    hasMore_ = true;
+    LOG_INF(TAG,
+            "[CONTENT][EPUB] [STREAM] bootstrap page emitted before idx "
+            "spine=%d markerBytes=%u",
+            spineIndex_, static_cast<unsigned>(markerBytesForBootstrap));
+    return true;
+  }
+  awaitingIndexBuild_ = false;
+
   // v2.0.130 R4.c — build `.idx` upfront via MEASURE-only walk so
   // R4.b short-circuit fires on FIRST visit too, not just on repeat
   // visits.  Without this step, the very first cold-extend of a
@@ -337,7 +544,6 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   do {
     // v2.0.167 — markers + idx in UnifiedCache.  R4.c only runs if markers
     // exist AND idx doesn't (idx is built once per (spine,config) tuple).
-    auto ucache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
     size_t markersSize = 0;
     if (!ucache.segmentSize(snapix::unifiedcache::Kind::Markers,
                              static_cast<uint16_t>(spineIndex_), &markersSize)) {
@@ -353,23 +559,8 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // the writeSegment at the end of this block appends a fresh frame that
     // supersedes the stale one (UnifiedCache is an append-log, latest frame
     // per key wins).  Probe is cheap — read only the 6-byte magic+version.
-    {
-      File idxProbe;
-      size_t idxProbeSize = 0;
-      bool idxCurrent = false;
-      if (ucache.openSegmentReader(snapix::unifiedcache::Kind::Idx,
-                                   static_cast<uint16_t>(spineIndex_), idxProbe, &idxProbeSize)) {
-        uint8_t h[6];
-        if (idxProbeSize >= sizeof(h) &&
-            idxProbe.read(h, sizeof(h)) == static_cast<int>(sizeof(h))) {
-          const bool magicOk = h[0] == 0x53 && h[1] == 0x50 && h[2] == 0x49 && h[3] == 0x58;
-          const uint16_t ver = static_cast<uint16_t>(h[4]) | (static_cast<uint16_t>(h[5]) << 8);
-          idxCurrent = magicOk && ver == snapix::smolport::kPageIndexVersion;
-        }
-        idxProbe.close();
-      }
-      if (idxCurrent) break;  // up-to-date idx exists — R4.b will short-circuit on it
-      // Absent or stale — fall through and (re)build the idx below.
+    if (hasCurrentIndex()) {
+      break;  // up-to-date idx exists — R4.b will short-circuit on it
     }
     File mf;
     size_t markersStreamSize = 0;
@@ -385,38 +576,9 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // (b) the pageCount we write here will differ from what the renderer
     // produces — R4.b would then emit empty Pages for nonexistent pages
     // and the legacy fallback path renders them as white screen.
-    // v3.5.1 — apply lineCompression (Line Spacing) so the MEASURE walk's page
-    // boundaries match the render path; previously raw height ignored the
-    // setting for EPUB.  Mirrors ReaderState's render-time cfg.
-    const uint16_t bodyLineH =
-        static_cast<uint16_t>(renderer_.getLineHeight(config_.fontId) * config_.lineCompression);
-    snapix::smolport::StreamingPaginatorConfig cfg{};
-    cfg.pageWidth = static_cast<uint16_t>(renderer_.getScreenWidth());
-    cfg.pageHeight = static_cast<uint16_t>(renderer_.getScreenHeight());
-    cfg.marginTop = static_cast<uint16_t>(streamingViewportMarginTop_);
-    cfg.marginBottom = static_cast<uint16_t>(streamingViewportMarginBottom_);
-    cfg.marginLeft = static_cast<uint16_t>(streamingViewportMarginLeft_);
-    cfg.marginRight = static_cast<uint16_t>(streamingViewportMarginRight_);
-    cfg.bodyLineHeight = bodyLineH > 0 ? bodyLineH : 24;
-    cfg.headingLineHeight = static_cast<uint16_t>(cfg.bodyLineHeight * 3 / 2);
-    // v3.5.2 — Text Layout (Compact/Standard/Large) drives paragraph spacing
-    // and first-line indent, instead of hardcoded values that ignored the
-    // setting.  indentLevel 0/2/3 → indent 0 / 1 / 1.5 line heights;
-    // spacingLevel 0/1/3 → para gap 0 / ¼ / 1 line height.  MUST match
-    // ReaderState's render-time cfg (both derive from the same settings).
-    cfg.paragraphSpacing =
-        snapix::smolport::paragraphSpacingForLevel(config_.spacingLevel, cfg.bodyLineHeight);
-    cfg.firstLineIndent =
-        snapix::smolport::firstLineIndentForLevel(config_.indentLevel, cfg.bodyLineHeight);
-    // v3.3.0 — hyphenation: dictionary from the EPUB's declared language
-    // (setLanguage strips region subtags + lowercases; empty → no hyphenation,
-    // deterministically).  MUST match ReaderState's render-time cfg.
-    cfg.hyphenate = true;
-    {
-      const std::string& lang = epub_->getLanguage();
-      std::strncpy(cfg.hyphenLang, lang.c_str(), sizeof(cfg.hyphenLang) - 1);
-      cfg.hyphenLang[sizeof(cfg.hyphenLang) - 1] = '\0';
-    }
+    // Shared with the compatibility anchor scanner so an existing idx is
+    // accepted only for the exact same viewport/font/layout configuration.
+    const auto& cfg = streamingCfg;
 
     // v2.0.136 — diagnostic log: dump paginator config so we can verify
     // it matches what ReaderState::renderPageContents uses at render
@@ -488,14 +650,45 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     auto captureFn = [&captured](const snapix::smolport::PageBoundarySnapshot& s) {
       captured.push_back(s);
     };
+    anchorMap_.clear();
+    auto captureAnchorFn =
+        [this](const uint8_t* id, uint16_t len, uint16_t pageIndex) {
+          if (id == nullptr || len == 0) return;
+          anchorMap_.emplace_back(
+              std::string(reinterpret_cast<const char*>(id), len), pageIndex);
+        };
 
     // Target page UINT16_MAX is never reached; walks the whole
     // stream in draw-suppressed mode and fires the callback at
     // every page boundary.  Returns PageNotFound when EOF hits.
     snapix::smolport::MarkerizedRenderStats stats{};
-    (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf.get(), kChunkBufBytes,
-                                                  UINT16_MAX, {}, &stats, {}, captureFn);
+    const auto indexStatus = snapix::smolport::renderMarkerizedPage(
+        paginator, readFn, chunkBuf.get(), kChunkBufBytes, UINT16_MAX,
+        shouldAbort, &stats, {}, captureFn, captureAnchorFn);
     mf.close();
+
+    if (indexStatus == snapix::smolport::MarkerizedRenderResult::Aborted) {
+      // Never publish a prefix as a complete idx.  Preserve the bootstrap
+      // parser state so a later idle worker can restart the index walk while
+      // the already-visible page remains usable.
+      awaitingIndexBuild_ = bootstrapPageEmitted_;
+      initialized_ = bootstrapPageEmitted_;
+      hasMore_ = true;
+      anchorMap_.clear();
+      LOG_INF(TAG,
+              "[CONTENT][EPUB] [STREAM] idx build cancelled spine=%d "
+              "bytes=%u boundaries=%u",
+              spineIndex_, static_cast<unsigned>(stats.bytesConsumed),
+              static_cast<unsigned>(captured.size()));
+      return false;
+    }
+    if (indexStatus == snapix::smolport::MarkerizedRenderResult::ReadError) {
+      anchorMap_.clear();
+      LOG_ERR(TAG,
+              "[CONTENT][EPUB] [STREAM] idx build read error spine=%d",
+              spineIndex_);
+      break;
+    }
 
     // v2.0.206 — page-count semantics: `captured` holds the OVERFLOW page
     // boundaries only (page N filled → roll into page N+1).  A chapter
@@ -525,9 +718,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // Serialize captured boundaries into `.idx` via SmolPort helper.
     // Use the same config-hash as we just used so the streaming
     // render path can hit our upfront-built index without rebuild.
-    const uint16_t configHash =
-        snapix::smolport::computePageIndexConfigHash(cfg, config_.fontId,
-                                                      config_.fakeBold);
+    const uint16_t configHash = streamingConfigHash;
     // v3.10.2 — HEAP the idx serialize buffer (was a 4 KB stack array with a
     // `needed > 4096` cap that SILENTLY dropped the idx for >~500-page chapters,
     // forcing a render-time cold walk).  Heap `needed` exactly (nothrow): no
@@ -551,8 +742,10 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
       break;
     }
     LOG_INF(TAG,
-            "[CONTENT][EPUB] [STREAM] idx built upfront spine=%d pages=%u bytes=%u (skipping legacy parser)",
+            "[CONTENT][EPUB] [STREAM] idx built upfront spine=%d pages=%u "
+            "anchors=%u bytes=%u (skipping legacy parser)",
             spineIndex_, static_cast<unsigned>(captured.size() + 1),
+            static_cast<unsigned>(anchorMap_.size()),
             static_cast<unsigned>(stats.bytesConsumed));
   } while (false);
 #endif
@@ -586,7 +779,6 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // v2.0.167 — read idx from UnifiedCache::Idx segment.  Only need
     // the 12-byte header (magic + version + pageCount), not the body —
     // use a streaming reader so we don't allocate for the full segment.
-    auto ucache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
     File idxF;
     size_t idxSegSize = 0;
     if (!ucache.openSegmentReader(snapix::unifiedcache::Kind::Idx,
@@ -609,6 +801,10 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // bumped 1→2 to invalidate pre-fix paginator's offsets).
     const uint16_t version = static_cast<uint16_t>(header[4]) | (static_cast<uint16_t>(header[5]) << 8);
     if (version != snapix::smolport::kPageIndexVersion) break;
+    const uint16_t configHash =
+        static_cast<uint16_t>(header[6]) |
+        (static_cast<uint16_t>(header[7]) << 8);
+    if (configHash != streamingConfigHash) break;
     // Boundary count at offset 8-9 (uint16 LE).  v2.0.206 — this is the
     // number of OVERFLOW page rolls, i.e. (true page count - 1): page 0 is
     // implicit and the final partial page fires no boundary.  Reconstitute
@@ -632,7 +828,12 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     hitMaxPages_ = false;
     shortCircuitActive_ = true;
     shortCircuitTotalPages_ = totalPages;
-    shortCircuitNextPage_ = 0;
+    // Page 0 may already be present in the PageCache from the cold-TOC
+    // bootstrap pass.  Continue at page 1 so hot extend never appends a
+    // duplicate placeholder and shifts every later page by one.
+    shortCircuitNextPage_ =
+        bootstrapPageEmitted_ ? std::min<uint16_t>(1, totalPages) : 0;
+    bootstrapPageEmitted_ = false;
 
     while (shortCircuitNextPage_ < shortCircuitTotalPages_) {
       if (maxPages > 0 && pagesCreated_ >= maxPages) break;
@@ -655,7 +856,10 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
             spineIndex_, static_cast<unsigned>(pagesCreated_),
             static_cast<unsigned>(shortCircuitNextPage_),
             static_cast<unsigned>(shortCircuitTotalPages_), static_cast<unsigned>(hasMore_));
-    return pagesCreated_ > 0;
+    // A genuinely one-page chapter reaches completion without appending a
+    // page here because bootstrap already emitted its sole page.  Returning
+    // true lets PageCache mark the hot extend complete with zero growth.
+    return pagesCreated_ > 0 || !hasMore_;
   } while (false);
 #endif
 

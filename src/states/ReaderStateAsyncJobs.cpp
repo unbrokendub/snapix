@@ -5,6 +5,7 @@
 #include <Fb2.h>
 #include <Fb2Parser.h>
 #include <GfxRenderer.h>
+#include <HtmlParser.h>
 #include <LittleFS.h>  // v2.0.61: anchors file moved to LittleFS
 #include <Logging.h>
 #include <MarkdownParser.h>
@@ -93,7 +94,7 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
         if (!parser_ || parserSpineIndex_ != activeSpineForCache) {
           if (!promoteLookaheadParser(activeSpineForCache)) {
             auto* epubParser = new EpubChapterParser(provider->getEpubShared(), activeSpineForCache, renderer_, config,
-                                                     imageCachePath, true);
+                                                     imageCachePath);
             // v2.0.131 — plumb real viewport margins so R4.c .idx
             // build uses the same paginator config as the render path.
             epubParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
@@ -147,12 +148,18 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
         }
       }
     } else if (type == ContentType::Html && !(shouldAbort && shouldAbort())) {
-      // v2.0.162 — standalone HTML reading deleted along with the
-      // legacy ChapterHtmlSlimParser pipeline.  Opening an .html file
-      // now results in no parser → no pages → reader error.  Was a
-      // niche feature; restoring it would require running the file
-      // through the markerize pipeline (HtmlStripper directly on the
-      // SD file instead of a ZIP stream).
+      cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
+      if (!parser_) {
+        const auto* htmlProv = coreRef.content.asHtml();
+        const Html* html = htmlProv ? htmlProv->getHtml() : nullptr;
+        const std::string parserPath = html ? html->getPath() : std::string(contentPath_);
+        const std::string htmlCachePath = html ? html->getCachePath() : std::string();
+        auto* htmlParser = new HtmlParser(parserPath, htmlCachePath, renderer_, config);
+        htmlParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft,
+                                         vp.marginRight);
+        parser_.reset(htmlParser);
+        parserSpineIndex_ = 0;
+      }
     } else if (type == ContentType::Txt && !(shouldAbort && shouldAbort())) {
       cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
       if (!parser_) {
@@ -220,9 +227,8 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
 
     if (shouldRefreshCurrentPageAfterUpdate && pageCache_ && pageCache_->path() == cachePath &&
         request.position.currentSectionPage < static_cast<int>(pageCache_->pageCount())) {
-      pendingBackgroundEpubRefresh_ = true;
-      pendingBackgroundEpubRefreshSpine_ = request.position.currentSpineIndex;
-      pendingBackgroundEpubRefreshPage_ = request.position.currentSectionPage;
+      asyncJobs_.pendingRefresh().publish(request.position.currentSpineIndex,
+                                          request.position.currentSectionPage);
       LOG_INF(TAG, "[CACHE] scheduled repaint after background cache update spine=%d page=%d",
               request.position.currentSpineIndex, request.position.currentSectionPage);
     }
@@ -287,11 +293,10 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
           // Force a current-page repaint so newly decoded images replace the
           // placeholder on the visible page (if any).  Reuses the same
           // pending-refresh slot as the EPUB cache rewrite path.
-          pendingBackgroundEpubRefresh_ = true;
-          pendingBackgroundEpubRefreshSpine_ = request.position.currentSpineIndex;
-          pendingBackgroundEpubRefreshPage_ = request.position.currentSectionPage < 0
+          asyncJobs_.pendingRefresh().publish(request.position.currentSpineIndex,
+                                              request.position.currentSectionPage < 0
                                                   ? 0
-                                                  : request.position.currentSectionPage;
+                                                  : request.position.currentSectionPage);
           LOG_INF(TAG, "[CACHE] scheduled repaint after FB2 image work spine=%d page=%d",
                   request.position.currentSpineIndex, request.position.currentSectionPage);
         }
@@ -314,18 +319,17 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
         LOG_INF(TAG, "[CACHE] draining %u pending EPUB image decode(s)",
                 static_cast<unsigned>(pendingBefore));
         size_t drained = 0;
-        while (snapix::pendingImage::drainOne()) {
+        while (snapix::pendingImage::drainOne(shouldAbort)) {
           ++drained;
           if (shouldAbort && shouldAbort()) break;
           vTaskDelay(1);
         }
         if (drained > 0) {
           didBackgroundWork = true;
-          pendingBackgroundEpubRefresh_ = true;
-          pendingBackgroundEpubRefreshSpine_ = request.position.currentSpineIndex;
-          pendingBackgroundEpubRefreshPage_ = request.position.currentSectionPage < 0
+          asyncJobs_.pendingRefresh().publish(request.position.currentSpineIndex,
+                                              request.position.currentSectionPage < 0
                                                   ? 0
-                                                  : request.position.currentSectionPage;
+                                                  : request.position.currentSectionPage);
           LOG_INF(TAG, "[CACHE] drained %u image(s); scheduled repaint spine=%d page=%d",
                   static_cast<unsigned>(drained), request.position.currentSpineIndex,
                   request.position.currentSectionPage);
@@ -419,7 +423,7 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
       parser = static_cast<EpubChapterParser*>(state.parser.get());
     } else {
       state.parser.reset();
-      auto* epubParser = new EpubChapterParser(epub, request.targetSpine, renderer_, config, imageCachePath, true);
+      auto* epubParser = new EpubChapterParser(epub, request.targetSpine, renderer_, config, imageCachePath);
       // v2.0.131 — plumb real viewport margins so R4.c .idx build uses
       // the same paginator config as the render path.
       epubParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
@@ -430,9 +434,15 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
 
     PageCache cache(cachePath);
     bool cacheLoaded = cache.load(config);
-    if (cacheLoaded && !LittleFS.exists((cachePath + ".anchors").c_str())) {
-      cacheLoaded = false;
-      cache.clear();
+
+    // v3.11.2 and older streaming EPUB caches contain a valid page idx but no
+    // anchor map: the legacy map was removed before the streaming replacement
+    // was wired in.  Recover it cheaply by scanning marker offsets against the
+    // existing idx.  Never discard a valid page cache merely because its
+    // optional .anchors sidecar is absent.
+    if (!LittleFS.exists((cachePath + ".anchors").c_str()) &&
+        parser->rebuildAnchorMapFromCachedIndex()) {
+      cacheController_.saveAnchorMap(*parser, cachePath);
     }
 
     auto anchorResolved = [&]() -> bool {
@@ -506,7 +516,50 @@ void ReaderState::runTocJumpJob(const reader::ReaderAsyncJobsController::TocJump
       }
 
       saveAnchorMap(*parser, cachePath);
-      if (anchorResolved() || !cache.isPartial()) {
+
+      // On a cold spine the first parse now emits page 0 immediately after
+      // markerization and deliberately defers the whole-chapter idx build.
+      // End this worker invocation so the main task can load/render that page;
+      // processPendingTocJump schedules the resumable idx+anchor pass after
+      // the display hand-off.
+      if (firstBatch && cache.pageCount() > 0) {
+        LOG_INF(TAG,
+                "[ASYNC] TOC worker yielded after first visible page "
+                "spine=%d partial=%u",
+                request.targetSpine,
+                static_cast<unsigned>(cache.isPartial()));
+        return;
+      }
+
+      const int resolvedAnchorPage =
+          targetAnchor.empty()
+              ? (cache.pageCount() > 0 ? 0 : -1)
+              : loadAnchorPage(cachePath, targetAnchor);
+      if (resolvedAnchorPage >= 0) {
+        // The full idx walk discovers every anchor before R4.b emits its
+        // placeholder pages.  Materialize through the target in this same
+        // worker invocation so main can jump directly to the selected page
+        // instead of showing page 25 and launching many tiny follow-up fills.
+        while (cache.isPartial() &&
+               cache.pageCount() <= static_cast<uint16_t>(resolvedAnchorPage) &&
+               parser->canResume() && !(shouldAbort && shouldAbort())) {
+          const uint16_t before = cache.pageCount();
+          const uint16_t needed = static_cast<uint16_t>(
+              resolvedAnchorPage + 1 - static_cast<int>(before));
+          if (!cache.extend(*parser, needed, shouldAbort) ||
+              cache.pageCount() == before) {
+            break;
+          }
+        }
+        LOG_INF(TAG,
+                "[ASYNC] TOC anchor materialized spine=%d anchor=%s page=%d "
+                "cached=%u",
+                request.targetSpine, targetAnchor.c_str(), resolvedAnchorPage,
+                static_cast<unsigned>(cache.pageCount()));
+        break;
+      }
+
+      if (!cache.isPartial()) {
         break;
       }
 
@@ -621,7 +674,7 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
         // Promoted existing resumable parser for this spine.
       } else if (isEpub) {
         auto* epubParser = new EpubChapterParser(provider->getEpubShared(), request.targetSpine, renderer_, config,
-                                                 imageCachePath, true);
+                                                 imageCachePath);
         // v2.0.131 — plumb real viewport margins (see background-cache site).
         epubParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
         parser_.reset(epubParser);
@@ -660,8 +713,15 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
         parser_.reset(mdParser);
         parserSpineIndex_ = 0;
       } else if (type == ContentType::Html) {
-        // v2.0.162 — HtmlParser deleted; see comment in the analogous
-        // branch in scheduleBackgroundCacheJob above.
+        const auto* htmlProv = coreRef.content.asHtml();
+        const Html* html = htmlProv ? htmlProv->getHtml() : nullptr;
+        const std::string parserPath = html ? html->getPath() : std::string(contentPath_);
+        const std::string htmlCachePath = html ? html->getCachePath() : std::string();
+        auto* htmlParser = new HtmlParser(parserPath, htmlCachePath, renderer_, config);
+        htmlParser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft,
+                                         vp.marginRight);
+        parser_.reset(htmlParser);
+        parserSpineIndex_ = 0;
       } else if (type == ContentType::Txt) {
         // v2.0.189 — route through Txt's effective content path; see
         // matching comment in the background-cache path above.
@@ -712,12 +772,23 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
       // heap is below the threshold so we don't OOM during cold-extend
       // on memory-constrained TXT sessions (which is the very scenario
       // where `Min Free 4568 bytes` appears in v2.0.190 logs).
-      if (isEpub || type == ContentType::Txt || type == ContentType::Markdown) {
+      if (isEpub || type == ContentType::Txt || type == ContentType::Markdown ||
+          type == ContentType::Html) {
         const reader::HeapState heap = reader::readHeapState();
         const int speculativeHeadroom = reader::isHeapTight(heap)
                                             ? 0
                                             : static_cast<int>(reader::kEpubInteractivePageFillHeadroomPages);
         const int desiredPages = std::max(1, remainingPages + speculativeHeadroom);
+        if (isEpub && parser_ && parser_->canResume()) {
+          // EpubChapterParser::canResume() means the full .idx is already
+          // available and parsePages() only emits empty placeholder Pages.
+          // A larger batch is therefore both heap-cheap and dramatically
+          // faster for restoring e.g. page 39: one LUT rewrite instead of
+          // seven five-page hot extends.
+          return static_cast<uint16_t>(
+              std::min<int>(desiredPages,
+                            reader::kEpubIndexedPageFillBatchPages));
+        }
         return static_cast<uint16_t>(std::min<int>(desiredPages, defaultBatch));
       }
       if (remainingPages <= 1) {

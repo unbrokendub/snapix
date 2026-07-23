@@ -17,16 +17,16 @@
 //
 //   Followed by 0+ Frames (variable length):
 //     kind        u8      (one of Kind enum below)
-//     flags       u8      (bit 0 = tombstone — segment was deleted)
+//     flags       u8      (bit 0 = tombstone, bit 1 = incomplete)
 //     key         u16     (spineIndex / sectionIndex; 0xFFFF for global)
 //     size        u32     (payload bytes following this header)
 //     payload[size]       (segment bytes)
 //
 // Updates are append-only: writing a new value for an existing (kind, key)
 // appends a new frame.  The latest frame for a given key wins.  Old frames
-// become garbage; compaction is manual (rewrite-file pass) and not yet
-// implemented — for typical reading sessions garbage stays well under 100 KB
-// even on long sessions, well within LittleFS budget.
+// become garbage.  Compaction rewrites the latest live frames once the file
+// has enough reclaimable space; a recoverable `.bak` swap protects the old
+// file until the compacted replacement has been validated.
 //
 // Directory is built in memory on first open by sequentially scanning all
 // frames.  Subsequent reads do a single-table lookup → seek → read.
@@ -51,7 +51,10 @@ namespace snapix::unifiedcache {
 //   v3: v3.10.7 — more basic block tags emit breaks (HTML5 semantic blocks,
 //        tables, definition lists) + FB2 now falls through to the common dispatch.
 //   v2: v3.10.6 — HTML <h1>-<h6> headings emit a break + centering.
-constexpr uint16_t kFormatVersion = 3;
+// v4: standalone Markdown/HTML switched from one whole-file Markers frame to
+// consecutive progressive chunks.  Wipe v3 so a legacy key-0 frame is never
+// mistaken for progressive chunk 0.
+constexpr uint16_t kFormatVersion = 4;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kFrameHeaderSize = 8;
 constexpr uint16_t kGlobalKey = 0xFFFF;
@@ -59,6 +62,10 @@ constexpr uint16_t kGlobalKey = 0xFFFF;
 // as deleted.  Reading code skips tombstoned frames when building the
 // directory; writes that supersede a tombstoned key revive the segment.
 constexpr uint8_t kFlagTombstone = 0x01;
+// Deferred streaming writes publish the frame header before its final payload
+// size is known.  The incomplete bit stays set until size patch + flush
+// succeeds; loadDirectory truncates at an incomplete frame after a reset.
+constexpr uint8_t kFlagIncomplete = 0x02;
 
 enum class Kind : uint8_t {
   Markers = 1,   // marker stream sidecar (per-spine)
@@ -71,32 +78,16 @@ struct DirectoryEntry {
   uint16_t key;
   uint32_t offset;  // file offset of the frame's payload (after frame header)
   uint32_t size;    // payload bytes
+  bool tombstone = false;
 };
 
 class UnifiedCache {
  public:
-  // v2.0.186 — factory returns UnifiedCache by VALUE (was shared_ptr).
-  // Drops the ~16 B shared_ptr struct + ~16-32 B control block that
-  // every callsite paid as transient heap.  Across the 12 callsites in
-  // a typical chapter render that's ~400-600 B of fragmentation
-  // avoided (modest but free).  RVO/NRVO elides the move on every
-  // compiler we support; the returned instance lives in the caller's
-  // automatic storage.
-  //
-  // Caller pattern changes from arrow to dot:
+  // Factory returns an operation-local value (RVO/NRVO), not a registry-owned
+  // instance.  Callers can pass it by reference through related cache steps to
+  // reuse one directory scan without retaining heap across operations:
   //   auto cache = UnifiedCache::shared(path);
-  //   cache->segmentSize(...)   →   cache.segmentSize(...)
-  // 12 callsites updated (EpubChapterParser, Fb2Parser, ReaderState).
-  //
-  // Pre-v2.0.186 history (kept for context):
-  //   v2.0.173 — factory creates a fresh instance per call (no caching).
-  //     v2.0.170/171/172 attempted instance caching (first an unbounded
-  //     registry, then LRU-size-1) and broke EPUB reading after FB2
-  //     sessions because the cached instance's per-instance state
-  //     (especially the std::mutex FreeRTOS semaphore handle) pinned
-  //     heap fragments at the wrong moment.  Reverted to per-call
-  //     instances; v2.0.186 just drops the shared_ptr indirection on
-  //     top of that.
+  //   cache.segmentSize(...);
   static UnifiedCache shared(const std::string& bookCachePath);
 
   // Direct constructor — kept public for unit tests and for callers that
@@ -127,8 +118,8 @@ class UnifiedCache {
   // Streaming-write variant for segments the producer doesn't have in a
   // single buffer.  The callback receives a writable `File&` positioned at
   // the payload start; it should write exactly `expectedSize` bytes and
-  // return true on success.  If the callback returns false or writes the
-  // wrong number of bytes, the frame is rolled back (truncate file).
+  // return true on success.  If it fails or writes the wrong byte count, the
+  // frame remains incomplete and is removed by the next directory load.
   bool writeSegmentStreaming(Kind kind, uint16_t key, size_t expectedSize,
                               const std::function<bool(File&)>& writeCb);
 
@@ -138,8 +129,8 @@ class UnifiedCache {
   // header is written with a placeholder size; the callback writes payload
   // bytes via `File&`; on success we compute `payloadSize = endPos -
   // payloadStartPos`, seek back to the frame header, and patch the size
-  // field.  On callback failure the frame stays partially-written but
-  // `loadDirectory`'s truncated-frame check skips it on next open.
+  // field.  The frame is published only after payload + size are flushed; on
+  // callback failure the incomplete frame is self-healed on the next access.
   bool writeSegmentStreamingDeferred(Kind kind, uint16_t key,
                                       const std::function<bool(File&)>& writeCb);
 
@@ -156,6 +147,13 @@ class UnifiedCache {
   // Sum of live segment payload sizes (without garbage).
   size_t liveSize() const;
 
+  // Rewrite the append log to only its latest live frames.  The swap is
+  // recoverable through a `.bak` file if power is lost between renames.
+  // compactIfNeeded() is cheap when thresholds are not met and is called after
+  // successful writes; compact() forces a pass (primarily diagnostics/tests).
+  bool compact();
+  bool compactIfNeeded();
+
   // Path on LittleFS — exposed for diagnostics + Cleanup.
   const std::string& path() const { return path_; }
 
@@ -165,24 +163,18 @@ class UnifiedCache {
   size_t fileSize_ = 0;
   bool loaded_ = false;
   bool headerInitialized_ = false;
-  // v2.0.173 — per-instance std::mutex removed.  Instances are scope-
-  // bound to the caller's shared_ptr and never accessed concurrently
-  // (each thread that needs a UnifiedCache calls `shared()` to get its
-  // own).  The mutex was added in v2.0.170 to guard the v2.0.170
-  // registry against concurrent access; the registry is gone, so the
-  // mutex is gone too.  This eliminates ~88 B of FreeRTOS semaphore
-  // handle allocation per UnifiedCache lifetime — the smoking gun
-  // behind the EPUB-after-FB2 InflateReader 32 KB allocation failure.
-
-  bool ensureOpenForRead();
+  // No per-instance mutex: objects are scoped to one caller operation.  Reader
+  // resource ownership serialises foreground/background document access.
   bool ensureLoaded();
   bool loadDirectory();
   bool writeFileHeader(File& file);
+  bool recoverCompactionSwap();
+  void upsertDirectoryEntry(DirectoryEntry entry);
+  size_t compactedFileSize() const;
   bool appendFrame(Kind kind, uint16_t key, uint8_t flags,
                     const std::function<bool(File&)>& writePayload, size_t payloadSize);
-  // Returns iterator into directory_ or end() if not found.  Latest entry
-  // for (kind, key) wins (vector is in insertion order, so we walk
-  // backwards).
+  // directory_ is sorted by (key, kind) and stores only the latest frame for
+  // each pair, so lookup is logarithmic and history does not consume RAM.
   std::vector<DirectoryEntry>::const_iterator findEntry(Kind kind, uint16_t key) const;
 };
 

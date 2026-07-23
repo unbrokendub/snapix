@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -77,15 +78,32 @@ struct BackgroundCachePlan {
 };
 
 struct PendingRefreshState {
-  bool active = false;
-  int spine = -1;
-  int page = -1;
+  void clear() { packed_.store(0, std::memory_order_release); }
 
-  void clear() {
-    active = false;
-    spine = -1;
-    page = -1;
+  void publish(const int newSpine, const int newPage) {
+    if (newSpine < 0 || newSpine >= 0xFFFF || newPage < 0 || newPage >= 0xFFFF) return;
+    const uint32_t packed = (static_cast<uint32_t>(newSpine + 1) << 16) |
+                            static_cast<uint16_t>(newPage + 1);
+    packed_.store(packed, std::memory_order_release);
   }
+
+  bool snapshot(int& outSpine, int& outPage, uint32_t& token) const {
+    token = packed_.load(std::memory_order_acquire);
+    if (token == 0) return false;
+    outSpine = static_cast<int>((token >> 16) & 0xFFFFu) - 1;
+    outPage = static_cast<int>(token & 0xFFFFu) - 1;
+    return true;
+  }
+
+  bool clearIfUnchanged(uint32_t token) {
+    return packed_.compare_exchange_strong(token, 0, std::memory_order_acq_rel,
+                                           std::memory_order_acquire);
+  }
+
+ private:
+  // One atomic word publishes the complete payload. This avoids observing
+  // active=true with stale spine/page fields and avoids clearing a newer event.
+  std::atomic<uint32_t> packed_{0};
 };
 
 enum class ReaderNavigationJobKind : uint8_t {
@@ -117,7 +135,7 @@ struct ReaderNavigationJob {
   uint8_t tocJumpRetryCount = 0;
   uint32_t tocJumpStartedMs = 0;
   uint32_t tocJumpLastDiagMs = 0;
-  bool tocFirstPageReady = false;
+  std::atomic<bool> tocFirstPageReady{false};
 
   bool pageLoadActive = false;
   bool pageLoadMessageShown = false;

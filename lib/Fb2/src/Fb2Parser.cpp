@@ -129,13 +129,12 @@ void Fb2Parser::reset() {
 // book parser) through the Fb2-mode HtmlStripper into a UnifiedCache::Markers
 // segment keyed by startingSectionIndex_.  Failure logs but doesn't throw.
 // =============================================================================
-bool Fb2Parser::tryMarkerizeSection() {
+bool Fb2Parser::tryMarkerizeSection(snapix::unifiedcache::UnifiedCache& cache) {
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
   if (!fb2_ || filepath_.empty()) return false;
 
   // v2.0.167 — markers live as a UnifiedCache::Markers segment in
   // <fb2CachePath>/streaming.cache, keyed by sectionIndex.
-  auto cache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
   size_t existingSize = 0;
   if (cache.segmentSize(snapix::unifiedcache::Kind::Markers,
                          static_cast<uint16_t>(startingSectionIndex_), &existingSize)) {
@@ -250,17 +249,22 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
     return pagesCreated_ > 0;
   }
 
+  if (!fb2_) {
+    hasMore_ = false;
+    return false;
+  }
+  auto ucache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
+
   // INIT: markerize the section, then build the idx, then short-circuit.
   if (!markerizeAttempted_) {
     markerizeAttempted_ = true;
-    (void)tryMarkerizeSection();
+    (void)tryMarkerizeSection(ucache);
   }
 
   // v2.0.130 R4.c — build `.idx` upfront via a MEASURE-only walk so the R4.b
   // short-circuit fires on the FIRST visit too.  See EpubChapterParser for the
   // full rationale.  Skips when a current-version idx already exists.
   if (fb2_) {
-    auto ucache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
     do {
       {
         File idxProbe;
@@ -415,7 +419,6 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
   // empty Page objects.  No legacy fallback — if no idx exists (markerize/idx
   // failed, which is I/O-only), the section produces no pages.
   if (fb2_) {
-    auto ucache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
     do {
       File idxF;
       size_t idxSegSize = 0;
@@ -479,7 +482,7 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
 // singleSection (markersKey 0, probes 0..N).
 // =============================================================================
 
-bool Fb2Parser::ensureProgressiveInit() {
+bool Fb2Parser::ensureProgressiveInit(snapix::unifiedcache::UnifiedCache& cache) {
   if (progressiveInit_) return true;
   if (!fb2_ || filepath_.empty()) return false;
 
@@ -493,7 +496,6 @@ bool Fb2Parser::ensureProgressiveInit() {
     fileSize_ = static_cast<uint32_t>(f.fileSize());
   }
 
-  auto cache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
   int existing = 0;
   for (;; ++existing) {
     size_t sz = 0;
@@ -526,10 +528,13 @@ bool Fb2Parser::ensureProgressiveInit() {
   progPagesAvailable_ = 0;
   if (existing > 0) {
     const uint16_t loaded = snapix::pagecache::loadChunkedSectionIdx(
-        progIdx_, fb2_->getCachePath(), renderer_, config_, streamingViewportMarginTop_,
+        progIdx_, cache, renderer_, config_, streamingViewportMarginTop_,
         streamingViewportMarginBottom_, streamingViewportMarginLeft_, streamingViewportMarginRight_,
         /*hyphenLang=*/"ru");
-    if (loaded > 0) progPagesAvailable_ = static_cast<uint16_t>(loaded + (sourceExhausted_ ? 1 : 0));
+    if (progIdx_.configHashValid) {
+      progPagesAvailable_ =
+          static_cast<uint16_t>(loaded + (sourceExhausted_ ? 1 : 0));
+    }
   }
   progEmitCursor_ = 0;
   progressiveInit_ = true;
@@ -540,9 +545,8 @@ bool Fb2Parser::ensureProgressiveInit() {
   return true;
 }
 
-bool Fb2Parser::markerizeNextChunk() {
+bool Fb2Parser::markerizeNextChunk(snapix::unifiedcache::UnifiedCache& cache) {
   if (sourceExhausted_) return false;
-  auto cache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
 
   FsFile srcFile;
   if (!SdMan.openFileForRead("FB2_MC", filepath_, srcFile)) {
@@ -613,7 +617,12 @@ bool Fb2Parser::markerizeNextChunk() {
 
 bool Fb2Parser::parsePagesProgressive(
     const std::function<void(std::unique_ptr<Page>)>& onPageComplete, uint16_t maxPages) {
-  if (!ensureProgressiveInit()) {
+  if (!fb2_) {
+    hasMore_ = false;
+    return false;
+  }
+  auto cache = snapix::unifiedcache::UnifiedCache::shared(fb2_->getCachePath());
+  if (!ensureProgressiveInit(cache)) {
     hasMore_ = false;
     return false;
   }
@@ -637,15 +646,22 @@ bool Fb2Parser::parsePagesProgressive(
     return ok ? outPath : std::string();
   };
 
+  if (chunkIdx_ > 0 && !progIdx_.configHashValid) {
+    progPagesAvailable_ = snapix::pagecache::extendChunkedSectionIdx(
+        progIdx_, cache, sourceExhausted_, renderer_, config_, mT, mB, mL, mR,
+        /*hyphenLang=*/"ru", resolveImage);
+  }
+
   // Make pages available: when the emit cursor catches up and source remains,
   // markerize the next chunk + extend the idx over it (one chunk per iteration).
   uint16_t guard = 0;
   while (progEmitCursor_ >= progPagesAvailable_ && !sourceExhausted_) {
-    if (!markerizeNextChunk()) break;
+    if (!markerizeNextChunk(cache)) break;
     const uint16_t avail = snapix::pagecache::extendChunkedSectionIdx(
-        progIdx_, fb2_->getCachePath(), sourceExhausted_, renderer_, config_, mT, mB, mL, mR,
+        progIdx_, cache, sourceExhausted_, renderer_, config_, mT, mB, mL, mR,
         /*hyphenLang=*/"ru", resolveImage);
     if (avail == 0) {
+      if (!sourceExhausted_ && ++guard <= 8192) continue;
       LOG_ERR(TAG, "[CONTENT][FB2] [STREAM] idx extend produced 0 pages (chunk %d)", chunkIdx_ - 1);
       break;
     }

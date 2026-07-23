@@ -18,7 +18,7 @@
 
 namespace {
 
-constexpr uint8_t CACHE_FILE_VERSION = 23;
+constexpr uint8_t CACHE_FILE_VERSION = 41;
 constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 
 // Header layout (must match PageCache.cpp):
@@ -40,7 +40,7 @@ constexpr uint16_t MAX_REASONABLE_PAGE_COUNT = 8192;
 constexpr uint32_t HEADER_SIZE = 1 + 4 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 2 + 1 + 4;
 
 // Write a complete cache file that satisfies the current PageCache::loadRaw()
-// contract: header + LUT payload sized for pageCount entries.
+// contract: header + serialized page payloads + LUT.
 void writeCacheFile(FsFile& file, uint16_t pageCount, bool isPartial, uint8_t version = CACHE_FILE_VERSION) {
   serialization::writePod(file, version);
   uint32_t fontId = 1818981670;
@@ -68,11 +68,14 @@ void writeCacheFile(FsFile& file, uint16_t pageCount, bool isPartial, uint8_t ve
   serialization::writePod(file, pageCount);
   uint8_t partial = isPartial ? 1 : 0;
   serialization::writePod(file, partial);
-  uint32_t lutOffset = HEADER_SIZE;
+  uint32_t lutOffset = HEADER_SIZE + pageCount;  // one dummy payload byte per page
   serialization::writePod(file, lutOffset);
 
   for (uint16_t i = 0; i < pageCount; ++i) {
-    uint32_t pagePos = HEADER_SIZE + static_cast<uint32_t>(pageCount) * sizeof(uint32_t) + i;
+    file.write(static_cast<uint8_t>(i));
+  }
+  for (uint16_t i = 0; i < pageCount; ++i) {
+    uint32_t pagePos = HEADER_SIZE + i;
     serialization::writePod(file, pagePos);
   }
 }
@@ -126,6 +129,23 @@ LoadRawResult loadRaw(const std::string& path) {
     result.pageCount = 0;
     result.isPartial = false;
     return result;
+  }
+
+  if (!file.seek(lutOffset)) {
+    file.close();
+    return result;
+  }
+  uint32_t previousPos = 0;
+  for (uint16_t i = 0; i < result.pageCount; ++i) {
+    uint32_t pagePos = 0;
+    if (!serialization::readPodChecked(file, pagePos) || pagePos < HEADER_SIZE ||
+        pagePos >= lutOffset || (i > 0 && pagePos <= previousPos)) {
+      file.close();
+      result.pageCount = 0;
+      result.isPartial = false;
+      return result;
+    }
+    previousPos = pagePos;
   }
 
   file.close();
@@ -293,10 +313,13 @@ int main() {
     serialization::writePod(writer, pageCount);
     uint8_t partial = 0;
     serialization::writePod(writer, partial);
-    uint32_t lutOffset = HEADER_SIZE;
+    uint32_t lutOffset = HEADER_SIZE + pageCount;
     serialization::writePod(writer, lutOffset);
     for (uint16_t i = 0; i < pageCount; ++i) {
-      uint32_t pagePos = HEADER_SIZE + static_cast<uint32_t>(pageCount) * sizeof(uint32_t) + i;
+      writer.write(static_cast<uint8_t>(i));
+    }
+    for (uint16_t i = 0; i < pageCount; ++i) {
+      uint32_t pagePos = HEADER_SIZE + i;
       serialization::writePod(writer, pagePos);
     }
 
@@ -306,6 +329,35 @@ int main() {
     runner.expectTrue(result.success, "diff_config_success");
     runner.expectEq(static_cast<uint16_t>(77), result.pageCount, "diff_config_page_count");
     runner.expectFalse(result.isPartial, "diff_config_not_partial");
+  }
+
+  // Test 13: LUT entries must point into the page-data region, not into the
+  // header/LUT itself.
+  {
+    FsFile writer;
+    writer.setBuffer("");
+    writeCacheFile(writer, 3, false);
+    std::string data = writer.getBuffer();
+    const uint32_t lutOffset = HEADER_SIZE + 3;
+    const uint32_t badPagePos = lutOffset;
+    std::memcpy(&data[lutOffset + sizeof(uint32_t)], &badPagePos, sizeof(badPagePos));
+    SdMan.registerFile("/cache/bad_lut_range.bin", data);
+    runner.expectFalse(loadRaw("/cache/bad_lut_range.bin").success,
+                       "lut_entry_outside_page_data_rejected");
+  }
+
+  // Test 14: production writes page positions in strictly increasing order.
+  {
+    FsFile writer;
+    writer.setBuffer("");
+    writeCacheFile(writer, 3, false);
+    std::string data = writer.getBuffer();
+    const uint32_t lutOffset = HEADER_SIZE + 3;
+    const uint32_t duplicatePos = HEADER_SIZE;
+    std::memcpy(&data[lutOffset + sizeof(uint32_t)], &duplicatePos, sizeof(duplicatePos));
+    SdMan.registerFile("/cache/bad_lut_order.bin", data);
+    runner.expectFalse(loadRaw("/cache/bad_lut_order.bin").success,
+                       "non_increasing_lut_rejected");
   }
 
   SdMan.clearFiles();

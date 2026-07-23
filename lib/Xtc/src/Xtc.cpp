@@ -20,6 +20,11 @@
 bool Xtc::load() {
   LOG_INF(TAG, "Loading XTC: %s", filepath.c_str());
 
+  if (!cache_fs::ensureSourceFingerprint(filepath, cachePath)) {
+    LOG_ERR(TAG, "Could not verify source fingerprint");
+    return false;
+  }
+
   // Initialize parser
   parser.reset(new xtc::XtcParser());
 

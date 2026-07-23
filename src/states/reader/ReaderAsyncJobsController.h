@@ -105,12 +105,15 @@ class ReaderAsyncJobsController {
   uint32_t pendingTocJumpLastDiagMs() const { return navigationJob_.tocJumpLastDiagMs; }
   uint32_t& pendingTocJumpLastDiagMsRef() { return navigationJob_.tocJumpLastDiagMs; }
   void setPendingTocJumpLastDiagMs(uint32_t value) { navigationJob_.tocJumpLastDiagMs = value; }
-  // v2.0.104: worker-driven first-page-ready signal.  Worker sets, main
-  // thread reads and clears.  Both threads are single-readers/writers on
-  // their own side; the bool is naturally atomic on ESP32-C3.
-  bool& pendingTocFirstPageReadyRef() { return navigationJob_.tocFirstPageReady; }
-  bool pendingTocFirstPageReady() const { return navigationJob_.tocFirstPageReady; }
-  void setPendingTocFirstPageReady(bool value) { navigationJob_.tocFirstPageReady = value; }
+  // Worker-to-main handoff. Byte-sized hardware accesses do not make a C++
+  // data race well-defined, even on the single-core ESP32-C3.
+  std::atomic<bool>& pendingTocFirstPageReadyRef() { return navigationJob_.tocFirstPageReady; }
+  bool pendingTocFirstPageReady() const {
+    return navigationJob_.tocFirstPageReady.load(std::memory_order_acquire);
+  }
+  void setPendingTocFirstPageReady(bool value) {
+    navigationJob_.tocFirstPageReady.store(value, std::memory_order_release);
+  }
   void clearPendingTocJump();
   void armPendingTocJump(int targetSpine, const std::string& anchor, int targetPageHint = -1);
   void incrementPendingTocJumpRetry() { navigationJob_.tocJumpRetryCount++; }
@@ -170,6 +173,7 @@ class ReaderAsyncJobsController {
 
   struct Command {
     JobType type = JobType::None;
+    uint32_t generation = 0;
     BackgroundCacheRequest background;
     TocJumpRequest tocJump;
     PageFillRequest pageFill;
@@ -177,8 +181,9 @@ class ReaderAsyncJobsController {
 
   void workerLoop();
   bool enqueue(const Command& cmd);
-  AbortCallback abortCallback() const;
+  AbortCallback abortCallback(uint32_t generation) const;
   size_t clearQueuedCommands();
+  uint16_t decrementOutstanding(uint16_t count);
 
   static constexpr EventBits_t EVENT_IDLE = (1 << 0);
 
@@ -186,7 +191,9 @@ class ReaderAsyncJobsController {
   QueueHandle_t commandQueue_ = nullptr;
   EventGroupHandle_t stateEvents_ = nullptr;
   std::atomic<JobType> currentJob_{JobType::None};
-  std::atomic<bool> cancelCurrentJob_{false};
+  std::atomic<uint16_t> outstandingJobs_{0};
+  std::atomic<uint32_t> cancelGeneration_{0};
+  std::atomic<uint32_t> currentJobGeneration_{0};
 
   BackgroundCacheHandler backgroundCacheHandler_;
   TocJumpHandler tocJumpHandler_;
