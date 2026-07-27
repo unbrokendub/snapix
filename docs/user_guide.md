@@ -314,14 +314,14 @@ You can customize the sleep screen by placing custom images in specific location
 #### Image Parameters
 
 - **Resolution:** 480 × 800 pixels (portrait mode)
-- **Color depth:** 8-bit grayscale or 24-bit color
+- **Color depth:** 1-, 2-, 4-, or 8-bit indexed grayscale, or 24-bit color
 - **Format:** BMP, uncompressed (BI_RGB)
 - **Display levels:** 4 grayscale (black, dark gray, light gray, white)
 
 > [!TIP]
-> - Use 8-bit grayscale for best results - it's widely supported by image editors
+> - Use 4-bit indexed grayscale for compact 16-level source files, or 8-bit grayscale for widest editor compatibility
 > - Larger images will be automatically scaled down while preserving aspect ratio
-> - All color images are converted to 4-level grayscale on the e-ink display
+> - The panel has four physical grayscale levels; 4-/8-/24-bit sources are quantized or dithered to those levels
 
 > [!TIP]
 > The **Cover** sleep screen option displays the cover of the currently open book when the device sleeps.

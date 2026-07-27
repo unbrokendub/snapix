@@ -111,6 +111,17 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/lib/FsHelpers/src/FsHelpers.cpp
       ${TEST_HELPERS}
     )
+  elseif(TEST_NAME STREQUAL "Bitmap4BppTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/GfxRenderer/src/Bitmap.cpp
+      ${TEST_HELPERS}
+    )
+    # Bitmap.h also has a lightweight generic test mock; this test exercises
+    # the real decoder, so put the production header first for this target.
+    target_include_directories(${TEST_NAME} BEFORE PRIVATE
+      ${PROJECT_ROOT}/lib/GfxRenderer/src
+    )
   elseif(TEST_NAME MATCHES "^ScriptDetector.*Test$")
     add_executable(${TEST_NAME}
       ${TEST_SRC}

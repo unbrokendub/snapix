@@ -202,6 +202,7 @@ See [customization guide](docs/customization.md) for full details.
 
 ```bash
 make sleep-screen INPUT=photo.jpg OUTPUT=sleep.bmp
+# Default: portrait 480x800, 4-bit indexed grayscale
 # Options: --orientation, --bits, --dither, --fit
 ```
 
