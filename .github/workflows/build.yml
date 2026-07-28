@@ -55,6 +55,11 @@ jobs:
       - name: Build host unit tests
         if: github.ref_type != 'tag'
         timeout-minutes: 30
+        env:
+          # The full suite compiles many copies of the rendering stack. Letting
+          # CMake use every reported runner CPU causes memory-pressure
+          # cancellation before the compiler can report an error.
+          SNAPIX_TEST_JOBS: 2
         run: test/scripts/build_tests.sh
 
       - name: Run host unit tests

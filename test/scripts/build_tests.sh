@@ -23,7 +23,7 @@ cmake "$TEST_DIR" -DCMAKE_BUILD_TYPE=Debug
 # Build
 echo ""
 echo "=== Building ==="
-cmake --build . --parallel
+cmake --build . --parallel "${SNAPIX_TEST_JOBS:-4}"
 
 echo ""
 echo "=== Build Complete ==="
