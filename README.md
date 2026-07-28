@@ -206,7 +206,8 @@ make sleep-screen INPUT=photo.jpg OUTPUT=sleep.bmp
 # Options: --orientation, --bits, --dither, --fit
 ```
 
-Copy the output BMP to `/sleep/` directory or as `/sleep.bmp` on the SD card.
+Copy the output BMP to `/sleep/` directory or as `/sleep.bmp` on the SD card. Multiple files in `/sleep/` are shown
+sequentially in natural filename order on each sleep.
 
 ### Creating a release
 

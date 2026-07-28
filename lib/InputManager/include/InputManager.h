@@ -2,9 +2,22 @@
 
 #include <Arduino.h>
 #include <driver/gpio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+
+#include <atomic>
+
+#include "AdcButtonDebouncer.h"
 
 class InputManager {
  public:
+  struct ButtonEdge {
+    uint8_t buttonIndex;
+    bool pressed;
+    uint32_t timestampMs;
+  };
+
   InputManager();
   void begin();
   uint8_t getState();
@@ -80,19 +93,45 @@ class InputManager {
   // Power button methods
   bool isPowerButtonPressed() const;
 
+  // Lossless ADC edge capture consumed by the higher-level input driver.
+  bool popButtonEdge(ButtonEdge& edge);
+  void clearButtonEdges();
+  bool isSampledPressed(uint8_t buttonIndex) const;
+  bool buttonEdgeCaptureAvailable() const { return buttonEdgeQueue_ != nullptr; }
+  bool buttonSamplerRunning() const { return buttonSamplerRunning_.load(std::memory_order_acquire); }
+  uint32_t droppedButtonEdgeCount() const { return droppedButtonEdges_.load(std::memory_order_acquire); }
+
   // Button names
   static const char* getButtonName(uint8_t buttonIndex);
 
  private:
-  int getButtonFromADC(int adcValue, const int ranges[], int numButtons);
+  int getButtonFromADC(int adcValue, const int ranges[], int numButtons) const;
+  void sampleAdcButtons(uint32_t timestampMs);
+  void publishTransition(const AdcButtonDebouncer::Transition& transition, uint8_t buttonOffset);
+  void enqueueButtonEdge(uint8_t buttonIndex, bool pressed, uint32_t timestampMs);
+  void updateAdcStableState();
+  static void buttonSamplerTaskEntry(void* arg);
+  void buttonSamplerTask();
 
   uint8_t currentState;
-  uint8_t lastState;
   uint8_t pressedEvents;
   uint8_t releasedEvents;
-  unsigned long lastDebounceTime;
   unsigned long buttonPressStart;
   unsigned long buttonPressFinish;
+
+  AdcButtonDebouncer adcLine1_;
+  AdcButtonDebouncer adcLine2_;
+  std::atomic<uint8_t> adcSampledState_{0};
+  std::atomic<uint8_t> adcStableState_{0};
+  QueueHandle_t buttonEdgeQueue_ = nullptr;
+  TaskHandle_t buttonSamplerTask_ = nullptr;
+  std::atomic<bool> buttonSamplerRunning_{false};
+  std::atomic<uint32_t> droppedButtonEdges_{0};
+  bool begun_ = false;
+
+  bool powerCandidatePressed_ = false;
+  bool powerStablePressed_ = false;
+  uint32_t powerCandidateSinceMs_ = 0;
 
   static constexpr int NUM_BUTTONS_1 = 4;
   static const int ADC_RANGES_1[];
@@ -102,6 +141,10 @@ class InputManager {
 
   static constexpr int ADC_NO_BUTTON = 3800;
   static constexpr unsigned long DEBOUNCE_DELAY = 5;
+  static constexpr UBaseType_t BUTTON_EDGE_QUEUE_CAPACITY = 32;
+  static constexpr uint32_t BUTTON_SAMPLE_INTERVAL_MS = 8;
+  static constexpr uint32_t BUTTON_SAMPLER_STACK_BYTES = 3072;
+  static constexpr UBaseType_t BUTTON_SAMPLER_PRIORITY = 2;
 
   static const char* BUTTON_NAMES[];
 };

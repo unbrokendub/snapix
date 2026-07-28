@@ -168,6 +168,7 @@ class ReaderState : public State {
   // Track power press start when short power action is mapped to page turn.
   // This lets us execute page turn only on short release and avoid accidental
   // turns when the same press is held to enter sleep.
+  bool& powerPressActive_;
   uint32_t& powerPressStartedMs_;
 
   // Rendering

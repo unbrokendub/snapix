@@ -25,7 +25,7 @@ class SleepState : public State {
   GfxRenderer& renderer_;
 
   void renderDefaultSleepScreen(const Core& core) const;
-  void renderCustomSleepScreen(const Core& core) const;
+  void renderCustomSleepScreen(Core& core) const;
   void renderCoverSleepScreen(Core& core) const;
   void renderPageSleepScreen(const Core& core) const;
   void renderBitmapSleepScreen(const Bitmap& bitmap) const;

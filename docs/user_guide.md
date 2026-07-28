@@ -305,8 +305,10 @@ You can customize the sleep screen by placing custom images in specific location
 
 - **Single Image:** Place a file named `sleep.bmp` in the root directory.
 - **Multiple Images:** Create a `sleep` directory in the root of the SD card and place any number of `.bmp` images
-  inside. If images are found in this directory, they will take priority over the `sleep.bmp` file, and one will be
-  randomly selected each time the device sleeps.
+  inside. If images are found in this directory, they will take priority over the `sleep.bmp` file. The device shows
+  them sequentially in natural filename order on each sleep, then starts again from the first image. For an explicit
+  order, name them `001.bmp`, `002.bmp`, `003.bmp`, and so on. The next position is saved with the device settings, so
+  the sequence continues after the full power-on wake used when the reader is not connected to USB.
 
 > [!NOTE]
 > You'll need to set the **Sleep Screen** setting to **Custom** in order to use these images.

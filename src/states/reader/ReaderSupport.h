@@ -91,6 +91,32 @@ inline bool cancelsDeferredTocFollowup(const Event& event) {
          event.button == Button::Power;
 }
 
+inline uint32_t inputEventTimeMs(const Event& event, const uint32_t dispatchTimeMs) {
+  // timestampMs==0 keeps synthetic and legacy events useful.
+  return event.timestampMs != 0 ? event.timestampMs : dispatchTimeMs;
+}
+
+inline bool isShortPowerRelease(const Event& releaseEvent, const bool pressActive,
+                                const uint32_t pressStartedMs, const uint32_t dispatchTimeMs,
+                                const uint32_t shortPressDurationMs) {
+  if (!pressActive || releaseEvent.type != EventType::ButtonRelease ||
+      releaseEvent.button != Button::Power) {
+    return false;
+  }
+  return static_cast<uint32_t>(inputEventTimeMs(releaseEvent, dispatchTimeMs) - pressStartedMs) <
+         shortPressDurationMs;
+}
+
+inline bool shouldPrioritizeNextSectionPrefetch(const bool supportsSectionPrefetch,
+                                                const bool currentCacheHasPages,
+                                                const bool currentCacheNearTail,
+                                                const bool nextSectionReady,
+                                                const bool readerRecentlyActive,
+                                                const bool heapAllowsPrefetch) {
+  return supportsSectionPrefetch && currentCacheHasPages && !currentCacheNearTail &&
+         !nextSectionReady && !readerRecentlyActive && heapAllowsPrefetch;
+}
+
 
 uint32_t perfMsNow();
 void perfLog(const char* origin, const char* phase, uint32_t startedMs, const char* fmt = nullptr, ...);

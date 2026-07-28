@@ -4,6 +4,7 @@ namespace snapix::reader {
 
 void ReaderNavigationController::resetSession() {
   holdNavigated_ = false;
+  powerPressActive_ = false;
   powerPressStartedMs_ = 0;
 }
 

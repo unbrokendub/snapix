@@ -77,13 +77,13 @@ void ReaderState::exitTocMode() {
 
 void ReaderState::handleTocInput(Core& core, const Event& e) {
   if (e.button == Button::Power && e.type == EventType::ButtonRelease) {
-    if (core.settings.shortPwrBtn == Settings::PowerPageTurn && powerPressStartedMs_ != 0) {
-      const uint32_t heldMs = millis() - powerPressStartedMs_;
-      if (heldMs < core.settings.getPowerButtonDuration()) {
-        tocView_.moveDown();
-        needsRender_ = true;
-      }
+    if (core.settings.shortPwrBtn == Settings::PowerPageTurn &&
+        reader::isShortPowerRelease(e, powerPressActive_, powerPressStartedMs_, millis(),
+                                    core.settings.getPowerButtonDuration())) {
+      tocView_.moveDown();
+      needsRender_ = true;
     }
+    powerPressActive_ = false;
     powerPressStartedMs_ = 0;
     return;
   }
@@ -124,7 +124,8 @@ void ReaderState::handleTocInput(Core& core, const Event& e) {
 
     case Button::Power:
       if (e.type == EventType::ButtonPress && core.settings.shortPwrBtn == Settings::PowerPageTurn) {
-        powerPressStartedMs_ = millis();
+        powerPressActive_ = true;
+        powerPressStartedMs_ = reader::inputEventTimeMs(e, millis());
       }
       break;
   }

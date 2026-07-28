@@ -86,8 +86,14 @@ bool MappedInputManager::wasReleased(const Button button) const { return inputMa
 
 bool MappedInputManager::isPressed(const Button button) const { return inputManager.isPressed(mapButton(button)); }
 
+bool MappedInputManager::isSampledPressed(const Button button) const {
+  return inputManager.isSampledPressed(mapButton(button));
+}
+
 bool MappedInputManager::wasAnyPressed() const { return inputManager.wasAnyPressed(); }
 
 bool MappedInputManager::wasAnyReleased() const { return inputManager.wasAnyReleased(); }
 
 unsigned long MappedInputManager::getHeldTime() const { return inputManager.getHeldTime(); }
+
+uint8_t MappedInputManager::physicalButton(const Button button) const { return mapButton(button); }

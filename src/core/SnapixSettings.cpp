@@ -21,13 +21,13 @@ namespace {
 constexpr uint32_t SETTINGS_MAGIC = 0x53585050;
 // Minimum version we can read (allows backward compatibility)
 constexpr uint8_t MIN_SETTINGS_VERSION = 3;
-// Version 9: Moved frontButtonLayout from Theme to Settings
-constexpr uint8_t SETTINGS_FILE_VERSION = 12;
+// Version 13: persist the next sequential sleep image across full power-on wakeups
+constexpr uint8_t SETTINGS_FILE_VERSION = 13;
 // Increment this when adding new persisted settings fields
-constexpr uint8_t SETTINGS_COUNT = 30;
+constexpr uint8_t SETTINGS_COUNT = 31;
 constexpr uint16_t SETTINGS_FIELD_SIZES[SETTINGS_COUNT] = {
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    32, 256, 1, 1, 1, 256, 128, 2, 1, 1, 1, 1, 1, 1,
+    32, 256, 1, 1, 1, 256, 128, 2, 1, 1, 1, 1, 1, 1, 4,
 };
 
 constexpr uint32_t settingsSerializedSize(const uint8_t fieldCount) {
@@ -40,7 +40,7 @@ constexpr uint32_t settingsSerializedSize(const uint8_t fieldCount) {
 }
 
 constexpr uint32_t SETTINGS_SERIALIZED_SIZE = settingsSerializedSize(SETTINGS_COUNT);
-static_assert(SETTINGS_SERIALIZED_SIZE == 705, "Unexpected settings layout");
+static_assert(SETTINGS_SERIALIZED_SIZE == 709, "Unexpected settings layout");
 
 bool recoverDirectSettingsFile() {
   if (SdMan.exists(SNAPIX_SETTINGS_FILE)) return true;
@@ -130,6 +130,7 @@ Result<void> Settings::save(drivers::Storage& storage) const {
   serialization::writePod(outputFile, sleepHoldTime);
   serialization::writePod(outputFile, bionicReading);
   serialization::writePod(outputFile, fakeBold);
+  serialization::writePod(outputFile, nextSleepImageIndex);
   outputFile.flush();
   const uint32_t writtenBytes = outputFile.size();
   outputFile.close();
@@ -270,6 +271,8 @@ Result<void> Settings::load(drivers::Storage& storage) {
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, fakeBold, uint8_t(3));
     if (++settingsRead >= fileSettingsCount) break;
+    serialization::readPod(inputFile, nextSleepImageIndex);
+    if (++settingsRead >= fileSettingsCount) break;
   } while (false);
 
   // Migrate font size from version < 8 (enum values shifted +1 for FontXSmall)
@@ -390,6 +393,7 @@ bool Settings::saveToFile() const {
   serialization::writePod(outputFile, sleepHoldTime);
   serialization::writePod(outputFile, bionicReading);
   serialization::writePod(outputFile, fakeBold);
+  serialization::writePod(outputFile, nextSleepImageIndex);
   outputFile.flush();
   const uint32_t writtenBytes = outputFile.size();
   outputFile.close();
@@ -522,6 +526,8 @@ bool Settings::loadFromFile() {
     serialization::readPodValidated(inputFile, bionicReading, uint8_t(2));
     if (++settingsRead >= fileSettingsCount) break;
     serialization::readPodValidated(inputFile, fakeBold, uint8_t(3));
+    if (++settingsRead >= fileSettingsCount) break;
+    serialization::readPod(inputFile, nextSleepImageIndex);
     if (++settingsRead >= fileSettingsCount) break;
   } while (false);
 

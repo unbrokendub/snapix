@@ -20,6 +20,7 @@
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,7 @@
 #include "../config.h"
 #include "../core/Core.h"
 #include "../images/SnapixLogo.h"
+#include "SleepImageSequence.h"
 
 extern InputManager inputManager;
 extern uint16_t rtcPowerButtonDurationMs;
@@ -153,7 +155,7 @@ void SleepState::renderDefaultSleepScreen(const Core& core) const {
   renderer_.displayBuffer(sleepRefresh);
 }
 
-void SleepState::renderCustomSleepScreen(const Core& core) const {
+void SleepState::renderCustomSleepScreen(Core& core) const {
   // Check if we have a /sleep directory
   auto dir = SdMan.open("/sleep");
   if (dir && dir.isDirectory()) {
@@ -188,12 +190,13 @@ void SleepState::renderCustomSleepScreen(const Core& core) const {
     }
     const auto numFiles = files.size();
     if (numFiles > 0) {
-      // Generate a random number between 0 and numFiles-1
-      const auto randomFileIndex = random(numFiles);
-      const auto filename = "/sleep/" + files[randomFileIndex];
+      std::sort(files.begin(), files.end(), sleepImageFilenameLess);
+      const auto fileIndex = takeNextSleepImageIndex(core.settings.nextSleepImageIndex, numFiles);
+      const auto filename = "/sleep/" + files[fileIndex];
       FsFile file;
       if (SdMan.openFileForRead("SLP", filename, file)) {
-        LOG_INF(TAG, "Randomly loading: /sleep/%s", files[randomFileIndex].c_str());
+        LOG_INF(TAG, "Sequentially loading %u/%u: /sleep/%s", static_cast<unsigned>(fileIndex + 1),
+                static_cast<unsigned>(numFiles), files[fileIndex].c_str());
         delay(100);
         Bitmap bitmap(file, true);
         if (bitmap.parseHeaders() == BmpReaderError::Ok) {

@@ -70,8 +70,9 @@ class ReaderAsyncJobsController {
   bool deferPageTurnUntilWorkerStops(int direction, bool workerRunning, int workerState,
                                      const std::function<void()>& requestStop);
   void noteQueuedTurnWorkerIdle(bool workerRunning);
-  bool tryConsumeQueuedTurn(bool workerRunning, bool needsRender, bool pendingTocJump, bool pendingPageLoad,
-                            bool menuMode, bool bookmarkMode, bool tocMode, int& queuedTurn, uint32_t& queuedForMs);
+  bool tryConsumeQueuedTurns(bool workerRunning, bool needsRender, bool pendingTocJump, bool pendingPageLoad,
+                             bool menuMode, bool bookmarkMode, bool tocMode, int& queuedTurns,
+                             uint32_t& queuedForMs);
   void clearQueuedPageTurns() { navigationJob_.clearQueuedTurn(); }
   bool pageLoadBlocked(int spine, int page) const { return navigationJob_.blocksPageLoad(spine, page); }
   void markPageLoadBlocked(int spine, int page, ReaderNavigationBlockReason reason);

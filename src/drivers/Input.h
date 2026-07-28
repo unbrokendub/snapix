@@ -5,6 +5,7 @@
 #include "../core/EventQueue.h"
 #include "../core/Result.h"
 #include "../core/Types.h"
+#include "PowerButtonEdgeCapture.h"
 
 class InputManager;
 class MappedInputManager;
@@ -50,8 +51,7 @@ class Input {
   uint32_t lastActivityMs_ = 0;
   bool initialized_ = false;
 
-  // Track button states for press/release detection
-  uint8_t prevButtonState_ = 0;
+  // Track the debounced logical state delivered by the edge captures.
   uint8_t currButtonState_ = 0;
 
   // Track press start time for long press
@@ -61,7 +61,24 @@ class Input {
   uint32_t lastRepeatMs_[7] = {};
   bool longPressFired_[7] = {};
 
-  void checkButton(Button btn, uint8_t mask);
+  static constexpr uint8_t POWER_BUTTON_MASK = 1 << 6;
+  static constexpr size_t POWER_EDGE_CAPACITY = 16;
+
+  PowerButtonEdgeCapture<POWER_EDGE_CAPACITY> powerEdges_;
+  bool powerInterruptAttached_ = false;
+  bool powerEventDown_ = false;
+  uint32_t lastReportedPowerEdgeDrops_ = 0;
+  uint32_t lastReportedAdcEdgeDrops_ = 0;
+
+  void pollAdcButtons();
+  void pollHeldButtons();
+  void processAdcButtonEdge(Button btn, bool pressed, uint32_t timestampMs);
+  bool logicalButtonForPhysical(uint8_t physicalButton, Button& logicalButton) const;
+  void reconcileAdcState();
+  void pollPowerButton();
+  void processPowerEdge(bool pressed, uint32_t timestampMs);
+  void resetPowerCapture();
+  static void powerButtonIsr(void* arg);
 };
 
 }  // namespace drivers

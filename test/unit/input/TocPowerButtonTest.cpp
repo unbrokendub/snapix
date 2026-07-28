@@ -27,10 +27,17 @@ enum class Button : uint8_t {
 struct Event {
   EventType type;
   Button button;
+  uint32_t timestampMs;
 
-  static Event press(Button b) { return {EventType::ButtonPress, b}; }
-  static Event repeat(Button b) { return {EventType::ButtonRepeat, b}; }
-  static Event release(Button b) { return {EventType::ButtonRelease, b}; }
+  static Event press(Button b, uint32_t timestamp = 0) {
+    return {EventType::ButtonPress, b, timestamp};
+  }
+  static Event repeat(Button b, uint32_t timestamp = 0) {
+    return {EventType::ButtonRepeat, b, timestamp};
+  }
+  static Event release(Button b, uint32_t timestamp = 0) {
+    return {EventType::ButtonRelease, b, timestamp};
+  }
 };
 
 enum class TocAction {
@@ -46,6 +53,7 @@ enum class TocAction {
 struct TocDispatcher {
   enum PowerAction : uint8_t { PowerIgnore = 0, PowerSleep = 1, PowerPageTurn = 2 };
   uint8_t shortPwrBtn = PowerIgnore;
+  bool powerPressActive_ = false;
   uint32_t powerPressStartedMs_ = 0;
   uint16_t powerButtonDuration = 400;
 
@@ -59,12 +67,14 @@ struct TocDispatcher {
     lastAction = TocAction::None;
 
     if (e.button == Button::Power && e.type == EventType::ButtonRelease) {
-      if (shortPwrBtn == PowerPageTurn && powerPressStartedMs_ != 0) {
-        const uint32_t heldMs = millis() - powerPressStartedMs_;
+      if (shortPwrBtn == PowerPageTurn && powerPressActive_) {
+        const uint32_t releaseTimeMs = e.timestampMs != 0 ? e.timestampMs : millis();
+        const uint32_t heldMs = releaseTimeMs - powerPressStartedMs_;
         if (heldMs < powerButtonDuration) {
           lastAction = TocAction::MoveDown;
         }
       }
+      powerPressActive_ = false;
       powerPressStartedMs_ = 0;
       return;
     }
@@ -92,7 +102,8 @@ struct TocDispatcher {
         break;
       case Button::Power:
         if (e.type == EventType::ButtonPress && shortPwrBtn == PowerPageTurn) {
-          powerPressStartedMs_ = millis();
+          powerPressActive_ = true;
+          powerPressStartedMs_ = e.timestampMs != 0 ? e.timestampMs : millis();
         }
         break;
     }
@@ -159,6 +170,18 @@ int main() {
                     "Power press+release (short) -> MoveDown");
     runner.expectEq(uint32_t(0), d.powerPressStartedMs_,
                     "Power release resets timestamp");
+  }
+
+  // A short physical press can be dispatched after a slow e-ink refresh.
+  {
+    TocDispatcher d;
+    d.shortPwrBtn = TocDispatcher::PowerPageTurn;
+    d.currentTimeMs_ = 1000;
+    d.processEvent(Event::press(Button::Power, 100));
+    d.currentTimeMs_ = 1500;
+    d.processEvent(Event::release(Button::Power, 220));
+    runner.expectEq(static_cast<int>(TocAction::MoveDown), static_cast<int>(d.lastAction),
+                    "Delayed dispatch uses physical edge timestamps");
   }
 
   // ============================================

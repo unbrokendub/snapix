@@ -96,16 +96,25 @@ bool ReaderAsyncJobsController::queuePageFillWork(const PageFillRequest& request
 }
 
 void ReaderAsyncJobsController::enqueuePendingPageTurn(const int direction, const char* reason, const int workerState) {
-  navigationJob_.queuedTurn += direction > 0 ? 1 : -1;
+  const int normalizedDirection = direction > 0 ? 1 : -1;
+  const int previousQueue = navigationJob_.queuedTurn;
+  navigationJob_.queuedTurn += normalizedDirection;
   if (!navigationJob_.queuedTurnHasQueuedMs) {
     navigationJob_.queuedTurnQueuedMs = millis();
     navigationJob_.queuedTurnHasQueuedMs = true;
   }
-  LOG_INF("RDR_NAV", "[INPUT] deferred page-turn dir=%d queue=%d reason=%s workerState=%d preemptAge=%lu", direction,
-          navigationJob_.queuedTurn, reason ? reason : "unknown", workerState,
+  LOG_INF("RDR_NAV", "[INPUT] deferred page-turn dir=%d queue=%d reason=%s workerState=%d preemptAge=%lu",
+          normalizedDirection, navigationJob_.queuedTurn, reason ? reason : "unknown", workerState,
           navigationJob_.lastCachePreemptRequestedMs == 0
               ? 0UL
               : static_cast<unsigned long>(millis() - navigationJob_.lastCachePreemptRequestedMs));
+  // Opposite clicks form a net reading-position delta. Once they cancel
+  // completely, clear every bit of queue metadata as well; otherwise a future
+  // queue inherits a stale timestamp/preemption state from an already-finished
+  // interaction.
+  if (previousQueue != 0 && navigationJob_.queuedTurn == 0) {
+    navigationJob_.clearQueuedTurn();
+  }
 }
 
 bool ReaderAsyncJobsController::deferPageTurnUntilWorkerStops(const int direction, const bool workerRunning,
@@ -138,11 +147,11 @@ void ReaderAsyncJobsController::noteQueuedTurnWorkerIdle(const bool workerRunnin
           static_cast<unsigned long>(queuedForMs));
 }
 
-bool ReaderAsyncJobsController::tryConsumeQueuedTurn(const bool workerRunning, const bool needsRender,
-                                                     const bool pendingTocJump, const bool pendingPageLoad,
-                                                     const bool menuMode, const bool bookmarkMode, const bool tocMode,
-                                                     int& queuedTurn, uint32_t& queuedForMs) {
-  queuedTurn = 0;
+bool ReaderAsyncJobsController::tryConsumeQueuedTurns(const bool workerRunning, const bool needsRender,
+                                                      const bool pendingTocJump, const bool pendingPageLoad,
+                                                      const bool menuMode, const bool bookmarkMode, const bool tocMode,
+                                                      int& queuedTurns, uint32_t& queuedForMs) {
+  queuedTurns = 0;
   queuedForMs = 0;
 
   if (navigationJob_.queuedTurn == 0 || needsRender || pendingTocJump || pendingPageLoad || menuMode || bookmarkMode ||
@@ -150,14 +159,16 @@ bool ReaderAsyncJobsController::tryConsumeQueuedTurn(const bool workerRunning, c
     return false;
   }
 
-  queuedTurn = navigationJob_.queuedTurn > 0 ? 1 : -1;
-  navigationJob_.queuedTurn -= queuedTurn;
+  // Consume the net delta as one UI transaction. ReaderState applies all
+  // reachable steps before the next e-ink refresh, so a burst of five clicks
+  // produces one final frame instead of five seconds of stale intermediate
+  // frames. If a chapter boundary is reached, ReaderState requeues only the
+  // still-unresolved remainder.
+  queuedTurns = navigationJob_.queuedTurn;
   queuedForMs = !navigationJob_.queuedTurnHasQueuedMs
                     ? 0
                     : static_cast<uint32_t>(millis() - navigationJob_.queuedTurnQueuedMs);
-  if (navigationJob_.queuedTurn == 0) {
-    navigationJob_.clearQueuedTurn();
-  }
+  navigationJob_.clearQueuedTurn();
   return true;
 }
 

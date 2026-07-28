@@ -77,6 +77,8 @@ class ReaderCacheController {
   bool prefetchNextEpubSpineCache(Core& core, const RenderConfig& config, int activeSpineIndex, bool coverExists,
                                   int textStartIndex, bool allowFarSweep, const AbortCallback& shouldAbort,
                                   const Viewport& viewport = Viewport{});
+  bool prefetchNextFb2SectionCache(Core& core, const RenderConfig& config, int activeSectionIndex,
+                                   const AbortCallback& shouldAbort, const Viewport& viewport = Viewport{});
 
   static void saveAnchorMap(const ContentParser& parser, const std::string& cachePath);
   static int loadAnchorPage(const std::string& cachePath, const std::string& anchor);

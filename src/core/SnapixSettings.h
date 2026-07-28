@@ -110,6 +110,7 @@ struct Settings {
   uint8_t sleepHoldTime = SleepHold1s;  // How long power button must be held to enter sleep (1-5 seconds)
   uint8_t bionicReading = 0;            // Bionic reading mode: bold first half of each word
   uint8_t fakeBold = 0;                 // Fake bold: render bold text via 3x draw instead of bold font
+  uint32_t nextSleepImageIndex = 0;     // Next naturally sorted /sleep image to show
 
   // Persistence (using drivers::Storage wrapper)
   Result<void> load(drivers::Storage& storage);

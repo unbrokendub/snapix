@@ -35,43 +35,51 @@ struct Event {
     Error error;
     uint8_t data;
   };
+  // Time at which the input edge was observed. Dispatch may be delayed by an
+  // e-ink refresh, so button duration must not be measured in the main loop.
+  uint32_t timestampMs;
 
-  static Event none() { return {EventType::None, {}}; }
+  static Event none() { return {EventType::None, {}, 0}; }
 
-  static Event buttonPress(Button btn) {
+  static Event buttonPress(Button btn, uint32_t timestamp = 0) {
     Event e;
     e.type = EventType::ButtonPress;
     e.button = btn;
+    e.timestampMs = timestamp;
     return e;
   }
 
-  static Event buttonLongPress(Button btn) {
+  static Event buttonLongPress(Button btn, uint32_t timestamp = 0) {
     Event e;
     e.type = EventType::ButtonLongPress;
     e.button = btn;
+    e.timestampMs = timestamp;
     return e;
   }
 
-  static Event buttonRepeat(Button btn) {
+  static Event buttonRepeat(Button btn, uint32_t timestamp = 0) {
     Event e;
     e.type = EventType::ButtonRepeat;
     e.button = btn;
+    e.timestampMs = timestamp;
     return e;
   }
 
-  static Event buttonRelease(Button btn) {
+  static Event buttonRelease(Button btn, uint32_t timestamp = 0) {
     Event e;
     e.type = EventType::ButtonRelease;
     e.button = btn;
+    e.timestampMs = timestamp;
     return e;
   }
 
-  static Event system(EventType t) { return {t, {}}; }
+  static Event system(EventType t) { return {t, {}, 0}; }
 
   static Event contentError(Error err) {
     Event e;
     e.type = EventType::ContentError;
     e.error = err;
+    e.timestampMs = 0;
     return e;
   }
 };

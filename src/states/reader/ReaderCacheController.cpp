@@ -704,10 +704,17 @@ bool ReaderCacheController::shouldContinueIdleBackgroundCaching(Core& core) {
     if (type == ContentType::Epub) {
       return true;
     }
+    if (type == ContentType::Fb2 && !backgroundNearPrefetchComplete_) {
+      return true;
+    }
     return nearTail;
   }
 
-  return type == ContentType::Epub && !backgroundPrefetchSweepComplete_;
+  if (type == ContentType::Epub) {
+    return !backgroundPrefetchSweepComplete_;
+  }
+  return type == ContentType::Fb2 && fb2UsesSectionNavigation(core.content.asFb2()) &&
+         !backgroundNearPrefetchComplete_;
 }
 
 bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderConfig& config, const int activeSpineIndex,
@@ -740,9 +747,11 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
   const std::string imageCachePath = core.settings.showImages ? (epub->getCachePath() + "/images") : "";
   auto& state = resources_.unsafeState();
 
-  auto notePrefetchResult = [&](const int spine, const bool cacheComplete) {
+  auto notePrefetchResult = [&](const int spine, const bool hasReadablePage, const bool cacheComplete) {
     if (spine == nextSpine) {
-      backgroundNearPrefetchComplete_ = cacheComplete;
+      // The interactive boundary only needs page 0. Completing the whole
+      // next chapter here delays the useful work and can starve read-ahead.
+      backgroundNearPrefetchComplete_ = hasReadablePage;
     }
     if (allowFarSweep && !cacheComplete) {
       sweepComplete = false;
@@ -773,7 +782,11 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
     const std::string nextCachePath = epubSectionCachePath(epub->getCachePath(), spine);
     PageCache nextCache(nextCachePath);
     if (nextCache.load(config) && !nextCache.isPartial()) {
-      notePrefetchResult(spine, true);
+      notePrefetchResult(spine, nextCache.pageCount() > 0, true);
+      continue;
+    }
+    if (!allowFarSweep && nextCache.pageCount() > 0) {
+      notePrefetchResult(spine, true, false);
       continue;
     }
 
@@ -809,14 +822,14 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
         if (nextCache.extend(*transientParser, kDefaultCacheBatchPages, shouldAbort)) {
           didWork = true;
         }
-        notePrefetchResult(spine, !nextCache.isPartial());
+        notePrefetchResult(spine, nextCache.pageCount() > 0, !nextCache.isPartial());
       } else {
         PageCache transientCache(nextCachePath);
         if (transientCache.create(*transientParser, config, kDefaultCacheBatchPages, 0, shouldAbort)) {
           didWork = true;
-          notePrefetchResult(spine, !transientCache.isPartial());
+          notePrefetchResult(spine, transientCache.pageCount() > 0, !transientCache.isPartial());
         } else {
-          notePrefetchResult(spine, false);
+          notePrefetchResult(spine, false, false);
         }
       }
       continue;
@@ -830,14 +843,14 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
       if (nextCache.extend(*parser, kDefaultCacheBatchPages, shouldAbort)) {
         didWork = true;
       }
-      notePrefetchResult(spine, !nextCache.isPartial());
+      notePrefetchResult(spine, nextCache.pageCount() > 0, !nextCache.isPartial());
     } else {
       PageCache buildCache(nextCachePath);
       if (buildCache.create(*parser, config, kDefaultCacheBatchPages, 0, shouldAbort)) {
         didWork = true;
-        notePrefetchResult(spine, !buildCache.isPartial());
+        notePrefetchResult(spine, buildCache.pageCount() > 0, !buildCache.isPartial());
       } else {
-        notePrefetchResult(spine, false);
+        notePrefetchResult(spine, false, false);
       }
     }
   }
@@ -848,6 +861,80 @@ bool ReaderCacheController::prefetchNextEpubSpineCache(Core& core, const RenderC
       backgroundPrefetchCursorSpine_ = -1;
     }
   }
+  return didWork;
+}
+
+bool ReaderCacheController::prefetchNextFb2SectionCache(Core& core, const RenderConfig& config,
+                                                        const int activeSectionIndex,
+                                                        const AbortCallback& shouldAbort,
+                                                        const Viewport& viewport) {
+  auto* provider = core.content.asFb2();
+  if (!fb2UsesSectionNavigation(provider)) {
+    return false;
+  }
+
+  const int nextSection = activeSectionIndex + 1;
+  if (nextSection >= static_cast<int>(provider->tocCount())) {
+    backgroundNearPrefetchComplete_ = true;
+    return false;
+  }
+
+  std::string nextCachePath;
+  uint32_t startOffset = 0;
+  uint32_t endOffset = 0;
+  int startingSectionIndex = 0;
+  if (!resolveFb2SectionContext(provider, config, nextSection, &nextCachePath, &startOffset,
+                                &startingSectionIndex, &endOffset)) {
+    return false;
+  }
+
+  PageCache nextCache(nextCachePath);
+  const bool loaded = nextCache.load(config);
+  if (loaded && nextCache.pageCount() > 0) {
+    backgroundNearPrefetchComplete_ = true;
+    LOG_DBG(TAG, "[CACHE] FB2 lookahead already ready section=%d pages=%u",
+            nextSection, static_cast<unsigned>(nextCache.pageCount()));
+    return false;
+  }
+  if (shouldAbort && shouldAbort()) {
+    return false;
+  }
+
+  auto& state = resources_.unsafeState();
+  if (!state.lookaheadParser || state.lookaheadParserSpineIndex != nextSection) {
+    auto parser = tryNewUnique<ContentParser, Fb2Parser>(
+        "Fb2Parser (lookahead)", contentPath_, resources_.renderer(), config, startOffset,
+        startingSectionIndex, true, endOffset);
+    if (!parser) {
+      return false;
+    }
+    if (provider->getFb2()) {
+      static_cast<Fb2Parser*>(parser.get())->setFb2(provider->getFb2());
+    }
+    static_cast<Fb2Parser*>(parser.get())
+        ->setStreamingViewport(viewport.marginTop, viewport.marginBottom,
+                               viewport.marginLeft, viewport.marginRight);
+    state.lookaheadParser = std::move(parser);
+    state.lookaheadParserSpineIndex = nextSection;
+  }
+
+  bool didWork = false;
+  if (loaded && nextCache.isPartial()) {
+    didWork = nextCache.extend(*state.lookaheadParser, 1, shouldAbort);
+  } else {
+    PageCache buildCache(nextCachePath);
+    didWork = buildCache.create(*state.lookaheadParser, config, 1, 0, shouldAbort);
+    backgroundNearPrefetchComplete_ = didWork && buildCache.pageCount() > 0;
+    LOG_INF(TAG, "[CACHE] FB2 lookahead section=%d ready=%u pages=%u",
+            nextSection, static_cast<unsigned>(backgroundNearPrefetchComplete_),
+            static_cast<unsigned>(buildCache.pageCount()));
+    return didWork;
+  }
+
+  backgroundNearPrefetchComplete_ = nextCache.pageCount() > 0;
+  LOG_INF(TAG, "[CACHE] FB2 lookahead section=%d ready=%u pages=%u",
+          nextSection, static_cast<unsigned>(backgroundNearPrefetchComplete_),
+          static_cast<unsigned>(nextCache.pageCount()));
   return didWork;
 }
 
@@ -923,11 +1010,26 @@ BackgroundCachePlan ReaderCacheController::planBackgroundCacheWork(Core& core) {
       return plan;
     }
 
-    // For EPUB, a partial cache means the current spine was not rebuilt to a
-    // stable section boundary yet. Finishing that work is more valuable than
-    // prefetching the next spine: it replaces transient placeholders/missing
-    // images in the currently readable chapter and avoids wasting heap on
-    // prefetch work that is likely to be preempted by the next page turn.
+    const bool supportsNextSectionPrefetch =
+        type == ContentType::Epub ||
+        (type == ContentType::Fb2 && fb2UsesSectionNavigation(core.content.asFb2()));
+    if (shouldPrioritizeNextSectionPrefetch(
+            supportsNextSectionPrefetch, pageCache()->pageCount() > 0,
+            currentPartialNearTail, backgroundNearPrefetchComplete_,
+            recentReaderInteraction, canRunEpubNearPrefetch(readHeapState()))) {
+      // Keep a safe three-page runway in the active section, then spend one
+      // worker pass preparing page 0 of the next section. Previously EPUB
+      // completed the entire active chapter first and FB2 never prefetched a
+      // section at all, so both formats could expose Loading at the boundary.
+      plan.shouldStart = true;
+      plan.reason = BackgroundCacheWakeReason::NearPrefetchReady;
+      plan.candidateSpine = activeSpine + 1;
+      return plan;
+    }
+
+    // Once page 0 of the next chapter is ready (or the active cache is already
+    // near its tail), finish the current EPUB cache to a stable boundary. This
+    // replaces transient placeholders and keeps imminent page turns covered.
     if (currentEpubPartialNeedsCompletion) {
       if (!allowImmediateActivePartialWork) {
         plan.reason = BackgroundCacheWakeReason::CurrentCachePartialWaiting;
@@ -956,6 +1058,19 @@ BackgroundCachePlan ReaderCacheController::planBackgroundCacheWork(Core& core) {
   }
 
   if (type != ContentType::Epub) {
+    if (type == ContentType::Fb2 && fb2UsesSectionNavigation(core.content.asFb2()) &&
+        !backgroundNearPrefetchComplete_) {
+      const HeapState heap = readHeapState();
+      if (canRunEpubNearPrefetch(heap)) {
+        plan.shouldStart = true;
+        plan.reason = BackgroundCacheWakeReason::NearPrefetchReady;
+        plan.candidateSpine = activeSpine + 1;
+      } else {
+        plan.reason = BackgroundCacheWakeReason::BlockedByHeap;
+      }
+      return plan;
+    }
+
     // FB2 with deferred image decode: pending JPEGs / PNGs left over from a
     // prior cache pass need a worker wake-up even when the page cache itself
     // is complete.  Same goes for binaries whose `cacheImage[fast]` stream
@@ -1109,18 +1224,19 @@ void ReaderCacheController::createOrExtendCache(Core& core, const Viewport& view
     if (resolveFb2SectionContext(provider, config, position_.currentSpineIndex, &cachePath, &startOffset,
                                  &startingSectionIndex, &endOffset)) {
       if (!state.parser || state.parserSpineIndex != position_.currentSpineIndex) {
-        auto newParser = tryNewUnique<ContentParser, Fb2Parser>("Fb2Parser (sectioned)", contentPath_,
-                                                                 resources_.renderer(), config, startOffset,
-                                                                 startingSectionIndex, true, endOffset);
-        if (!newParser) return;
-        // Hand the parser an Fb2 reference so it can resolve <image> tags
-        // through the binary index.  Without this the parser silently skips
-        // inline FB2 images.
-        if (provider && provider->getFb2()) {
-          static_cast<Fb2Parser*>(newParser.get())->setFb2(provider->getFb2());
+        if (!promoteLookaheadParser(position_.currentSpineIndex)) {
+          auto newParser = tryNewUnique<ContentParser, Fb2Parser>(
+              "Fb2Parser (sectioned)", contentPath_, resources_.renderer(), config, startOffset,
+              startingSectionIndex, true, endOffset);
+          if (!newParser) return;
+          // Hand the parser an Fb2 reference so it can resolve <image> tags
+          // through the binary index. Without this it skips inline images.
+          if (provider && provider->getFb2()) {
+            static_cast<Fb2Parser*>(newParser.get())->setFb2(provider->getFb2());
+          }
+          state.parser = std::move(newParser);
+          state.parserSpineIndex = position_.currentSpineIndex;
         }
-        state.parser = std::move(newParser);
-        state.parserSpineIndex = position_.currentSpineIndex;
       }
     } else {
       if (!state.parser) {

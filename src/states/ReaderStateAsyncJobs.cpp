@@ -55,6 +55,8 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
           static_cast<unsigned>(request.plan.allowFarSweep));
 
   bool workerDidBackgroundWork = false;
+  const bool prioritizeNextSection =
+      request.plan.reason == BackgroundCacheWakeReason::NearPrefetchReady;
   const bool acquired = cacheController_.withWorkerResources("background-cache", [&](auto&) {
     // Final heap check on the worker thread: the plan was made on the main
     // thread, but heap may have changed since.  Allocating a new
@@ -129,12 +131,15 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
       if (resolveFb2SectionContext(fb2Provider, config, activeSpineForCache, &cachePath, &startOffset,
                                    &startingSectionIndex, &endOffset)) {
         if (!parser_ || parserSpineIndex_ != activeSpineForCache) {
-          auto* fb2Parser = new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset);
-          if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
-          // v2.0.131 — plumb real viewport margins (see EPUB site above).
-          fb2Parser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
-          parser_.reset(fb2Parser);
-          parserSpineIndex_ = activeSpineForCache;
+          if (!promoteLookaheadParser(activeSpineForCache)) {
+            auto* fb2Parser =
+                new Fb2Parser(contentPath_, renderer_, config, startOffset, startingSectionIndex, true, endOffset);
+            if (fb2Provider && fb2Provider->getFb2()) fb2Parser->setFb2(fb2Provider->getFb2());
+            // v2.0.131 — plumb real viewport margins (see EPUB site above).
+            fb2Parser->setStreamingViewport(vp.marginTop, vp.marginBottom, vp.marginLeft, vp.marginRight);
+            parser_.reset(fb2Parser);
+            parserSpineIndex_ = activeSpineForCache;
+          }
         }
       } else {
         cachePath = contentCachePath(coreRef.content.cacheDir(), config.fontId);
@@ -205,7 +210,7 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
       const bool nearTail = pageCache_->needsExtension(static_cast<uint16_t>(safeSectionPage));
       const bool eagerIdleHotExtend = (type == ContentType::Epub && canHotExtend);
 
-      if (nearTail || eagerIdleHotExtend) {
+      if (!prioritizeNextSection && (nearTail || eagerIdleHotExtend)) {
         const bool mayRewriteExistingPages = !canHotExtend;
         const size_t pagesBefore = pageCache_->pageCount();
         const bool partialBefore = pageCache_->isPartial();
@@ -235,7 +240,7 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
 
     if (type == ContentType::Epub && !(shouldAbort && shouldAbort())) {
       const bool currentCacheComplete = pageCache_ && pageCache_->path() == cachePath && !pageCache_->isPartial();
-      if (currentCacheComplete) {
+      if (currentCacheComplete || prioritizeNextSection) {
         didBackgroundWork =
             // v2.0.131 — pass vp so lookahead parsers get real viewport margins.
             cacheController_.prefetchNextEpubSpineCache(coreRef, config, activeSpineForCache, request.position.hasCover,
@@ -245,6 +250,12 @@ void ReaderState::runBackgroundCacheJob(const reader::ReaderAsyncJobsController:
       } else {
         cacheController_.resetBackgroundPrefetchState();
       }
+    } else if (type == ContentType::Fb2 && prioritizeNextSection &&
+               !(shouldAbort && shouldAbort())) {
+      didBackgroundWork =
+          cacheController_.prefetchNextFb2SectionCache(coreRef, config, activeSpineForCache,
+                                                       shouldAbort, vp) ||
+          didBackgroundWork;
     }
 
     // FB2 inline-image decode pass.  Fb2Parser registers <image>s in fast mode
@@ -670,7 +681,10 @@ void ReaderState::runPageFillJob(const reader::ReaderAsyncJobsController::PageFi
             ? request.targetSpine
             : 0;
     if (!parser_ || parserSpineIndex_ != parserTargetSpine) {
-      if (isEpub && promoteLookaheadParser(request.targetSpine)) {
+      const bool canPromoteLookahead =
+          isEpub || (type == ContentType::Fb2 &&
+                     fb2UsesSectionNavigation(coreRef.content.asFb2()));
+      if (canPromoteLookahead && promoteLookaheadParser(request.targetSpine)) {
         // Promoted existing resumable parser for this spine.
       } else if (isEpub) {
         auto* epubParser = new EpubChapterParser(provider->getEpubShared(), request.targetSpine, renderer_, config,

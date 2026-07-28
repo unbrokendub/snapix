@@ -17,9 +17,11 @@ class MappedInputManager {
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
   bool isPressed(Button button) const;
+  bool isSampledPressed(Button button) const;
   bool wasAnyPressed() const;
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
+  uint8_t physicalButton(Button button) const;
 
  private:
   InputManager& inputManager;

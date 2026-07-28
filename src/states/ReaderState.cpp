@@ -189,7 +189,7 @@ const char* ReaderState::backgroundCacheWakeReasonToString(const BackgroundCache
 bool ReaderState::promoteLookaheadParser(const int targetSpine) {
   const bool promoted = cacheController_.promoteLookaheadParser(targetSpine);
   if (promoted) {
-    LOG_DBG(TAG, "Promoted lookahead EPUB parser spine=%d", targetSpine);
+    LOG_DBG(TAG, "Promoted lookahead parser spine=%d", targetSpine);
   }
   return promoted;
 }
@@ -738,6 +738,7 @@ ReaderState::ReaderState(GfxRenderer& renderer)
       lastIdleBackgroundKickMs_(cacheController_.lastIdleBackgroundKickMsRef()),
       lastReaderInteractionMs_(cacheController_.lastReaderInteractionMsRef()),
       holdNavigated_(navigationController_.holdNavigatedRef()),
+      powerPressActive_(navigationController_.powerPressActiveRef()),
       powerPressStartedMs_(navigationController_.powerPressStartedMsRef()),
       warmedNextPage_(cacheController_.warmedNextPageRef()),
       warmedNextNextPage_(cacheController_.warmedNextNextPageRef()),
@@ -1279,7 +1280,8 @@ StateTransition ReaderState::update(Core& core) {
 
       if (pendingEvent.type == EventType::ButtonPress && pendingEvent.button == Button::Power &&
           core.settings.shortPwrBtn == Settings::PowerPageTurn) {
-        powerPressStartedMs_ = millis();
+        powerPressActive_ = true;
+        powerPressStartedMs_ = reader::inputEventTimeMs(pendingEvent, millis());
         continue;
       }
 
@@ -1297,12 +1299,12 @@ StateTransition ReaderState::update(Core& core) {
           enqueuePendingPageTurn(-1, "pending-epub-page-load");
           break;
         case Button::Power:
-          if (core.settings.shortPwrBtn == Settings::PowerPageTurn && powerPressStartedMs_ != 0) {
-            const uint32_t heldMs = millis() - powerPressStartedMs_;
-            if (heldMs < core.settings.getPowerButtonDuration()) {
-              enqueuePendingPageTurn(1, "pending-epub-page-load");
-            }
+          if (core.settings.shortPwrBtn == Settings::PowerPageTurn &&
+              reader::isShortPowerRelease(pendingEvent, powerPressActive_, powerPressStartedMs_, millis(),
+                                          core.settings.getPowerButtonDuration())) {
+            enqueuePendingPageTurn(1, "pending-epub-page-load");
           }
+          powerPressActive_ = false;
           powerPressStartedMs_ = 0;
           break;
         default:
@@ -1313,25 +1315,6 @@ StateTransition ReaderState::update(Core& core) {
   }
 
   const bool navigationBlocksInput = asyncJobs_.navigationJobBlocksInput();
-  if (queuedPendingEpubTurn_ != 0 && !needsRender_ && !navigationBlocksInput && !pendingEpubPageLoadActive_ &&
-      !menuMode_ && !bookmarkMode_ && !tocMode_) {
-    int queuedTurn = 0;
-    uint32_t queuedForMs = 0;
-    asyncJobs_.noteQueuedTurnWorkerIdle(isWorkerRunning());
-    if (asyncJobs_.tryConsumeQueuedTurn(isWorkerRunning(), needsRender_, navigationBlocksInput,
-                                        pendingEpubPageLoadActive_, menuMode_, bookmarkMode_, tocMode_, queuedTurn,
-                                        queuedForMs)) {
-      LOG_INF(TAG, "[INPUT] executing deferred page-turn dir=%d wait=%lu remaining=%d", queuedTurn,
-              static_cast<unsigned long>(queuedForMs), queuedPendingEpubTurn_);
-
-      if (queuedTurn > 0) {
-        navigateNext(core);
-      } else {
-        navigatePrev(core);
-      }
-      return StateTransition::stay(StateId::Reader);
-    }
-  }
 
   int pendingRefreshSpine = -1;
   int pendingRefreshPage = -1;
@@ -1410,7 +1393,8 @@ StateTransition ReaderState::update(Core& core) {
             return exitToUI(core);
           case Button::Power:
             if (core.settings.shortPwrBtn == Settings::PowerPageTurn) {
-              powerPressStartedMs_ = millis();
+              powerPressActive_ = true;
+              powerPressStartedMs_ = reader::inputEventTimeMs(e, millis());
               if (isWorkerRunning()) {
                 asyncJobs_.markCachePreemptRequested(millis());
                 LOG_INF(TAG, "[INPUT] preempt requested button=%d workerState=%d", static_cast<int>(e.button),
@@ -1429,11 +1413,16 @@ StateTransition ReaderState::update(Core& core) {
           switch (e.button) {
             case Button::Right:
             case Button::Down:
+              // A chapter jump supersedes page-level clicks accumulated while
+              // a cache fill was active. Keeping that old delta would yank the
+              // reader several pages after the chapter jump completes.
+              asyncJobs_.clearQueuedPageTurns();
               navigateNextChapter(core);
               holdNavigated_ = true;
               break;
             case Button::Left:
             case Button::Up:
+              asyncJobs_.clearQueuedPageTurns();
               navigatePrevChapter(core);
               holdNavigated_ = true;
               break;
@@ -1450,20 +1439,31 @@ StateTransition ReaderState::update(Core& core) {
             case Button::Down:
               LOG_INF(TAG, "[INPUT] page-turn release button=%d workerActive=%u", static_cast<int>(e.button),
                       static_cast<unsigned>(isWorkerRunning()));
-              navigateNext(core);
+              if (queuedPendingEpubTurn_ != 0) {
+                enqueuePendingPageTurn(1, "merge-live-page-turn");
+              } else {
+                navigateNext(core);
+              }
               break;
             case Button::Left:
             case Button::Up:
               LOG_INF(TAG, "[INPUT] page-turn release button=%d workerActive=%u", static_cast<int>(e.button),
                       static_cast<unsigned>(isWorkerRunning()));
-              navigatePrev(core);
+              if (queuedPendingEpubTurn_ != 0) {
+                enqueuePendingPageTurn(-1, "merge-live-page-turn");
+              } else {
+                navigatePrev(core);
+              }
               break;
             case Button::Power:
-              if (core.settings.shortPwrBtn == Settings::PowerPageTurn && powerPressStartedMs_ != 0) {
-                const uint32_t heldMs = millis() - powerPressStartedMs_;
-                if (heldMs < core.settings.getPowerButtonDuration()) {
-                  LOG_INF(TAG, "[INPUT] page-turn release button=%d workerActive=%u", static_cast<int>(e.button),
-                          static_cast<unsigned>(isWorkerRunning()));
+              if (core.settings.shortPwrBtn == Settings::PowerPageTurn &&
+                  reader::isShortPowerRelease(e, powerPressActive_, powerPressStartedMs_, millis(),
+                                              core.settings.getPowerButtonDuration())) {
+                LOG_INF(TAG, "[INPUT] page-turn release button=%d workerActive=%u", static_cast<int>(e.button),
+                        static_cast<unsigned>(isWorkerRunning()));
+                if (queuedPendingEpubTurn_ != 0) {
+                  enqueuePendingPageTurn(1, "merge-live-page-turn");
+                } else {
                   navigateNext(core);
                 }
               }
@@ -1473,6 +1473,7 @@ StateTransition ReaderState::update(Core& core) {
           }
         }
         if (e.button == Button::Power) {
+          powerPressActive_ = false;
           powerPressStartedMs_ = 0;
         }
         holdNavigated_ = false;
@@ -1480,6 +1481,63 @@ StateTransition ReaderState::update(Core& core) {
 
       default:
         break;
+    }
+  }
+
+  // Fresh hardware events always win scheduling priority over deferred work.
+  // In particular, don't replay an old forward turn between a newly observed
+  // reverse press and its release. Once every page-turn button is physically
+  // up, consume the complete net delta and coalesce all reachable steps into
+  // one e-ink frame.
+  const bool pageTurnButtonHeld =
+      core.input.isPressed(Button::Right) || core.input.isPressed(Button::Down) ||
+      core.input.isPressed(Button::Left) || core.input.isPressed(Button::Up) ||
+      (core.settings.shortPwrBtn == Settings::PowerPageTurn && core.input.isPressed(Button::Power));
+  if (queuedPendingEpubTurn_ != 0 && !pageTurnButtonHeld && !needsRender_ && !navigationBlocksInput &&
+      !pendingEpubPageLoadActive_ && !menuMode_ && !bookmarkMode_ && !tocMode_) {
+    int queuedTurns = 0;
+    uint32_t queuedForMs = 0;
+    asyncJobs_.noteQueuedTurnWorkerIdle(isWorkerRunning());
+    if (asyncJobs_.tryConsumeQueuedTurns(isWorkerRunning(), needsRender_, navigationBlocksInput,
+                                         pendingEpubPageLoadActive_, menuMode_, bookmarkMode_, tocMode_, queuedTurns,
+                                         queuedForMs)) {
+      const int direction = queuedTurns > 0 ? 1 : -1;
+      int remaining = queuedTurns > 0 ? queuedTurns : -queuedTurns;
+      LOG_INF(TAG, "[INPUT] executing deferred page-turn batch delta=%d wait=%lu", queuedTurns,
+              static_cast<unsigned long>(queuedForMs));
+
+      while (remaining > 0) {
+        const int previousSpine = currentSpineIndex_;
+        const int previousSectionPage = currentSectionPage_;
+        const uint32_t previousFlatPage = currentPage_;
+
+        if (direction > 0) {
+          navigateNext(core);
+        } else {
+          navigatePrev(core);
+        }
+        remaining--;
+
+        const bool moved = currentSpineIndex_ != previousSpine ||
+                           currentSectionPage_ != previousSectionPage ||
+                           currentPage_ != previousFlatPage;
+        if (!moved) {
+          LOG_INF(TAG, "[INPUT] deferred page-turn batch stopped at book boundary remaining=%d", remaining);
+          break;
+        }
+
+        // Crossing a chapter replaces the active cache and the previous
+        // chapter's page count no longer describes subsequent steps. Render
+        // the boundary page first, then continue only the unresolved suffix.
+        if (currentSpineIndex_ != previousSpine && remaining > 0) {
+          LOG_INF(TAG, "[INPUT] deferred page-turn batch paused at chapter boundary remaining=%d", remaining);
+          while (remaining-- > 0) {
+            enqueuePendingPageTurn(direction, "chapter-boundary-remainder");
+          }
+          break;
+        }
+      }
+      return StateTransition::stay(StateId::Reader);
     }
   }
 
