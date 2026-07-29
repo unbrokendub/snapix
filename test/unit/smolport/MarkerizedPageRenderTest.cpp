@@ -33,17 +33,20 @@ using snapix::smolport::markerizeChapter;
 
 // Small page geometry (so it's easy to fill multiple pages with little
 // text).  100×80 working area with 12px lines = ~5 lines/page.
-static StreamingPaginatorConfig smallConfig() {
-  StreamingPaginatorConfig cfg{};
-  cfg.pageWidth = 100;
-  cfg.pageHeight = 80;
-  cfg.marginTop = 5;
-  cfg.marginBottom = 5;
-  cfg.marginLeft = 5;
-  cfg.marginRight = 5;
-  cfg.bodyLineHeight = 12;
-  cfg.headingLineHeight = 18;
-  cfg.paragraphSpacing = 4;
+static const StreamingPaginatorConfig& smallConfig() {
+  static const StreamingPaginatorConfig cfg = [] {
+    StreamingPaginatorConfig value{};
+    value.pageWidth = 100;
+    value.pageHeight = 80;
+    value.marginTop = 5;
+    value.marginBottom = 5;
+    value.marginLeft = 5;
+    value.marginRight = 5;
+    value.bodyLineHeight = 12;
+    value.headingLineHeight = 18;
+    value.paragraphSpacing = 4;
+    return value;
+  }();
   return cfg;
 }
 
@@ -241,7 +244,6 @@ int main() {
   //     resetForChapter() internally).
   // -----------------------------------------------------------------------
   {
-    StreamingPaginator paginator(smallConfig(), *new FakeRenderer);  // throwaway initial renderer
     // Render page 0 then page 2 with the SAME paginator instance.
     // resetForChapter inside renderMarkerizedPage should make this safe.
     FakeRenderer fr0;

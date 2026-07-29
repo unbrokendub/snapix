@@ -49,6 +49,8 @@ class MockPrint : public Print {
 
 int main() {
   TestUtils::TestRunner runner("ZipFileErrorPath");
+  const std::string testZipPath = "/test.zip";
+  const std::string sizesZipPath = "/sizes.zip";
 
   // ========================================================================
   // Basic Open/Close Tests - Error Cases
@@ -57,7 +59,7 @@ int main() {
   {
     SdMan.reset();
     SdMan.setFileExists("/test.zip", false);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     runner.expectFalse(zip.open(), "OpenNonExistentFile_ReturnsFalse");
     runner.expectFalse(zip.isOpen(), "OpenNonExistentFile_NotOpen");
   }
@@ -66,7 +68,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> zipData = createMinimalZip();
     SdMan.setFileData("/test.zip", zipData);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     zip.open();
     zip.close();
     runner.expectFalse(zip.isOpen(), "AfterClose_NotOpen");
@@ -76,7 +78,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> zipData = createMinimalZip();
     SdMan.setFileData("/test.zip", zipData);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     zip.open();
     zip.close();
     zip.close();  // Second close should be safe
@@ -91,7 +93,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> smallData(21, 0);  // Too small for valid ZIP
     SdMan.setFileData("/test.zip", smallData);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     zip.open();
     runner.expectEq<uint16_t>(0, zip.getTotalEntries(), "TooSmallZip_ZeroEntries");
   }
@@ -100,7 +102,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> data(100, 0);  // No EOCD signature
     SdMan.setFileData("/test.zip", data);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     zip.open();
     runner.expectEq<uint16_t>(0, zip.getTotalEntries(), "NoEOCD_ZeroEntries");
   }
@@ -113,7 +115,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> zipData = createMinimalZip();
     SdMan.setFileData("/test.zip", zipData);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     size_t size = 0;
     uint8_t* data = zip.readFileToMemory("nonexistent.txt", &size);
     runner.expectTrue(data == nullptr, "ReadNonExistent_ReturnsNull");
@@ -123,7 +125,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> zipData = createZipWithInvalidOffset("test.txt");
     SdMan.setFileData("/test.zip", zipData);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     size_t size = 0;
     uint8_t* data = zip.readFileToMemory("test.txt", &size);
     runner.expectTrue(data == nullptr, "ReadInvalidOffset_ReturnsNull");
@@ -133,7 +135,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> zipData = createZipWithUnsupportedCompression("test.txt");
     SdMan.setFileData("/test.zip", zipData);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     size_t size = 0;
     uint8_t* data = zip.readFileToMemory("test.txt", &size);
     runner.expectTrue(data == nullptr, "ReadUnsupportedCompression_ReturnsNull");
@@ -148,7 +150,7 @@ int main() {
     std::vector<uint8_t> zipData = createMinimalZip();
     SdMan.setFileData("/test.zip", zipData);
     MockPrint output;
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     runner.expectFalse(zip.readFileToStream("nonexistent.txt", output, 1024), "StreamNonExistent_ReturnsFalse");
   }
 
@@ -157,7 +159,7 @@ int main() {
     std::vector<uint8_t> zipData = createZipWithInvalidOffset("test.txt");
     SdMan.setFileData("/test.zip", zipData);
     MockPrint output;
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     runner.expectFalse(zip.readFileToStream("test.txt", output, 1024), "StreamInvalidOffset_ReturnsFalse");
   }
 
@@ -169,7 +171,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> zipData = createMinimalZip();
     SdMan.setFileData("/test.zip", zipData);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
     size_t size = 0;
     runner.expectFalse(zip.getInflatedFileSize("nonexistent.txt", &size), "GetSizeNonExistent_ReturnsFalse");
   }
@@ -177,7 +179,7 @@ int main() {
   {
     SdMan.reset();
     SdMan.setFileData("/sizes.zip", createCentralDirectoryOnlyZip());
-    ZipFile zip("/sizes.zip");
+    ZipFile zip(sizesZipPath);
     std::vector<ZipFile::SizeTarget> targets = {
         {ZipFile::fnvHash64("OPS/a.xhtml", 11), 11, 2},
         {ZipFile::fnvHash64("OPS/b.xhtml", 11), 11, 0},
@@ -198,7 +200,7 @@ int main() {
     SdMan.reset();
     std::vector<uint8_t> zipData = createMinimalZip();
     SdMan.setFileData("/test.zip", zipData);
-    ZipFile zip("/test.zip");
+    ZipFile zip(testZipPath);
 
     // Multiple read operations should not leak memory
     for (int i = 0; i < 5; i++) {
@@ -216,7 +218,7 @@ int main() {
     std::vector<uint8_t> zipData = createMinimalZip();
     SdMan.setFileData("/test.zip", zipData);
     {
-      ZipFile zip("/test.zip");
+      ZipFile zip(testZipPath);
       zip.open();
       // Destructor should close file safely
     }

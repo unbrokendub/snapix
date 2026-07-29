@@ -108,16 +108,15 @@ class FsFile {
   // Overload for void* (used by some libraries)
   int read(void* buf, size_t len) { return read(static_cast<uint8_t*>(buf), len); }
 
-  // Read into uint16_t* (used for reading 16-bit values)
+  // SdFat's second argument is always a byte count, regardless of the
+  // destination pointer type.  Keep these overloads because production code
+  // passes typed integer pointers, but do not scale len by sizeof(*buf).
   int read(uint16_t* buf, size_t len) {
-    int bytes = read(reinterpret_cast<uint8_t*>(buf), len * 2);
-    return bytes > 0 ? bytes / 2 : bytes;
+    return read(reinterpret_cast<uint8_t*>(buf), len);
   }
 
-  // Read into uint32_t* (used for reading 32-bit values)
   int read(uint32_t* buf, size_t len) {
-    int bytes = read(reinterpret_cast<uint8_t*>(buf), len * 4);
-    return bytes > 0 ? bytes / 4 : bytes;
+    return read(reinterpret_cast<uint8_t*>(buf), len);
   }
 
   size_t write(uint8_t byte) {
