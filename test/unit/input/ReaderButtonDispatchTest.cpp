@@ -43,6 +43,7 @@ int main() {
     navigation.setHoldNavigated(true);
     navigation.setPowerPressActive(true);
     navigation.setPowerPressStartedMs(42);
+    navigation.notePress(static_cast<int>(snapix::Button::Right));
     jobs.markCachePreemptRequested(77);
     jobs.enqueuePendingPageTurn(1, "test", 2);
     navigation.resetSession();
@@ -50,6 +51,8 @@ int main() {
 
     runner.expectFalse(navigation.holdNavigated(), "reset clears hold flag");
     runner.expectFalse(navigation.powerPressActive(), "reset clears power press state");
+    runner.expectFalse(navigation.consumeRelease(static_cast<int>(snapix::Button::Right)),
+                       "reset clears observed presses");
     runner.expectEq(uint32_t(0), navigation.powerPressStartedMs(), "reset clears power press timestamp");
     runner.expectEq(int(0), jobs.queuedPendingPageTurnRef(), "reset clears queued turns");
     runner.expectEq(uint32_t(0), jobs.queuedPendingPageTurnQueuedMsRef(), "reset clears queued turn age");
@@ -179,6 +182,28 @@ int main() {
                     "cancelled queue clears its stale age");
     runner.expectEq(uint32_t(0), controller.lastCachePreemptRequestedMsRef(),
                     "cancelled queue clears stale preemption state");
+  }
+
+  {
+    // Press-seen guard: a release only navigates if this state also saw the
+    // press. Mirrors the isShortPowerRelease/powerPressActive rule above,
+    // generalized to every button.
+    ReaderNavigationController navigation;
+    const int right = static_cast<int>(snapix::Button::Right);
+    const int left = static_cast<int>(snapix::Button::Left);
+    const int up = static_cast<int>(snapix::Button::Up);
+
+    runner.expectFalse(navigation.consumeRelease(up),
+                       "release whose press went to another state is ignored");
+
+    navigation.notePress(up);
+    runner.expectTrue(navigation.consumeRelease(up), "release after observed press navigates");
+    runner.expectFalse(navigation.consumeRelease(up), "a press is consumed by its own release");
+
+    navigation.notePress(right);
+    navigation.notePress(left);
+    runner.expectTrue(navigation.consumeRelease(left), "presses are tracked per button (left)");
+    runner.expectTrue(navigation.consumeRelease(right), "presses are tracked per button (right)");
   }
 
   runner.printSummary();

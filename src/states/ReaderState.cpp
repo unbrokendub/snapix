@@ -1274,6 +1274,9 @@ StateTransition ReaderState::update(Core& core) {
           pendingEvent.type == EventType::ButtonRepeat) {
         lastReaderInteractionMs_ = millis();
       }
+      if (pendingEvent.type == EventType::ButtonPress) {
+        navigationController_.notePress(static_cast<int>(pendingEvent.button));
+      }
       if (pendingEvent.type == EventType::ButtonPress && pendingEvent.button == Button::Back) {
         return exitToUI(core);
       }
@@ -1286,6 +1289,12 @@ StateTransition ReaderState::update(Core& core) {
       }
 
       if (pendingEvent.type != EventType::ButtonRelease) {
+        continue;
+      }
+
+      if (!navigationController_.consumeRelease(static_cast<int>(pendingEvent.button))) {
+        LOG_INF(TAG, "[INPUT] ignoring release without press button=%d (entry load)",
+                static_cast<int>(pendingEvent.button));
         continue;
       }
 
@@ -1358,6 +1367,14 @@ StateTransition ReaderState::update(Core& core) {
     }
     if (e.type == EventType::ButtonPress || e.type == EventType::ButtonRelease || e.type == EventType::ButtonRepeat) {
       lastReaderInteractionMs_ = millis();
+    }
+    // Track press/release pairing before overlay dispatch so the mask stays
+    // in step with what actually reached this state.
+    bool releasePressSeen = false;
+    if (e.type == EventType::ButtonPress) {
+      navigationController_.notePress(static_cast<int>(e.button));
+    } else if (e.type == EventType::ButtonRelease) {
+      releasePressSeen = navigationController_.consumeRelease(static_cast<int>(e.button));
     }
     if (menuMode_) {
       handleMenuInput(core, e);
@@ -1433,7 +1450,9 @@ StateTransition ReaderState::update(Core& core) {
         break;
 
       case EventType::ButtonRelease:
-        if (!holdNavigated_) {
+        if (!releasePressSeen) {
+          LOG_INF(TAG, "[INPUT] ignoring release without press button=%d", static_cast<int>(e.button));
+        } else if (!holdNavigated_) {
           switch (e.button) {
             case Button::Right:
             case Button::Down:
