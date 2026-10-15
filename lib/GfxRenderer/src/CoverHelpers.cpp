@@ -156,10 +156,11 @@ std::string findCoverImage(const std::string& dirPath, const std::string& baseNa
 }
 
 bool convertImageToBmp(const std::string& inputPath, const std::string& outputPath, const char* logTag,
-                       bool use1BitDithering) {
+                       bool use1BitDithering, const std::function<bool()>& shouldAbort) {
   ImageConvertConfig config;
   config.oneBit = use1BitDithering;
   config.logTag = logTag;
+  config.shouldAbort = shouldAbort;
   // v2.0.72: detect target filesystem by path prefix.  Cover/thumb destinations
   // for FB2/Txt/MD/HTML start with "/cache/" (LittleFS root); Xtc/Epub still
   // use SD with the same prefix because their caches haven't been migrated.
@@ -173,7 +174,17 @@ bool convertImageToBmp(const std::string& inputPath, const std::string& outputPa
   } else {
     config.outputOnLittleFs = false;
   }
-  return ImageConverterFactory::convertToBmp(inputPath, outputPath, config);
+  const bool ok = ImageConverterFactory::convertToBmp(inputPath, outputPath, config);
+  if (!ok) {
+    // Failed or cancelled mid-decode: never leave a truncated BMP behind —
+    // callers treat an existing cover.bmp as "the cover is ready".
+    if (config.outputOnLittleFs) {
+      LittleFS.remove(outputPath.c_str());
+    } else {
+      SdMan.remove(outputPath.c_str());
+    }
+  }
+  return ok;
 }
 
 bool generateThumbFromCover(const std::string& coverBmpPath, const std::string& thumbBmpPath, const char* logTag) {

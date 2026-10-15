@@ -5,6 +5,7 @@
  */
 
 #include "Fb2.h"
+#include "Fb2TocRecords.h"
 
 #include "Base64JpegPump.h"
 
@@ -958,7 +959,7 @@ std::string Fb2::findCoverImage() const {
   return CoverHelpers::findCoverImage(dirPath, title);
 }
 
-bool Fb2::generateCoverBmp(bool use1BitDithering) const {
+bool Fb2::generateCoverBmp(bool use1BitDithering, const std::function<bool()>& shouldAbort) const {
   const auto coverPath = getCoverBmpPath();
   // v2.0.72: cover BMP and failure marker BOTH on LittleFS (cachePath is
   // /cache/fb2_<hash>).  Pre-v2.0.72 the cover.exists check ran against SD,
@@ -997,8 +998,8 @@ bool Fb2::generateCoverBmp(bool use1BitDithering) const {
   setupCacheDir();
 
   // Convert to BMP using shared helper
-  const bool success = CoverHelpers::convertImageToBmp(coverImagePath, coverPath, "FB2", use1BitDithering);
-  if (!success) {
+  const bool success = CoverHelpers::convertImageToBmp(coverImagePath, coverPath, "FB2", use1BitDithering, shouldAbort);
+  if (!success && !(shouldAbort && shouldAbort())) {
     File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
     if (marker) {
       marker.close();
@@ -2013,25 +2014,52 @@ Fb2::TocItem Fb2::getTocItem(uint16_t index) const {
 
 bool Fb2::getTocSourceOffsets(std::vector<uint32_t>& offsets) const {
   offsets.assign(tocItemCount_, 0);
-  if (tocItemCount_ == 0 || tocLut_.size() < tocItemCount_) return false;
+  if (tocItemCount_ == 0) return false;
+  uint16_t visited = 0;
+  const bool ok = readTocItems(
+      0, tocItemCount_,
+      [&](const uint16_t index, const TocItem& item) {
+        offsets[index] = item.sourceOffset;
+        ++visited;
+        return true;
+      },
+      /*withTitles=*/false);
+  if (!ok || visited != tocItemCount_) {
+    offsets.clear();
+    return false;
+  }
+  return true;
+}
+
+bool Fb2::readTocItems(const uint16_t first, const uint16_t count,
+                       const std::function<bool(uint16_t, const TocItem&)>& visit, const bool withTitles) const {
+  if (first >= tocItemCount_ || tocLut_.size() < tocItemCount_ || count == 0) return false;
+  const uint16_t end = static_cast<uint16_t>(std::min<uint32_t>(tocItemCount_, static_cast<uint32_t>(first) + count));
 
   File file = LittleFS.open(metaCachePath().c_str(), "r");
   if (!file) return false;
+  if (!file.seek(tocLut_[first])) {
+    file.close();
+    return false;
+  }
 
+  auto records = fb2toc::makeRecordReader(
+      [&file](uint8_t* buf, const size_t len) -> int { return static_cast<int>(file.read(buf, len)); });
+  fb2toc::Record record;
+  TocItem item;
   bool ok = true;
-  for (uint16_t i = 0; i < tocItemCount_; ++i) {
-    int16_t sectionIndex = -1;
-    uint32_t sourceOffset = 0;
-    if (!file.seek(tocLut_[i]) || !serialization::skipString(file) ||
-        !serialization::readPodChecked(file, sectionIndex) ||
-        !serialization::readPodChecked(file, sourceOffset)) {
+  for (uint16_t i = first; i < end; ++i) {
+    if (!records.next(record, withTitles)) {
       ok = false;
       break;
     }
-    offsets[i] = sourceOffset;
+    item.title = std::move(record.title);
+    item.sectionIndex = record.sectionIndex;
+    item.sourceOffset = record.sourceOffset;
+    item.depth = record.depth;
+    if (!visit(i, item)) break;
   }
   file.close();
-  if (!ok) offsets.clear();
   return ok;
 }
 

@@ -106,6 +106,51 @@ struct PendingRefreshState {
   std::atomic<uint32_t> packed_{0};
 };
 
+// v3.11.12 — UI ↔ ReaderAsync hand-off for one piece of deferred work (cover
+// BMP, global page metrics) that used to run synchronously on the UI loop.
+//
+//   UI:     request()      Idle    → Pending   (work is wanted)
+//   UI:     markQueued()   Pending → Queued    (BEFORE the command is sent)
+//   worker: begin()        Queued  → Running   (false: cancelled meanwhile)
+//   worker: finish(s)      Running → Done | Failed | Pending (aborted)
+//   UI:     recoverDropped Queued  → Pending   (a worker cancel dropped the
+//                                               queued command before it ran)
+//   UI:     consume()      Done | Failed → Idle, returns the outcome
+//
+// Inputs the UI writes before markQueued() and outputs the worker writes
+// before finish() are published by these acq_rel transitions, so neither side
+// ever touches the other's data while the job is in flight.
+class DeferredJobSlot {
+ public:
+  enum class State : uint8_t { Idle, Pending, Queued, Running, Done, Failed };
+
+  State state() const { return state_.load(std::memory_order_acquire); }
+  bool request() { return transition(State::Idle, State::Pending); }
+  bool markQueued() { return transition(State::Pending, State::Queued); }
+  bool unmarkQueued() { return transition(State::Queued, State::Pending); }
+  bool begin() { return transition(State::Queued, State::Running); }
+  void finish(const State outcome) {
+    const State safe = (outcome == State::Done || outcome == State::Failed) ? outcome : State::Pending;
+    transition(State::Running, safe);
+  }
+  // `workerBusy` = a job is queued or running.  Without one, a Queued slot's
+  // command can only have been dropped by a cancel: it never ran.
+  bool recoverDropped(const bool workerBusy) { return !workerBusy && transition(State::Queued, State::Pending); }
+  State consume() {
+    State s = state();
+    if ((s == State::Done || s == State::Failed) && transition(s, State::Idle)) return s;
+    return State::Idle;
+  }
+  // Only while no job can be running (worker stopped).
+  void reset() { state_.store(State::Idle, std::memory_order_release); }
+
+ private:
+  bool transition(State from, const State to) {
+    return state_.compare_exchange_strong(from, to, std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+  std::atomic<State> state_{State::Idle};
+};
+
 enum class ReaderNavigationJobKind : uint8_t {
   None,
   TocJump,

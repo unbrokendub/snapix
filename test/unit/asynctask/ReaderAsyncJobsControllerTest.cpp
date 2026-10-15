@@ -181,6 +181,91 @@ int main() {
     runner.expectTrue(refresh.clearIfUnchanged(newToken), "current refresh clears by token");
   }
 
+  // ---- v3.11.12: DeferredJobSlot protocol (UI ↔ ReaderAsync hand-off) ----
+  {
+    using snapix::reader::DeferredJobSlot;
+    using S = DeferredJobSlot::State;
+    DeferredJobSlot slot;
+    runner.expectTrue(slot.state() == S::Idle, "slot starts idle");
+    runner.expectFalse(slot.begin(), "worker cannot claim an idle slot");
+    runner.expectTrue(slot.request(), "UI requests work");
+    runner.expectFalse(slot.request(), "second request is a no-op");
+    runner.expectFalse(slot.begin(), "worker cannot claim work that was never queued");
+    runner.expectTrue(slot.markQueued(), "UI marks queued before sending");
+    runner.expectFalse(slot.recoverDropped(true), "queued work with a busy worker is not 'dropped'");
+    runner.expectTrue(slot.recoverDropped(false), "queued work with an idle worker was dropped by a cancel");
+    runner.expectTrue(slot.state() == S::Pending, "dropped work is pending again");
+    runner.expectTrue(slot.markQueued() && slot.begin(), "requeued work is claimed");
+    runner.expectTrue(slot.consume() == S::Idle, "nothing to consume while running");
+    slot.finish(S::Queued);  // anything but Done/Failed means "retry"
+    runner.expectTrue(slot.state() == S::Pending, "aborted work goes back to pending");
+    runner.expectTrue(slot.markQueued() && slot.begin(), "retry is claimed");
+    slot.finish(S::Done);
+    runner.expectTrue(slot.consume() == S::Done, "UI consumes the outcome once");
+    runner.expectTrue(slot.state() == S::Idle && slot.consume() == S::Idle, "consumed slot is idle");
+    runner.expectTrue(slot.request() && slot.markQueued() && slot.begin(), "next job");
+    slot.finish(S::Failed);
+    runner.expectTrue(slot.consume() == S::Failed, "failure is reported");
+    slot.request();
+    slot.reset();
+    runner.expectTrue(slot.state() == S::Idle, "reset (worker stopped) clears any state");
+  }
+
+  // ---- v3.11.12: aux jobs run on the worker; a cancel drops a queued one ----
+  {
+    cleanupMockTasks();
+    cleanupMockQueues();
+
+    using snapix::reader::DeferredJobSlot;
+    using S = DeferredJobSlot::State;
+    DeferredJobSlot slot;
+    std::atomic<int> auxRuns{0};
+    std::atomic<bool> fillStarted{false};
+    std::atomic<int> auxKindSeen{0};
+
+    {
+      ReaderAsyncJobsController controller;
+      controller.setAuxHandler([&](const ReaderAsyncJobsController::AuxRequest& request,
+                                   const ReaderAsyncJobsController::AbortCallback& shouldAbort) {
+        auxKindSeen.store(static_cast<int>(request.kind));
+        if (!slot.begin()) return;
+        auxRuns.fetch_add(1);
+        slot.finish(shouldAbort() ? S::Pending : S::Done);
+      });
+      controller.setPageFillHandler([&](const ReaderAsyncJobsController::PageFillRequest&,
+                                        const ReaderAsyncJobsController::AbortCallback& shouldAbort) {
+        fillStarted.store(true);
+        while (!shouldAbort()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      });
+      runner.expectTrue(controller.startWorker(), "aux scenario starts");
+
+      ReaderAsyncJobsController::AuxRequest aux;
+      aux.kind = ReaderAsyncJobsController::AuxJobKind::CoverImage;
+
+      // 1. Behind a running cancellable job, then a cancel: never runs.
+      ReaderAsyncJobsController::PageFillRequest fill;
+      runner.expectTrue(controller.queuePageFillWork(fill), "blocking job queues");
+      for (int i = 0; i < 100 && !fillStarted.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      slot.request();
+      runner.expectTrue(slot.markQueued() && controller.queueAuxWork(aux), "aux job queues behind it");
+      controller.requestCancelCurrentJob();
+      runner.expectTrue(controller.waitUntilIdle(1000), "cancel drains the worker");
+      runner.expectEq(0, auxRuns.load(), "queued aux job dropped by the cancel");
+      runner.expectTrue(slot.recoverDropped(controller.isJobRunning()), "UI recovers the dropped job");
+
+      // 2. Requeued on an idle worker: runs once and reports Done.
+      runner.expectTrue(slot.markQueued() && controller.queueAuxWork(aux), "aux job requeued");
+      runner.expectTrue(controller.waitUntilIdle(1000), "aux job completes");
+      runner.expectEq(1, auxRuns.load(), "aux job ran exactly once");
+      runner.expectEq(static_cast<int>(ReaderAsyncJobsController::AuxJobKind::CoverImage), auxKindSeen.load(),
+                      "aux request kind reaches the handler");
+      runner.expectTrue(slot.consume() == S::Done, "UI sees the result after idle");
+      controller.stopWorker();
+    }
+    cleanupMockTasks();
+    cleanupMockQueues();
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }

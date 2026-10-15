@@ -212,6 +212,14 @@ foreach(TEST_SRC ${TEST_SOURCES})
     )
     target_compile_definitions(${TEST_NAME} PRIVATE XML_GE=0)
     target_link_libraries(${TEST_NAME} PRIVATE EXPAT::EXPAT)
+  elseif(TEST_NAME STREQUAL "Fb2TocRecordsTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/Fb2/src
+    )
   elseif(TEST_NAME STREQUAL "Fb2MetadataTest")
     find_package(EXPAT REQUIRED)
     add_executable(${TEST_NAME}

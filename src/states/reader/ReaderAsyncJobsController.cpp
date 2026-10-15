@@ -95,6 +95,13 @@ bool ReaderAsyncJobsController::queuePageFillWork(const PageFillRequest& request
   return enqueue(cmd);
 }
 
+bool ReaderAsyncJobsController::queueAuxWork(const AuxRequest& request) {
+  Command cmd;
+  cmd.type = JobType::Aux;
+  cmd.aux = request;
+  return enqueue(cmd);
+}
+
 void ReaderAsyncJobsController::enqueuePendingPageTurn(const int direction, const char* reason, const int workerState) {
   const int normalizedDirection = direction > 0 ? 1 : -1;
   const int previousQueue = navigationJob_.queuedTurn;
@@ -375,7 +382,8 @@ void ReaderAsyncJobsController::workerLoop() {
       xEventGroupClearBits(stateEvents_, EVENT_IDLE);
     }
 
-    const int priority = cmd.type == JobType::BackgroundCache ? 0 : kInteractiveCacheTaskPriority;
+    const int priority =
+        (cmd.type == JobType::BackgroundCache || cmd.type == JobType::Aux) ? 0 : kInteractiveCacheTaskPriority;
     vTaskPrioritySet(nullptr, priority);
 
     const AbortCallback abort = abortCallback(jobGeneration);
@@ -389,6 +397,9 @@ void ReaderAsyncJobsController::workerLoop() {
           break;
         case JobType::PageFill:
           if (pageFillHandler_) pageFillHandler_(cmd.pageFill, abort);
+          break;
+        case JobType::Aux:
+          if (auxHandler_) auxHandler_(cmd.aux, abort);
           break;
         case JobType::None:
           break;

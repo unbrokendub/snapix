@@ -6,6 +6,7 @@
 #include <Xtc/XtcParser.h>
 #include <esp_task_wdt.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -20,8 +21,9 @@ XtcPageRenderer::XtcPageRenderer(GfxRenderer& renderer) : renderer_(renderer) {}
 
 XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, uint32_t pageNum,
                                                       std::function<void()> refreshCallback,
-                                                      const bool allowGrayscale) {
+                                                      const bool allowGrayscale, const bool deferGray) {
   lastRenderUsedGrayscale_ = false;
+  grayPending_ = false;
   // Bounds check
   if (pageNum >= parser.getPageCount()) {
     return RenderResult::EndOfBook;
@@ -44,6 +46,18 @@ XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, ui
 
   if (bitDepth == 2 && !allowGrayscale) {
     return renderStreaming2BitAsBw(parser, pageNum, pageWidth, pageHeight, planeSize, refreshCallback);
+  }
+
+  if (bitDepth == 2 && deferGray) {
+    // v3.11.12 — black & white now (the same base the grayscale path shows
+    // first), gray passes on the caller's next idle loop step.
+    const RenderResult base =
+        renderStreaming2BitAsBw(parser, pageNum, pageWidth, pageHeight, planeSize, refreshCallback);
+    if (base == RenderResult::Success) {
+      grayPending_ = true;
+      grayPendingPage_ = pageNum;
+    }
+    return base;
   }
 
   if (bitDepth == 2) {
@@ -81,36 +95,7 @@ XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, ui
   // Load page data
   size_t bytesRead = 0;
   if (bitDepth == 2) {
-    // Use streaming to load into separate buffers
-    xtc::XtcError err = parser.loadPageStreaming(
-        pageNum,
-        [&](const uint8_t* data, size_t size, size_t offset) {
-          // Direct data to the appropriate buffer based on offset
-          size_t remaining = size;
-          size_t srcOffset = 0;
-
-          while (remaining > 0) {
-            size_t currentOffset = offset + srcOffset;
-            if (currentOffset < planeSize) {
-              // Writing to plane1
-              size_t toWrite = std::min(remaining, planeSize - currentOffset);
-              memcpy(plane1Buffer + currentOffset, data + srcOffset, toWrite);
-              srcOffset += toWrite;
-              remaining -= toWrite;
-            } else {
-              // Writing to plane2
-              size_t plane2Offset = currentOffset - planeSize;
-              size_t toWrite = std::min(remaining, planeSize - plane2Offset);
-              memcpy(plane2Buffer + plane2Offset, data + srcOffset, toWrite);
-              srcOffset += toWrite;
-              remaining -= toWrite;
-            }
-          }
-          bytesRead += size;
-        },
-        4096);
-
-    if (err != xtc::XtcError::OK) {
+    if (!loadPlanes(parser, pageNum, planeSize, plane1Buffer, plane2Buffer)) {
       LOG_ERR(TAG, "Failed to load page %u (streaming error)", pageNum);
       free(plane1Buffer);
       free(plane2Buffer);
@@ -131,62 +116,7 @@ XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, ui
   if (bitDepth == 2) {
     render2BitGrayscale(plane1Buffer, plane2Buffer, pageWidth, pageHeight);
     refreshCallback();
-
-    // Grayscale rendering requires additional passes
-    const uint8_t* plane1 = plane1Buffer;
-    const uint8_t* plane2 = plane2Buffer;
-    const size_t colBytes = (pageHeight + 7) / 8;
-
-    auto getPixelValue = [&](uint16_t x, uint16_t y) -> uint8_t {
-      const size_t colIndex = pageWidth - 1 - x;
-      const size_t byteInCol = y / 8;
-      const size_t bitInByte = 7 - (y % 8);
-      const size_t byteOffset = colIndex * colBytes + byteInCol;
-      const uint8_t bit1 = (plane1[byteOffset] >> bitInByte) & 1;
-      const uint8_t bit2 = (plane2[byteOffset] >> bitInByte) & 1;
-      return (bit1 << 1) | bit2;
-    };
-
-    // Pass 2: LSB buffer - mark DARK gray (value 1)
-    renderer_.clearScreen(0x00);
-    for (uint16_t y = 0; y < pageHeight; y++) {
-      for (uint16_t x = 0; x < pageWidth; x++) {
-        if (getPixelValue(x, y) == 1) {
-          renderer_.drawPixel(x, y, false);
-        }
-      }
-      if (y % 100 == 0) esp_task_wdt_reset();
-    }
-    renderer_.copyGrayscaleLsbBuffers();
-
-    // Pass 3: MSB buffer - mark LIGHT AND DARK gray (value 1 or 2)
-    renderer_.clearScreen(0x00);
-    for (uint16_t y = 0; y < pageHeight; y++) {
-      for (uint16_t x = 0; x < pageWidth; x++) {
-        const uint8_t pv = getPixelValue(x, y);
-        if (pv == 1 || pv == 2) {
-          renderer_.drawPixel(x, y, false);
-        }
-      }
-      if (y % 100 == 0) esp_task_wdt_reset();
-    }
-    renderer_.copyGrayscaleMsbBuffers();
-
-    renderer_.displayGrayBuffer();
-
-    // Restore framebuffer for next page render WITHOUT hardware cleanup.
-    // Leave inGrayscaleMode = true and LSB/MSB data in BW/RED RAM so that
-    // displayBuffer()'s grayscaleRevert() can apply lut_grayscale_revert
-    // to drive the panel from gray back to BW on the next page.
-    renderer_.clearScreen();
-    for (uint16_t y = 0; y < pageHeight; y++) {
-      for (uint16_t x = 0; x < pageWidth; x++) {
-        if (getPixelValue(x, y) >= 1) {
-          renderer_.drawPixel(x, y, true);
-        }
-      }
-      if (y % 100 == 0) esp_task_wdt_reset();
-    }
+    applyGrayPasses(plane1Buffer, plane2Buffer, pageWidth, pageHeight);
     LOG_DBG(TAG, "Rendered page %u/%u (2-bit grayscale)", pageNum + 1, parser.getPageCount());
     lastRenderUsedGrayscale_ = true;
     free(plane2Buffer);
@@ -197,6 +127,132 @@ XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, ui
   }
 
   free(plane1Buffer);
+  return RenderResult::Success;
+}
+
+bool XtcPageRenderer::loadPlanes(xtc::XtcParser& parser, const uint32_t pageNum, const size_t planeSize,
+                                 uint8_t* plane1, uint8_t* plane2) {
+  // Use streaming to load into separate buffers
+  const xtc::XtcError err = parser.loadPageStreaming(
+      pageNum,
+      [&](const uint8_t* data, size_t size, size_t offset) {
+        // Direct data to the appropriate buffer based on offset
+        size_t remaining = size;
+        size_t srcOffset = 0;
+
+        while (remaining > 0) {
+          size_t currentOffset = offset + srcOffset;
+          if (currentOffset < planeSize) {
+            // Writing to plane1
+            size_t toWrite = std::min(remaining, planeSize - currentOffset);
+            memcpy(plane1 + currentOffset, data + srcOffset, toWrite);
+            srcOffset += toWrite;
+            remaining -= toWrite;
+          } else {
+            // Writing to plane2
+            size_t plane2Offset = currentOffset - planeSize;
+            size_t toWrite = std::min(remaining, planeSize - plane2Offset);
+            memcpy(plane2 + plane2Offset, data + srcOffset, toWrite);
+            srcOffset += toWrite;
+            remaining -= toWrite;
+          }
+        }
+      },
+      4096);
+  return err == xtc::XtcError::OK;
+}
+
+void XtcPageRenderer::applyGrayPasses(const uint8_t* plane1, const uint8_t* plane2, const uint16_t pageWidth,
+                                      const uint16_t pageHeight) {
+  // Grayscale rendering requires additional passes
+  const size_t colBytes = (pageHeight + 7) / 8;
+
+  auto getPixelValue = [&](uint16_t x, uint16_t y) -> uint8_t {
+    const size_t colIndex = pageWidth - 1 - x;
+    const size_t byteInCol = y / 8;
+    const size_t bitInByte = 7 - (y % 8);
+    const size_t byteOffset = colIndex * colBytes + byteInCol;
+    const uint8_t bit1 = (plane1[byteOffset] >> bitInByte) & 1;
+    const uint8_t bit2 = (plane2[byteOffset] >> bitInByte) & 1;
+    return (bit1 << 1) | bit2;
+  };
+
+  // Pass 2: LSB buffer - mark DARK gray (value 1)
+  renderer_.clearScreen(0x00);
+  for (uint16_t y = 0; y < pageHeight; y++) {
+    for (uint16_t x = 0; x < pageWidth; x++) {
+      if (getPixelValue(x, y) == 1) {
+        renderer_.drawPixel(x, y, false);
+      }
+    }
+    if (y % 100 == 0) esp_task_wdt_reset();
+  }
+  renderer_.copyGrayscaleLsbBuffers();
+
+  // Pass 3: MSB buffer - mark LIGHT AND DARK gray (value 1 or 2)
+  renderer_.clearScreen(0x00);
+  for (uint16_t y = 0; y < pageHeight; y++) {
+    for (uint16_t x = 0; x < pageWidth; x++) {
+      const uint8_t pv = getPixelValue(x, y);
+      if (pv == 1 || pv == 2) {
+        renderer_.drawPixel(x, y, false);
+      }
+    }
+    if (y % 100 == 0) esp_task_wdt_reset();
+  }
+  renderer_.copyGrayscaleMsbBuffers();
+
+  renderer_.displayGrayBuffer();
+
+  // Restore framebuffer for next page render WITHOUT hardware cleanup.
+  // Leave inGrayscaleMode = true and LSB/MSB data in BW/RED RAM so that
+  // displayBuffer()'s grayscaleRevert() can apply lut_grayscale_revert
+  // to drive the panel from gray back to BW on the next page.
+  renderer_.clearScreen();
+  for (uint16_t y = 0; y < pageHeight; y++) {
+    for (uint16_t x = 0; x < pageWidth; x++) {
+      if (getPixelValue(x, y) >= 1) {
+        renderer_.drawPixel(x, y, true);
+      }
+    }
+    if (y % 100 == 0) esp_task_wdt_reset();
+  }
+}
+
+XtcPageRenderer::RenderResult XtcPageRenderer::renderPendingGray(xtc::XtcParser& parser) {
+  if (!grayPending_) return RenderResult::Success;
+  grayPending_ = false;
+  lastRenderUsedGrayscale_ = false;
+  const uint32_t pageNum = grayPendingPage_;
+  if (pageNum >= parser.getPageCount() || parser.getBitDepth() != 2) return RenderResult::Success;
+
+  const uint16_t pageWidth = parser.getWidth();
+  const uint16_t pageHeight = parser.getHeight();
+  const size_t planeSize = (static_cast<size_t>(pageWidth) * pageHeight + 7) / 8;
+
+  uint8_t* plane1 = static_cast<uint8_t*>(malloc(planeSize));
+  if (!plane1) {
+    // The black & white base stays on screen — a complete, readable page.
+    LOG_INF(TAG, "No 48 KB block for a grayscale plane (free=%lu largest=%lu) — page stays B/W",
+            static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(ESP.getMaxAllocHeap()));
+    return RenderResult::Success;
+  }
+  uint8_t* plane2 = static_cast<uint8_t*>(malloc(planeSize));
+  if (!plane2) {
+    return renderGrayscaleOnePlane(parser, pageNum, pageWidth, pageHeight, planeSize, plane1, nullptr,
+                                   /*baseShown=*/true);
+  }
+  if (!loadPlanes(parser, pageNum, planeSize, plane1, plane2)) {
+    LOG_ERR(TAG, "Failed to load page %u (deferred grayscale)", pageNum);
+    free(plane1);
+    free(plane2);
+    return RenderResult::PageLoadFailed;
+  }
+  applyGrayPasses(plane1, plane2, pageWidth, pageHeight);
+  free(plane2);
+  free(plane1);
+  lastRenderUsedGrayscale_ = true;
+  LOG_DBG(TAG, "Rendered page %u/%u (2-bit grayscale, deferred passes)", pageNum + 1, parser.getPageCount());
   return RenderResult::Success;
 }
 
@@ -280,7 +336,8 @@ bool streamGrayPixels(xtc::XtcParser& parser, const uint32_t pageNum, const uint
 XtcPageRenderer::RenderResult XtcPageRenderer::renderGrayscaleOnePlane(xtc::XtcParser& parser, uint32_t pageNum,
                                                                       const uint16_t width, const uint16_t height,
                                                                       const size_t planeSize, uint8_t* plane1,
-                                                                      const std::function<void()>& refreshCallback) {
+                                                                      const std::function<void()>& refreshCallback,
+                                                                      const bool baseShown) {
   // Same four passes as the two-buffer path in render(), each re-reading the
   // page so plane 2 never needs its own 48 KB.
   bool loaded = false;
@@ -290,15 +347,18 @@ XtcPageRenderer::RenderResult XtcPageRenderer::renderGrayscaleOnePlane(xtc::XtcP
     return RenderResult::PageLoadFailed;
   };
 
-  // Pass 1: B/W base — every non-white pixel black.
-  renderer_.clearScreen();
-  if (!streamGrayPixels(parser, pageNum, width, height, planeSize, plane1, loaded,
-                        [&](uint16_t x, uint16_t y, uint8_t v) {
-                          if (v >= 1) renderer_.drawPixel(x, y, true);
-                        })) {
-    return fail();
+  // Pass 1: B/W base — every non-white pixel black.  Already on the panel
+  // for deferred gray: pass 2 then loads plane 1 from its own stream.
+  if (!baseShown) {
+    renderer_.clearScreen();
+    if (!streamGrayPixels(parser, pageNum, width, height, planeSize, plane1, loaded,
+                          [&](uint16_t x, uint16_t y, uint8_t v) {
+                            if (v >= 1) renderer_.drawPixel(x, y, true);
+                          })) {
+      return fail();
+    }
+    refreshCallback();
   }
-  refreshCallback();
 
   // Pass 2: LSB buffer — dark gray (value 1).
   renderer_.clearScreen(0x00);

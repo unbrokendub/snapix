@@ -19,6 +19,10 @@ namespace snapix::unifiedcache {
 class UnifiedCache;
 }
 
+namespace xtc {
+class CoverBmpWriter;
+}
+
 #include "../content/BookmarkManager.h"
 #include "../content/ReaderNavigation.h"
 #include "../core/Types.h"
@@ -139,6 +143,13 @@ class ReaderState : public State {
   // Whether book has a valid cover image
   bool hasCover_ = false;
 
+  // v3.11.12 — the cover BMP is decoded on ReaderAsync (it blocked the UI loop
+  // for ~5 s on a first EPUB open).  Until it exists the cover page shows a
+  // title placeholder; a failed generation leaves the cover page.
+  reader::DeferredJobSlot coverJob_;
+  bool coverPlaceholderShown_ = false;
+  bool coverGenerationFailed_ = false;  // this session: no cover page
+
   // First text content spine index (from EPUB guide, 0 if not specified)
   int textStartIndex_ = 0;
 
@@ -192,6 +203,16 @@ class ReaderState : public State {
   void renderCurrentPage(Core& core);
   void renderCachedPage(Core& core);
   void renderXtcPage(Core& core);
+  // v3.11.12 — XTCH gray passes run as their own UI-loop step (see
+  // XtcPageRenderer deferGray); the cover/thumbnail are built in bounded
+  // strips between frames instead of one 96 KB allocation after the first page.
+  bool xtcGrayPassDue_ = false;
+  std::unique_ptr<xtc::CoverBmpWriter> xtcCoverWriter_;
+  enum class XtcCoverPhase : uint8_t { Idle, Cover, Thumb };
+  XtcCoverPhase xtcCoverPhase_ = XtcCoverPhase::Idle;
+  void beginXtcCoverJob(Core& core);
+  void runXtcCoverSlice(Core& core);
+  void cancelXtcCoverJob();
   bool renderCoverPage(Core& core);
   void renderLoadedPage(Core& core, const std::shared_ptr<Page>& page, size_t pageCount, bool cacheIsPartial,
                         const Theme& theme, const Viewport& vp, uint32_t totalStartMs, bool allowPagePrefetch,
@@ -223,15 +244,60 @@ class ReaderState : public State {
   void recalibrateGlobalPageEstimates();
   void recomputeGlobalPageMetricTotal();
   // Persist `globalSectionPageMetrics_` between sessions.  A cache hit is
-  // checked before any per-section I/O; a miss uses one batch metadata pass
-  // and estimates uncached sections instead of probing every page-cache file
+  // checked before any per-section I/O; a miss is filled on ReaderAsync (one
+  // batch metadata pass) instead of probing every page-cache file
   // synchronously during the first visible render.
-  bool loadGlobalPageMetricsFromDisk(unifiedcache::UnifiedCache& cache,
-                                     const std::string& bookCachePath,
-                                     uint32_t configHash, int spineCount);
-  void saveGlobalPageMetricsToDisk(unifiedcache::UnifiedCache& cache,
-                                   uint32_t configHash) const;
   GlobalPageMetrics resolveGlobalPageMetrics(Core& core, int currentSectionTotalPages, bool currentSectionIsPartial);
+
+  // v3.11.12 — global metrics I/O off the UI loop.  A miss of the persisted
+  // frame is filled on ReaderAsync (one bulk metadata pass + persist; it took
+  // 1.6 s inside the first FB2 page render) and every later persist runs
+  // there too.  The status bar shows the local fallback until it lands.
+  struct GlobalMetricsJobIo {
+    bool computeEstimates = false;  // false: only persist `metrics`
+    ContentType type = ContentType::None;
+    uint32_t configHash = 0;
+    int spineCount = 0;
+    std::string bookCachePath;
+    std::vector<SectionPageMetric> metrics;  // in: snapshot to persist / out: estimates
+    const char* source = "";                 // out: legacy | batch
+    bool persisted = false;                  // out
+  };
+  reader::DeferredJobSlot metricsJob_;
+  GlobalMetricsJobIo metricsJobIo_;
+  bool metricsDiskProbed_ = false;    // the persisted frame was looked up this session
+  bool metricsComputeFailed_ = false;
+  bool metricsSaveDirty_ = false;     // exact sections changed since the last persist
+  std::string metricsBookCachePath_;  // where/with which config the metrics persist (UI-owned)
+  uint32_t metricsConfigHash_ = 0;
+  int fb2FallbackOffsetSpine_ = -1;   // memo for the FB2 crude-scaling fallback
+  uint32_t fb2FallbackOffset_ = 0;
+  int fb2SectionMemoSpine_ = -1;      // memo: TOC index → FB2 section (markers key)
+  int fb2SectionMemoIndex_ = -1;
+  static bool parseGlobalMetricsPayload(const std::vector<uint8_t>& payload, uint32_t configHash, int spineCount,
+                                        std::vector<SectionPageMetric>& out);
+  static bool writeGlobalMetricsFrame(unifiedcache::UnifiedCache& cache, const std::vector<SectionPageMetric>& metrics,
+                                      uint32_t configHash);
+  static bool buildGlobalMetricEstimates(Core& core, ContentType type, int spineCount,
+                                         std::vector<SectionPageMetric>& out);
+  void requestGlobalMetricsCompute(ContentType type, const std::string& bookCachePath, uint32_t configHash,
+                                   int spineCount);
+  void scheduleGlobalMetricsSave() { metricsSaveDirty_ = true; }
+  void flushGlobalMetricsSaveNow(Core& core);
+  void resetDeferredJobs();
+
+  // v3.11.12 — deferred (aux) work hand-off: queue pending jobs ahead of the
+  // cache job, and consume their results on the UI loop.
+  void queueDeferredJobs(Core& core);
+  uint32_t lastDeferredKickMs_ = 0;
+  void pollDeferredJobs(Core& core);
+  void runAuxJob(const reader::ReaderAsyncJobsController::AuxRequest& request,
+                 const reader::ReaderAsyncJobsController::AbortCallback& shouldAbort);
+  void runCoverJob(const reader::ReaderAsyncJobsController::AbortCallback& shouldAbort);
+  void runGlobalMetricsJob(const reader::ReaderAsyncJobsController::AbortCallback& shouldAbort);
+  bool onCoverPage() const { return currentSpineIndex_ == 0 && currentSectionPage_ == -1; }
+  void leaveCoverPage(Core& core);
+  void renderCoverPlaceholder(Core& core);
 
   // Cache management
   static constexpr uint16_t kDefaultCacheBatchPages = 5;
@@ -312,6 +378,7 @@ class ReaderState : public State {
   // TOC overlay mode
   bool tocMode_ = false;
   ui::ChapterListView tocView_;
+  bool tocViewPopulated_ = false;  // v3.11.12 — the book's TOC never changes in a session
   int lastTocScrollOffset_ = -1;
   bool tocOverlayRendered_ = false;
   bool& pendingTocJumpActive_;

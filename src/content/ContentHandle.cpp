@@ -324,10 +324,10 @@ std::string ContentHandle::generateThumbnail() {
   return "";
 }
 
-std::string ContentHandle::generateCover(bool use1BitDithering) {
+std::string ContentHandle::generateCover(bool use1BitDithering, const std::function<bool()>& shouldAbort) {
   switch (type) {
     case ContentType::Epub:
-      if (epub.getEpub() && epub.getEpub()->generateCoverBmp(use1BitDithering)) {
+      if (epub.getEpub() && epub.getEpub()->generateCoverBmp(use1BitDithering, shouldAbort)) {
         return epub.getEpub()->getCoverBmpPath();
       }
       break;
@@ -337,22 +337,22 @@ std::string ContentHandle::generateCover(bool use1BitDithering) {
       }
       break;
     case ContentType::Txt:
-      if (txt.getTxt() && txt.getTxt()->generateCoverBmp(use1BitDithering)) {
+      if (txt.getTxt() && txt.getTxt()->generateCoverBmp(use1BitDithering, shouldAbort)) {
         return txt.getTxt()->getCoverBmpPath();
       }
       break;
     case ContentType::Markdown:
-      if (markdown.getMarkdown() && markdown.getMarkdown()->generateCoverBmp(use1BitDithering)) {
+      if (markdown.getMarkdown() && markdown.getMarkdown()->generateCoverBmp(use1BitDithering, shouldAbort)) {
         return markdown.getMarkdown()->getCoverBmpPath();
       }
       break;
     case ContentType::Fb2:
-      if (fb2.getFb2() && fb2.getFb2()->generateCoverBmp(use1BitDithering)) {
+      if (fb2.getFb2() && fb2.getFb2()->generateCoverBmp(use1BitDithering, shouldAbort)) {
         return fb2.getFb2()->getCoverBmpPath();
       }
       break;
     case ContentType::Html:
-      if (html.getHtml() && html.getHtml()->generateCoverBmp(use1BitDithering)) {
+      if (html.getHtml() && html.getHtml()->generateCoverBmp(use1BitDithering, shouldAbort)) {
         return html.getHtml()->getCoverBmpPath();
       }
       break;

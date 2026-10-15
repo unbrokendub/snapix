@@ -248,7 +248,8 @@ class Fb2 {
 
   // Cover image support
   std::string getCoverBmpPath() const;
-  bool generateCoverBmp(bool use1BitDithering = false) const;
+  // v3.11.12 — `shouldAbort` cancels the decode (no failure marker is written).
+  bool generateCoverBmp(bool use1BitDithering = false, const std::function<bool()>& shouldAbort = nullptr) const;
   std::string getThumbBmpPath() const;
   bool generateThumbBmp() const;
 
@@ -277,6 +278,14 @@ class Fb2 {
   // for global page estimates; avoids getTocItem() reopening meta.bin once or
   // twice per section during the first status-bar render.
   bool getTocSourceOffsets(std::vector<uint32_t>& offsets) const;
+  // v3.11.12 — visit `count` TOC items from `first` with ONE meta.bin open and
+  // one forward pass (items are stored back to back; see Fb2TocRecords.h).
+  // getTocItem() reopens the file per call: 61 calls took 2.4 s on device for
+  // one TOC overlay.  `visit` returns false to stop early.  withTitles=false
+  // skips the title strings.  Returns false if meta.bin could not be read
+  // (items visited before the failure stay visited).
+  bool readTocItems(uint16_t first, uint16_t count, const std::function<bool(uint16_t, const TocItem&)>& visit,
+                    bool withTitles = true) const;
 
   // Binary (image) index access — returns nullptr if id not found.
   // v2.0.179 — delegates to the sorted-vector lookup helper.

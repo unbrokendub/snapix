@@ -28,86 +28,112 @@ namespace {
 // SmolJpeg's core lib is platform-pure; these adapters keep the Arduino /
 // SdFat / LittleFS coupling localised to the integration site.
 // ---------------------------------------------------------------------------
+// v3.11.12 — SmolJpeg/SmolPng take only a context-free `bool (*)()` abort
+// hook, so cancellation rides on the stream adapters instead: once the
+// caller's shouldAbort() fires, reads and writes fail and the decoder bails
+// within one MCU row.  Callers tell an abort from a bad image by asking
+// shouldAbort() again after a failed conversion.
+inline bool abortRequested(const std::function<bool()>* shouldAbort) {
+  return shouldAbort != nullptr && *shouldAbort && (*shouldAbort)();
+}
+
 class FsFileInputStream : public snapix::smoljpeg::InputStream {
  public:
-  explicit FsFileInputStream(FsFile& f) : file_(f) {}
+  explicit FsFileInputStream(FsFile& f, const std::function<bool()>* abort = nullptr) : file_(f), abort_(abort) {}
   uint32_t length() const override {
     return static_cast<uint32_t>(file_.fileSize());
   }
   int read(uint32_t offset, uint8_t* buf, size_t len) override {
+    if (abortRequested(abort_)) return -1;
     if (!file_.seekSet(static_cast<uint64_t>(offset))) return -1;
     return file_.read(buf, len);
   }
  private:
   FsFile& file_;
+  const std::function<bool()>* abort_;
 };
 
 class FlashFileInputStream : public snapix::smoljpeg::InputStream {
  public:
-  explicit FlashFileInputStream(fs::File& f) : file_(f) {}
+  explicit FlashFileInputStream(fs::File& f, const std::function<bool()>* abort = nullptr) : file_(f), abort_(abort) {}
   uint32_t length() const override {
     return static_cast<uint32_t>(file_.size());
   }
   int read(uint32_t offset, uint8_t* buf, size_t len) override {
+    if (abortRequested(abort_)) return -1;
     if (!file_.seek(offset, fs::SeekSet)) return -1;
     const int got = file_.read(buf, len);
     return got < 0 ? 0 : got;
   }
  private:
   fs::File& file_;
+  const std::function<bool()>* abort_;
 };
 
 class PrintOutputStream : public snapix::smoljpeg::OutputStream {
  public:
-  explicit PrintOutputStream(Print& p) : print_(p) {}
+  explicit PrintOutputStream(Print& p, const std::function<bool()>* abort = nullptr) : print_(p), abort_(abort) {}
   bool write(const uint8_t* data, size_t len) override {
+    if (abortRequested(abort_)) return false;
     return print_.write(data, len) == len;
   }
  private:
   Print& print_;
+  const std::function<bool()>* abort_;
 };
 #endif  // SNAPIX_SMOL_JPEG
 
 #if SNAPIX_SMOL_PNG
 // SmolPng has its own InputStream / OutputStream type identical in shape
 // to SmolJpeg's — duplicated to keep each lib namespace-pure.
+inline bool pngAbortRequested(const std::function<bool()>* shouldAbort) {
+  return shouldAbort != nullptr && *shouldAbort && (*shouldAbort)();
+}
+
 class PngFsFileInputStream : public snapix::smolpng::InputStream {
  public:
-  explicit PngFsFileInputStream(FsFile& f) : file_(f) {}
+  explicit PngFsFileInputStream(FsFile& f, const std::function<bool()>* abort = nullptr) : file_(f), abort_(abort) {}
   uint32_t length() const override {
     return static_cast<uint32_t>(file_.fileSize());
   }
   int read(uint32_t offset, uint8_t* buf, size_t len) override {
+    if (pngAbortRequested(abort_)) return -1;
     if (!file_.seekSet(static_cast<uint64_t>(offset))) return -1;
     return file_.read(buf, len);
   }
  private:
   FsFile& file_;
+  const std::function<bool()>* abort_;
 };
 
 class PngFlashFileInputStream : public snapix::smolpng::InputStream {
  public:
-  explicit PngFlashFileInputStream(fs::File& f) : file_(f) {}
+  explicit PngFlashFileInputStream(fs::File& f, const std::function<bool()>* abort = nullptr)
+      : file_(f), abort_(abort) {}
   uint32_t length() const override {
     return static_cast<uint32_t>(file_.size());
   }
   int read(uint32_t offset, uint8_t* buf, size_t len) override {
+    if (pngAbortRequested(abort_)) return -1;
     if (!file_.seek(offset, fs::SeekSet)) return -1;
     const int got = file_.read(buf, len);
     return got < 0 ? 0 : got;
   }
  private:
   fs::File& file_;
+  const std::function<bool()>* abort_;
 };
 
 class PngPrintOutputStream : public snapix::smolpng::OutputStream {
  public:
-  explicit PngPrintOutputStream(Print& p) : print_(p) {}
+  explicit PngPrintOutputStream(Print& p, const std::function<bool()>* abort = nullptr) : print_(p), abort_(abort) {}
   bool write(const uint8_t* data, size_t len) override {
+    if (pngAbortRequested(abort_)) return false;
     return print_.write(data, len) == len;
   }
  private:
   Print& print_;
+  const std::function<bool()>* abort_;
 };
 #endif  // SNAPIX_SMOL_PNG
 
@@ -133,10 +159,10 @@ bool convertJpegSd(FsFile& input, Print& output, const ImageConvertConfig& confi
   // 25 KB+arena fragments the heap permanently and we've fixed
   // SmolJpeg's restart-marker bug that this fallback existed to mask).
   if (config.oneBit) {
-    FsFileInputStream sin(input);
-    PrintOutputStream sout(output);
+    FsFileInputStream sin(input, &config.shouldAbort);
+    PrintOutputStream sout(output, &config.shouldAbort);
     const auto status = snapix::smoljpeg::decodeTo1BitBmp(
-        sin, sout, config.maxWidth, config.maxHeight, nullptr /* TODO: shouldAbort thunk */);
+        sin, sout, config.maxWidth, config.maxHeight, nullptr /* abort rides on the stream adapters */);
     if (status == snapix::smoljpeg::Status::Ok) return true;
     LOG_INF(config.logTag, "SmolJpeg(SD) decode failed (%s) — no fallback (one-decoder discipline)",
             snapix::smoljpeg::statusToString(status));
@@ -170,10 +196,10 @@ bool convertPngSd(FsFile& input, Print& output, const ImageConvertConfig& config
   // PNG callers normally request 2-bit — Phase 6 alpha; revisit caller
   // contracts in Phase 6f.
   if (config.oneBit) {
-    PngFsFileInputStream sin(input);
-    PngPrintOutputStream sout(output);
+    PngFsFileInputStream sin(input, &config.shouldAbort);
+    PngPrintOutputStream sout(output, &config.shouldAbort);
     const auto status = snapix::smolpng::decodeTo1BitBmp(
-        sin, sout, config.maxWidth, config.maxHeight, nullptr /* TODO: abort thunk */);
+        sin, sout, config.maxWidth, config.maxHeight, nullptr /* abort rides on the stream adapters */);
     if (status == snapix::smolpng::Status::Ok) return true;
     LOG_INF(config.logTag, "SmolPng(SD) decode failed (%s); falling back to pngle",
             snapix::smolpng::statusToString(status));
@@ -219,10 +245,10 @@ bool convertJpegLittleFs(fs::File& input, Print& output, const ImageConvertConfi
   // fragmentation.  2-bit path (oneBit=false) still uses legacy
   // until SmolJpeg gains 2-bit output (Phase 6f).
   if (config.oneBit) {
-    FlashFileInputStream sin(input);
-    PrintOutputStream    sout(output);
+    FlashFileInputStream sin(input, &config.shouldAbort);
+    PrintOutputStream    sout(output, &config.shouldAbort);
     const auto status = snapix::smoljpeg::decodeTo1BitBmp(
-        sin, sout, config.maxWidth, config.maxHeight, nullptr /* TODO: shouldAbort thunk */);
+        sin, sout, config.maxWidth, config.maxHeight, nullptr /* abort rides on the stream adapters */);
     if (status == snapix::smoljpeg::Status::Ok) return true;
     LOG_INF(config.logTag, "SmolJpeg(flash) decode failed (%s) — no fallback (one-decoder discipline)",
             snapix::smoljpeg::statusToString(status));
@@ -241,10 +267,10 @@ bool convertPngLittleFs(fs::File& input, Print& output, const ImageConvertConfig
   }
 #if SNAPIX_SMOL_PNG
   if (config.oneBit) {
-    PngFlashFileInputStream sin(input);
-    PngPrintOutputStream    sout(output);
+    PngFlashFileInputStream sin(input, &config.shouldAbort);
+    PngPrintOutputStream    sout(output, &config.shouldAbort);
     const auto status = snapix::smolpng::decodeTo1BitBmp(
-        sin, sout, config.maxWidth, config.maxHeight, nullptr /* TODO: abort thunk */);
+        sin, sout, config.maxWidth, config.maxHeight, nullptr /* abort rides on the stream adapters */);
     if (status == snapix::smolpng::Status::Ok) return true;
     LOG_INF(config.logTag, "SmolPng(flash) decode failed (%s); falling back to pngle",
             snapix::smolpng::statusToString(status));

@@ -200,7 +200,7 @@ std::string Markdown::findCoverImage() const {
   return CoverHelpers::findCoverImage(dirPath, title);
 }
 
-bool Markdown::generateCoverBmp(bool use1BitDithering) const {
+bool Markdown::generateCoverBmp(bool use1BitDithering, const std::function<bool()>& shouldAbort) const {
   const auto coverPath = getCoverBmpPath();
   const auto failedMarkerPath = cachePath + "/.cover.failed";
 
@@ -218,8 +218,8 @@ bool Markdown::generateCoverBmp(bool use1BitDithering) const {
   }
 
   setupCacheDir();
-  const bool success = CoverHelpers::convertImageToBmp(coverImagePath, coverPath, "MD ", use1BitDithering);
-  if (!success) {
+  const bool success = CoverHelpers::convertImageToBmp(coverImagePath, coverPath, "MD ", use1BitDithering, shouldAbort);
+  if (!success && !(shouldAbort && shouldAbort())) {
     File marker = LittleFS.open(failedMarkerPath.c_str(), "w");
     if (marker) marker.close();
   }

@@ -49,14 +49,31 @@ void ReaderState::enterTocMode(Core& core) {
     return;
   }
 
+  const uint32_t enterMs = reader::perfMsNow();
   // Stop background task before TOC overlay — both SD card I/O (thumbnail)
   // and e-ink display update share the same SPI bus
   stopBackgroundCaching();
 
-  populateTocView(core);
+  // v3.11.12 — the TOC never changes within a session: build the list once
+  // (one meta.bin pass for FB2 — 61 per-item opens took 2.4 s on device).
+  const uint32_t populateMs = reader::perfMsNow();
+  const bool reused = tocViewPopulated_;
+  if (!tocViewPopulated_) {
+    populateTocView(core);
+    tocViewPopulated_ = tocView_.chapterCount > 0;
+  }
+  readerPerfLog("toc-populate", populateMs, "(entries=%u reused=%u)", static_cast<unsigned>(tocView_.chapterCount),
+                static_cast<unsigned>(reused));
+  const uint32_t findMs = reader::perfMsNow();
   int currentIdx = findCurrentTocEntry(core);
-  if (currentIdx >= 0) {
+  readerPerfLog("toc-find-current", findMs, "(index=%d)", currentIdx);
+  if (currentIdx >= 0 && currentIdx < tocView_.chapterCount) {
     tocView_.setCurrentChapter(static_cast<uint16_t>(currentIdx));
+  } else {
+    // As after a fresh clear(): selection at the top.
+    tocView_.selected = 0;
+    tocView_.scrollOffset = 0;
+    tocView_.needsRender = true;
   }
 
   tocView_.buttons = ui::ButtonBar("Back", "Go", "<<", ">>");
@@ -64,6 +81,7 @@ void ReaderState::enterTocMode(Core& core) {
   tocOverlayRendered_ = false;
   lastTocScrollOffset_ = -1;
   needsRender_ = true;
+  readerPerfLog("toc-enter", enterMs, nullptr);
   LOG_DBG(TAG, "Entered TOC mode");
 }
 
@@ -143,13 +161,35 @@ void ReaderState::populateTocView(Core& core) {
     }
 
     auto epub = provider->getEpubShared();
+    const int spineCount = epub->getSpineItemsCount();
     for (uint16_t i = 0; i < count && i < ui::ChapterListView::MAX_CHAPTERS; i++) {
       const auto tocItem = epub->getTocItem(i);
-      const int resolvedSpine = epub->resolveTocSpineIndex(i);
+      // v3.11.12 — resolveTocSpineIndex() re-reads the same entry; it only
+      // adds work when the stored spine index is missing (href lookup).
+      const int resolvedSpine = (tocItem.spineIndex >= 0 && tocItem.spineIndex < spineCount)
+                                    ? tocItem.spineIndex
+                                    : epub->resolveTocSpineIndex(i);
       const uint16_t pageNum = (resolvedSpine >= 0) ? static_cast<uint16_t>(resolvedSpine) : 0;
       tocView_.addChapter(tocItem.title.c_str(), pageNum, tocItem.level);
     }
     return;
+  }
+
+  if (type == ContentType::Fb2) {
+    // v3.11.12 — one meta.bin open + one forward pass for the whole list
+    // (getTocEntry() → Fb2::getTocItem() opened the file per entry).
+    auto* provider = core.content.asFb2();
+    const Fb2* fb2 = provider ? provider->getFb2() : nullptr;
+    if (fb2) {
+      const uint16_t limit =
+          static_cast<uint16_t>(std::min<int>(count, ui::ChapterListView::MAX_CHAPTERS));
+      const bool ok = limit > 0 && fb2->readTocItems(0, limit, [this](const uint16_t index, const Fb2::TocItem& item) {
+        // Same fields as Fb2Provider::getTocEntry: title, index, depth.
+        return tocView_.addChapter(item.title.c_str(), index, item.depth);
+      });
+      if (ok && tocView_.chapterCount == limit) return;
+      tocView_.clear();  // meta.bin unreadable as a block: per-entry fallback below
+    }
   }
 
   for (uint16_t i = 0; i < count && i < ui::ChapterListView::MAX_CHAPTERS; i++) {

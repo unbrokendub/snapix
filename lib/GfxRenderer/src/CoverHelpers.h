@@ -2,6 +2,7 @@
 
 #include <FsHelpers.h>
 
+#include <functional>
 #include <string>
 
 class GfxRenderer;
@@ -71,9 +72,11 @@ std::string findCoverImage(const std::string& dirPath, const std::string& baseNa
 // For JPG, uses JpegToBmpConverter (1-bit if use1BitDithering is true)
 // For PNG, uses PngToBmpConverter
 // logTag is used for Serial logging (e.g., "TXT", "MD ")
-// Returns true on success
+// Returns true on success.  v3.11.12: `shouldAbort` (optional) cancels the
+// decode; on an aborted conversion the partial output is removed and the
+// caller must not record a permanent failure (check shouldAbort() again).
 bool convertImageToBmp(const std::string& inputPath, const std::string& outputPath, const char* logTag,
-                       bool use1BitDithering);
+                       bool use1BitDithering, const std::function<bool()>& shouldAbort = nullptr);
 
 // Generate thumbnail BMP from full-size cover BMP
 // Uses atomic write (temp file + rename) for safety

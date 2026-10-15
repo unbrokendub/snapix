@@ -59,7 +59,8 @@ class Epub {
   const std::string& getLanguage() const;
   std::string getCoverBmpPath() const;
   std::string getCoverPreviewBmpPath() const;
-  bool generateCoverBmp(bool use1BitDithering = false) const;
+  // v3.11.12 — `shouldAbort` cancels the decode (no failure marker is written).
+  bool generateCoverBmp(bool use1BitDithering = false, const std::function<bool()>& shouldAbort = nullptr) const;
   bool generateCoverPreviewBmp() const;
   std::string getThumbBmpPath() const;
   bool generateThumbBmp() const;

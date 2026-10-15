@@ -705,9 +705,12 @@ bool Epub::generateThumbBmp() const {
   return success;
 }
 
-bool Epub::generateCoverBmp(bool use1BitDithering) const {
+bool Epub::generateCoverBmp(bool use1BitDithering, const std::function<bool()>& shouldAbort) const {
   const auto coverPath = getCoverBmpPath();
   const auto failedMarkerPath = cachePath + "/.cover.failed";
+  // v3.11.12 — cover generation runs on ReaderAsync and is cancelled by a
+  // page turn; an aborted attempt is not a failure (no marker, retried later).
+  auto aborted = [&shouldAbort]() { return shouldAbort && shouldAbort(); };
 
   // v2.0.73: cover BMP + failure marker live on LittleFS now.
   if (LittleFS.exists(coverPath.c_str())) return true;
@@ -719,10 +722,11 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
   std::string externalCover = findCoverImage();
   if (!externalCover.empty()) {
     LOG_DBG(TAG, "Found external cover: %s", externalCover.c_str());
-    if (CoverHelpers::convertImageToBmp(externalCover, coverPath, "EBP", use1BitDithering)) {
+    if (CoverHelpers::convertImageToBmp(externalCover, coverPath, "EBP", use1BitDithering, shouldAbort)) {
       LOG_INF(TAG, "Generated cover BMP from external image");
       return true;
     }
+    if (aborted()) return false;
   }
 
   // Priority 1.5: Try common internal cover paths (batch scan - single ZIP pass)
@@ -790,12 +794,13 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
 
     File coverFile = LittleFS.open(coverTempPath.c_str(), "w");
     if (coverFile) {
-      if (readItemContentsToStream(path, coverFile, 1024)) {
+      if (readItemContentsToStream(path, coverFile, 1024, nullptr, shouldAbort)) {
         coverFile.close();
         ImageConvertConfig config;
         config.oneBit = use1BitDithering;
         config.logTag = "EBP";
         config.outputOnLittleFs = true;
+        config.shouldAbort = shouldAbort;
         if (ImageConverterFactory::convertToBmp(coverTempPath, coverPath, config)) {
           LittleFS.remove(coverTempPath.c_str());
           return true;
@@ -806,6 +811,7 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
       }
     }
     LittleFS.remove(coverTempPath.c_str());
+    if (aborted()) return false;
   }
 
   auto writeFailureMarker = [&]() {
@@ -841,7 +847,7 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
   if (!coverFile) {
     return false;
   }
-  if (!readItemContentsToStream(coverImageHref, coverFile, 1024)) {
+  if (!readItemContentsToStream(coverImageHref, coverFile, 1024, nullptr, shouldAbort)) {
     coverFile.close();
     LittleFS.remove(coverTempPath.c_str());
     return false;
@@ -852,13 +858,18 @@ bool Epub::generateCoverBmp(bool use1BitDithering) const {
   config.oneBit = use1BitDithering;
   config.logTag = "EBP";
   config.outputOnLittleFs = true;
+  config.shouldAbort = shouldAbort;
 
   const bool success = ImageConverterFactory::convertToBmp(coverTempPath, coverPath, config);
   LittleFS.remove(coverTempPath.c_str());
 
   if (!success) {
-    LOG_ERR(TAG, "Failed to generate BMP from cover image");
     LittleFS.remove(coverPath.c_str());
+    if (aborted()) {
+      LOG_INF(TAG, "Cover BMP generation cancelled");
+      return false;
+    }
+    LOG_ERR(TAG, "Failed to generate BMP from cover image");
     writeFailureMarker();
   }
   LOG_INF(TAG, "Generated BMP from cover image, success: %s", success ? "yes" : "no");

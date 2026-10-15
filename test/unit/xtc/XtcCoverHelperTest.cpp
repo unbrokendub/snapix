@@ -162,6 +162,77 @@ static BmpInfo parseBmpHeader(const std::string& data) {
   return info;
 }
 
+// Reference: the pre-v3.11.12 whole-page conversion (page buffer resident),
+// bit for bit.  The strip writer must produce exactly this BMP.
+static std::string referenceCoverBmp(uint16_t w, uint16_t h, uint8_t bitDepth, const std::vector<uint8_t>& page) {
+  const uint32_t rowSize = ((w + 31) / 32) * 4;
+  const uint32_t imageSize = rowSize * h;
+  const uint32_t fileSize = 14 + 40 + 8 + imageSize;
+  std::string out;
+  auto put = [&out](const void* p, size_t n) { out.append(static_cast<const char*>(p), n); };
+  out.push_back('B');
+  out.push_back('M');
+  put(&fileSize, 4);
+  const uint32_t reserved = 0;
+  put(&reserved, 4);
+  const uint32_t dataOffset = 14 + 40 + 8;
+  put(&dataOffset, 4);
+  const uint32_t dib = 40;
+  put(&dib, 4);
+  const int32_t width = w;
+  put(&width, 4);
+  const int32_t height = -static_cast<int32_t>(h);
+  put(&height, 4);
+  const uint16_t planes = 1, bpp = 1;
+  put(&planes, 2);
+  put(&bpp, 2);
+  const uint32_t compression = 0;
+  put(&compression, 4);
+  put(&imageSize, 4);
+  const int32_t ppm = 2835;
+  put(&ppm, 4);
+  put(&ppm, 4);
+  const uint32_t colors = 2;
+  put(&colors, 4);
+  put(&colors, 4);
+  const uint8_t black[4] = {0, 0, 0, 0};
+  const uint8_t white[4] = {0xFF, 0xFF, 0xFF, 0};
+  put(black, 4);
+  put(white, 4);
+  const size_t dstRow = (w + 7) / 8;
+  const std::string pad(rowSize - dstRow, '\0');
+  if (bitDepth == 2) {
+    const size_t planeSize = (static_cast<size_t>(w) * h + 7) / 8;
+    const size_t colBytes = (h + 7) / 8;
+    for (uint16_t y = 0; y < h; y++) {
+      std::string row(dstRow, static_cast<char>(0xFF));
+      for (uint16_t x = 0; x < w; x++) {
+        const size_t off = static_cast<size_t>(w - 1 - x) * colBytes + y / 8;
+        const int bit = 7 - (y % 8);
+        const uint8_t v = static_cast<uint8_t>((((page[off] >> bit) & 1) << 1) | ((page[planeSize + off] >> bit) & 1));
+        if (v >= 1) row[x / 8] = static_cast<char>(static_cast<uint8_t>(row[x / 8]) & ~(1 << (7 - (x % 8))));
+      }
+      out += row;
+      out += pad;
+    }
+  } else {
+    for (uint16_t y = 0; y < h; y++) {
+      out.append(reinterpret_cast<const char*>(page.data()) + y * dstRow, dstRow);
+      out += pad;
+    }
+  }
+  return out;
+}
+
+static std::vector<uint8_t> pseudoRandomBytes(size_t n, uint32_t seed) {
+  std::vector<uint8_t> v(n);
+  for (size_t i = 0; i < n; ++i) {
+    seed = seed * 1103515245u + 12345u;
+    v[i] = static_cast<uint8_t>(seed >> 16);
+  }
+  return v;
+}
+
 int main() {
   TestUtils::TestRunner runner("XtcCoverHelper Tests");
 
@@ -390,6 +461,98 @@ int main() {
     runner.expectEq(static_cast<uint8_t>(0x00), static_cast<uint8_t>(bmpData[65]),
                     "padding: pad byte 1 of row 0 is zero");
 
+    parser.close();
+  }
+
+  // ---- v3.11.12: strip writer == old whole-page result (2-bit, many strips) ----
+  {
+    const uint16_t w = 37, h = 48;  // odd width (row padding), 6 column bytes
+    const size_t planeSize = (static_cast<size_t>(w) * h + 7) / 8;
+    std::vector<uint8_t> page = pseudoRandomBytes(planeSize * 2, 7u);
+    // Sprinkle all-zero bytes so the writer's white fast path is exercised.
+    for (size_t i = 0; i < page.size(); i += 5) page[i] = 0;
+    const std::string expected = referenceCoverBmp(w, h, 2, page);
+    const size_t stripSizes[] = {1, 200, 100000};  // 5 B rows: min 8 rows, 40 rows, all rows
+    for (const size_t strip : stripSizes) {
+      SdMan.clearFiles();
+      LittleFS.clearWrittenFiles();
+      SdMan.registerFile("/strip.xtch", buildXtcFile2Bit(w, h, page));
+      xtc::XtcParser parser;
+      runner.expectTrue(parser.open("/strip.xtch") == xtc::XtcError::OK, "strips: parser opens");
+      xtc::CoverBmpWriter writer;
+      runner.expectTrue(writer.begin(parser, "/cache/strip.bmp"), "strips: begin succeeds");
+      int steps = 0;
+      xtc::CoverBmpWriter::Status st = xtc::CoverBmpWriter::Status::InProgress;
+      while (st == xtc::CoverBmpWriter::Status::InProgress && steps < 100) {
+        runner.expectFalse(LittleFS.exists("/cache/strip.bmp"), "strips: cover invisible until complete");
+        st = writer.step(parser, strip);
+        ++steps;
+      }
+      runner.expectTrue(st == xtc::CoverBmpWriter::Status::Done, "strips: writer completes");
+      const int expectedSteps = strip == 1 ? 6 : (strip == 200 ? 2 : 1);
+      runner.expectEq(expectedSteps, steps, "strips: one page stream per strip");
+      runner.expectFalse(LittleFS.exists("/cache/strip.bmp.tmp"), "strips: temp file renamed away");
+      runner.expectTrue(LittleFS.getWrittenData("/cache/strip.bmp") == expected,
+                        "strips: BMP identical to the whole-page conversion");
+      parser.close();
+    }
+  }
+
+  // ---- v3.11.12: 1-bit rows split across 4 KB stream chunks ----
+  {
+    SdMan.clearFiles();
+    LittleFS.clearWrittenFiles();
+    const uint16_t w = 100, h = 400;  // 13 B rows, 5200 B page: chunk edges fall mid-row
+    std::vector<uint8_t> page = pseudoRandomBytes(static_cast<size_t>((w + 7) / 8) * h, 11u);
+    SdMan.registerFile("/rows.xtc", buildXtcFile1Bit(w, h, page));
+    xtc::XtcParser parser;
+    parser.open("/rows.xtc");
+    runner.expectTrue(xtc::generateCoverBmpFromParser(parser, "/cache/rows.bmp"), "1-bit stream: generation ok");
+    runner.expectTrue(LittleFS.getWrittenData("/cache/rows.bmp") == referenceCoverBmp(w, h, 1, page),
+                      "1-bit stream: BMP identical to the whole-page conversion");
+    parser.close();
+  }
+
+  // ---- v3.11.12: full-size XTCH page through the one-call helper ----
+  {
+    SdMan.clearFiles();
+    LittleFS.clearWrittenFiles();
+    const uint16_t w = 480, h = 800;
+    std::vector<uint8_t> page = pseudoRandomBytes((static_cast<size_t>(w) * h + 7) / 8 * 2, 3u);
+    SdMan.registerFile("/full.xtch", buildXtcFile2Bit(w, h, page));
+    xtc::XtcParser parser;
+    parser.open("/full.xtch");
+    runner.expectTrue(xtc::generateCoverBmpFromParser(parser, "/cache/full.bmp"), "480x800: generation ok");
+    runner.expectTrue(LittleFS.getWrittenData("/cache/full.bmp") == referenceCoverBmp(w, h, 2, page),
+                      "480x800: BMP identical to the whole-page conversion");
+    parser.close();
+  }
+
+  // ---- v3.11.12: cancel leaves nothing behind ----
+  {
+    SdMan.clearFiles();
+    LittleFS.clearWrittenFiles();
+    const uint16_t w = 16, h = 64;
+    std::vector<uint8_t> page = pseudoRandomBytes((static_cast<size_t>(w) * h + 7) / 8 * 2, 5u);
+    SdMan.registerFile("/cancel.xtch", buildXtcFile2Bit(w, h, page));
+    xtc::XtcParser parser;
+    parser.open("/cancel.xtch");
+    {
+      xtc::CoverBmpWriter writer;
+      runner.expectTrue(writer.begin(parser, "/cache/cancel.bmp"), "cancel: begin");
+      runner.expectTrue(writer.step(parser, 1) == xtc::CoverBmpWriter::Status::InProgress, "cancel: first strip");
+      runner.expectEq(static_cast<uint16_t>(8), writer.rowsWritten(), "cancel: 8 rows after one minimal strip");
+      writer.cancel();
+      runner.expectFalse(writer.active(), "cancel: writer inactive");
+    }
+    runner.expectFalse(LittleFS.exists("/cache/cancel.bmp.tmp"), "cancel: temp file removed");
+    runner.expectFalse(LittleFS.exists("/cache/cancel.bmp"), "cancel: no cover published");
+    {
+      xtc::CoverBmpWriter writer;
+      writer.begin(parser, "/cache/cancel2.bmp");
+      writer.step(parser, 1);
+    }  // destructor cancels too
+    runner.expectFalse(LittleFS.exists("/cache/cancel2.bmp.tmp"), "cancel: destructor removes temp file");
     parser.close();
   }
 

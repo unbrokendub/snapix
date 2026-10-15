@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <string>
 
 /**
@@ -74,7 +75,8 @@ class Markdown {
 
   // Cover image support (for sleep screen and home view)
   std::string getCoverBmpPath() const;
-  bool generateCoverBmp(bool use1BitDithering = false) const;
+  // v3.11.12 — `shouldAbort` cancels the decode (no failure marker is written).
+  bool generateCoverBmp(bool use1BitDithering = false, const std::function<bool()>& shouldAbort = nullptr) const;
   std::string getThumbBmpPath() const;
   bool generateThumbBmp() const;
 

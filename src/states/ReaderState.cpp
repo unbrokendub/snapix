@@ -15,6 +15,7 @@
 #include <JpegToBmpConverter.h>  // v2.0.101: releaseAllPersistent() after cover-gen
 #include <LittleFS.h>  // v2.0.153 — metrics.bin sidecar load/save (used in every env)
 #include <UnifiedCache.h>  // v2.0.166 — Phase 5 unified streaming cache
+#include <XtcCoverHelper.h>  // v3.11.12 — strip-based XTC cover between frames
 #include <Logging.h>
 #include <MemCheckpoint.h>
 #include <MarkdownParser.h>
@@ -261,32 +262,11 @@ void ReaderState::recomputeGlobalPageMetricTotal() {
   globalSectionPageMetricTotal_ = total;
 }
 
-bool ReaderState::loadGlobalPageMetricsFromDisk(
-    unifiedcache::UnifiedCache& cache, const std::string& bookCachePath,
-    const uint32_t configHash, const int spineCount) {
-  if (bookCachePath.empty() || spineCount <= 0) return false;
-
-  // v2.0.166 — read from UnifiedCache (single `streaming.cache` per book)
-  // instead of the per-book `metrics.bin` file.  Same on-payload format
-  // as v2.0.153 (12-byte header + per-spine entries) just wrapped in a
-  // UnifiedCache frame.  Fallback: if the old metrics.bin file still
-  // exists (from a pre-v2.0.166 install), try reading it as before so
-  // upgraders don't lose their cached metrics on the first open.
-  std::vector<uint8_t> payload;
-  const bool loadedFromUnified = cache.readSegment(
-      snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey, payload);
-  if (!loadedFromUnified) {
-    // Legacy fallback: pre-v2.0.166 metrics.bin file
-    const std::string legacyPath = reader::metricsCachePath(bookCachePath);
-    if (!LittleFS.exists(legacyPath.c_str())) return false;
-    File f = LittleFS.open(legacyPath.c_str(), "r");
-    if (!f) return false;
-    payload.resize(f.size());
-    const int n = f.read(payload.data(), payload.size());
-    f.close();
-    if (n != static_cast<int>(payload.size())) return false;
-  }
-
+bool ReaderState::parseGlobalMetricsPayload(const std::vector<uint8_t>& payload, const uint32_t configHash,
+                                            const int spineCount, std::vector<SectionPageMetric>& out) {
+  // Same payload in the UnifiedCache Metrics frame (v2.0.166) and the legacy
+  // per-book metrics.bin (v2.0.153): 12-byte header + per-spine entries.
+  if (spineCount <= 0) return false;
   const size_t expectedBytes = kMetricsCacheHeaderBytes +
                                static_cast<size_t>(spineCount) * kMetricsCacheEntryBytes;
   if (payload.size() != expectedBytes) return false;
@@ -302,10 +282,10 @@ bool ReaderState::loadGlobalPageMetricsFromDisk(
                               (static_cast<uint32_t>(p[10]) << 16) | (static_cast<uint32_t>(p[11]) << 24);
   if (storedHash != configHash) return false;
 
-  globalSectionPageMetrics_.assign(static_cast<size_t>(spineCount), SectionPageMetric{});
+  out.assign(static_cast<size_t>(spineCount), SectionPageMetric{});
   for (int i = 0; i < spineCount; ++i) {
     const uint8_t* e = p + kMetricsCacheHeaderBytes + i * kMetricsCacheEntryBytes;
-    auto& m = globalSectionPageMetrics_[static_cast<size_t>(i)];
+    auto& m = out[static_cast<size_t>(i)];
     m.pages = static_cast<uint16_t>(e[0]) | (static_cast<uint16_t>(e[1]) << 8);
     m.byteSize = static_cast<uint32_t>(e[2]) | (static_cast<uint32_t>(e[3]) << 8) |
                  (static_cast<uint32_t>(e[4]) << 16) | (static_cast<uint32_t>(e[5]) << 24);
@@ -314,12 +294,12 @@ bool ReaderState::loadGlobalPageMetricsFromDisk(
   return true;
 }
 
-void ReaderState::saveGlobalPageMetricsToDisk(
-    unifiedcache::UnifiedCache& cache, const uint32_t configHash) const {
-  if (globalSectionPageMetrics_.empty()) return;
+bool ReaderState::writeGlobalMetricsFrame(unifiedcache::UnifiedCache& cache,
+                                          const std::vector<SectionPageMetric>& metrics, const uint32_t configHash) {
+  if (metrics.empty()) return false;
 
-  const uint16_t spineCount = static_cast<uint16_t>(
-      std::min<size_t>(globalSectionPageMetrics_.size(), static_cast<size_t>(UINT16_MAX)));
+  const uint16_t spineCount =
+      static_cast<uint16_t>(std::min<size_t>(metrics.size(), static_cast<size_t>(UINT16_MAX)));
   const size_t total = kMetricsCacheHeaderBytes + spineCount * kMetricsCacheEntryBytes;
 
   // v2.0.166 — write to UnifiedCache.  Build the payload in a local buffer
@@ -340,7 +320,7 @@ void ReaderState::saveGlobalPageMetricsToDisk(
   p[10] = static_cast<uint8_t>(configHash >> 16);
   p[11] = static_cast<uint8_t>(configHash >> 24);
   for (uint16_t i = 0; i < spineCount; ++i) {
-    const auto& m = globalSectionPageMetrics_[i];
+    const auto& m = metrics[i];
     uint8_t* e = p + kMetricsCacheHeaderBytes + i * kMetricsCacheEntryBytes;
     e[0] = static_cast<uint8_t>(m.pages);
     e[1] = static_cast<uint8_t>(m.pages >> 8);
@@ -351,8 +331,76 @@ void ReaderState::saveGlobalPageMetricsToDisk(
     e[6] = static_cast<uint8_t>(m.exact ? 1 : 0);
   }
 
-  cache.writeSegment(snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey,
-                     payload.data(), payload.size());
+  return cache.writeSegment(snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey,
+                            payload.data(), payload.size());
+}
+
+bool ReaderState::buildGlobalMetricEstimates(Core& core, const ContentType type, const int spineCount,
+                                             std::vector<SectionPageMetric>& out) {
+  // One bulk metadata pass, no per-section page-cache probes (the old
+  // O(sectionCount) probe loop added 7-19 s on hardware).  Runs on ReaderAsync.
+  if (spineCount <= 0) return false;
+  std::vector<size_t> itemSizes(static_cast<size_t>(spineCount), 0);
+  if (type == ContentType::Epub) {
+    auto* provider = core.content.asEpub();
+    if (!provider || !provider->getEpub()) return false;
+    if (!provider->getEpub()->getSpineItemSizes(itemSizes)) {
+      LOG_INF(TAG, "[METRICS] EPUB batch size lookup incomplete; using fallback estimates");
+    }
+  } else if (type == ContentType::Fb2) {
+    auto* provider = core.content.asFb2();
+    auto* fb2 = provider ? provider->getFb2() : nullptr;
+    if (!fb2) return false;
+    std::vector<uint32_t> sourceOffsets;
+    if (!fb2->getTocSourceOffsets(sourceOffsets) || sourceOffsets.size() != static_cast<size_t>(spineCount)) {
+      LOG_INF(TAG, "[METRICS] FB2 bulk TOC lookup failed; using fallback estimates");
+      sourceOffsets.assign(static_cast<size_t>(spineCount), 0);
+    }
+
+    // Derive per-section byte sizes from consecutive sourceOffset deltas.
+    // For the last section we cannot use totalFileSize because FB2 files
+    // typically have large <binary> blocks (base64 cover images, ~60% of
+    // file size) after the closing </body>.  Using totalFileSize as the
+    // end boundary makes the last section appear 10-30x larger than it
+    // really is.  Instead, cap it using the median of preceding sections.
+    for (int i = 0; i + 1 < spineCount; ++i) {
+      const uint32_t current = sourceOffsets[static_cast<size_t>(i)];
+      const uint32_t next = sourceOffsets[static_cast<size_t>(i + 1)];
+      itemSizes[static_cast<size_t>(i)] = next > current ? next - current : 0;
+    }
+    if (spineCount > 1) {
+      // Estimate the last section from the median of non-zero deltas.
+      std::vector<size_t> nonZeroSizes;
+      nonZeroSizes.reserve(static_cast<size_t>(spineCount));
+      for (int i = 0; i < spineCount - 1; ++i) {
+        if (itemSizes[static_cast<size_t>(i)] > 0) {
+          nonZeroSizes.push_back(itemSizes[static_cast<size_t>(i)]);
+        }
+      }
+      if (!nonZeroSizes.empty()) {
+        std::sort(nonZeroSizes.begin(), nonZeroSizes.end());
+        itemSizes[static_cast<size_t>(spineCount - 1)] = nonZeroSizes[nonZeroSizes.size() / 2];
+      }
+    } else {
+      // Single-section book: use the first section offset to content start.
+      const uint32_t sourceOffset = sourceOffsets[0];
+      itemSizes[0] = fb2->getFileSize() > sourceOffset
+                         ? (fb2->getFileSize() - sourceOffset) / 3  // crude: ~1/3 of FB2 is text
+                         : 0;
+    }
+  } else {
+    return false;
+  }
+
+  // No section is exact yet from this pass: the UI marks the current section
+  // exact (and recalibrates bytes-per-page) when it adopts the estimates.
+  out.assign(static_cast<size_t>(spineCount), SectionPageMetric{});
+  for (int i = 0; i < spineCount; ++i) {
+    auto& metric = out[static_cast<size_t>(i)];
+    metric.byteSize = static_cast<uint32_t>(itemSizes[static_cast<size_t>(i)]);
+    metric.pages = estimatePagesForBytes(itemSizes[static_cast<size_t>(i)]);
+  }
+  return true;
 }
 
 void ReaderState::initializeGlobalPageMetrics(Core& core, const int currentSectionTotalPages,
@@ -383,151 +431,80 @@ void ReaderState::initializeGlobalPageMetrics(Core& core, const int currentSecti
     return;
   }
 
+  const std::string bookCachePath = bookCachePathForMetrics(core);
+  const uint32_t configHash = computeMetricsConfigHash(config);
+  metricsBookCachePath_ = bookCachePath;
+  metricsConfigHash_ = configHash;
+
   // Hit the tiny persisted metrics frame before doing any per-section work.
   // The source fingerprint is part of the parent cache path/lifecycle, so a
   // valid config+spine-count match is already safe to reuse as-is.
-  const std::string bookCachePath = bookCachePathForMetrics(core);
-  const uint32_t configHash = computeMetricsConfigHash(config);
-  auto metricsCache =
-      snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
-  if (loadGlobalPageMetricsFromDisk(metricsCache, bookCachePath, configHash,
-                                    spineCount)) {
-    bool exactMeasurementChanged = false;
-    if (currentSpineIndex_ >= 0 && currentSpineIndex_ < spineCount &&
-        currentSectionTotalPages > 0) {
-      auto& metric =
-          globalSectionPageMetrics_[static_cast<size_t>(currentSpineIndex_)];
-      const auto currentPages =
-          static_cast<uint16_t>(std::max(1, currentSectionTotalPages));
-      if (!currentSectionIsPartial) {
-        if (!metric.exact || metric.pages != currentPages) {
-          // A complete live cache is authoritative.  In particular, do not
-          // retain a larger old estimate while marking it exact.
+  //
+  // v3.11.12 — looked up ONCE per session, through the page render's
+  // UnifiedCache instance (its directory was just scanned for this page; a
+  // fresh instance rescanned streaming.cache inside the status bar).  This
+  // runs for every status-bar draw until the metrics exist (up to 4× a page
+  // with anti-aliasing), so a miss must not be retried here.
+  if (!metricsDiskProbed_) {
+    metricsDiskProbed_ = true;
+    std::vector<uint8_t> payload;
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+    auto& metricsCache = renderCacheFor(bookCachePath);
+#else
+    auto metricsCacheOwner = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+    auto& metricsCache = metricsCacheOwner;
+#endif
+    if (metricsCache.readSegment(snapix::unifiedcache::Kind::Metrics, snapix::unifiedcache::kGlobalKey, payload) &&
+        parseGlobalMetricsPayload(payload, configHash, spineCount, globalSectionPageMetrics_)) {
+      bool exactMeasurementChanged = false;
+      if (currentSpineIndex_ >= 0 && currentSpineIndex_ < spineCount && currentSectionTotalPages > 0) {
+        auto& metric = globalSectionPageMetrics_[static_cast<size_t>(currentSpineIndex_)];
+        const auto currentPages = static_cast<uint16_t>(std::max(1, currentSectionTotalPages));
+        if (!currentSectionIsPartial) {
+          if (!metric.exact || metric.pages != currentPages) {
+            // A complete live cache is authoritative.  In particular, do not
+            // retain a larger old estimate while marking it exact.
+            metric.pages = currentPages;
+            metric.exact = true;
+            exactMeasurementChanged = true;
+          }
+        } else if (!metric.exact && currentPages > metric.pages) {
           metric.pages = currentPages;
-          metric.exact = true;
-          exactMeasurementChanged = true;
-        }
-      } else if (!metric.exact && currentPages > metric.pages) {
-        metric.pages = currentPages;
-      }
-    }
-    globalSectionPageMetricsInitialized_ = true;
-    if (exactMeasurementChanged) {
-      recalibrateGlobalPageEstimates();
-      saveGlobalPageMetricsToDisk(metricsCache, configHash);
-    } else {
-      recomputeGlobalPageMetricTotal();
-    }
-    readerPerfLog("global-metrics-init", metricsStartedMs,
-                  "(source=cache sections=%d)", spineCount);
-    return;
-  }
-
-  // Cache miss: derive only lightweight byte-size estimates in one I/O pass.
-  // Do not probe every page-cache file here: this function runs inside the
-  // first visible page render, and the old O(sectionCount) probe loop added
-  // 7-19 seconds of synchronous latency on hardware.
-  std::vector<size_t> itemSizes(static_cast<size_t>(spineCount), 0);
-  if (type == ContentType::Epub) {
-    auto* provider = core.content.asEpub();
-    if (!provider->getEpub()->getSpineItemSizes(itemSizes)) {
-      LOG_INF(TAG, "[METRICS] EPUB batch size lookup incomplete; using fallback estimates");
-    }
-  } else {
-    auto* provider = core.content.asFb2();
-    auto* fb2 = provider ? provider->getFb2() : nullptr;
-    std::vector<uint32_t> sourceOffsets;
-    if (!fb2 || !fb2->getTocSourceOffsets(sourceOffsets) ||
-        sourceOffsets.size() != static_cast<size_t>(spineCount)) {
-      LOG_INF(TAG, "[METRICS] FB2 bulk TOC lookup failed; using fallback estimates");
-      sourceOffsets.assign(static_cast<size_t>(spineCount), 0);
-    }
-
-    // Derive per-section byte sizes from consecutive sourceOffset deltas.
-    // For the last section we cannot use totalFileSize because FB2 files
-    // typically have large <binary> blocks (base64 cover images, ~60% of
-    // file size) after the closing </body>.  Using totalFileSize as the
-    // end boundary makes the last section appear 10-30x larger than it
-    // really is.  Instead, cap it using the median of preceding sections.
-    for (int i = 0; i < spineCount; ++i) {
-      if (i + 1 < spineCount) {
-        const uint32_t current = sourceOffsets[static_cast<size_t>(i)];
-        const uint32_t next = sourceOffsets[static_cast<size_t>(i + 1)];
-        itemSizes[static_cast<size_t>(i)] =
-            next > current ? next - current : 0;
-      }
-      // Last section: leave at 0 for now, estimate below.
-    }
-    if (spineCount > 1) {
-      // Estimate the last section from the median of non-zero deltas.
-      std::vector<size_t> nonZeroSizes;
-      nonZeroSizes.reserve(static_cast<size_t>(spineCount));
-      for (int i = 0; i < spineCount - 1; ++i) {
-        if (itemSizes[static_cast<size_t>(i)] > 0) {
-          nonZeroSizes.push_back(itemSizes[static_cast<size_t>(i)]);
         }
       }
-      if (!nonZeroSizes.empty()) {
-        std::sort(nonZeroSizes.begin(), nonZeroSizes.end());
-        const size_t median = nonZeroSizes[nonZeroSizes.size() / 2];
-        itemSizes[static_cast<size_t>(spineCount - 1)] = median;
+      globalSectionPageMetricsInitialized_ = true;
+      if (exactMeasurementChanged) {
+        recalibrateGlobalPageEstimates();
+        scheduleGlobalMetricsSave();
+      } else {
+        recomputeGlobalPageMetricTotal();
       }
-    } else if (spineCount == 1) {
-      // Single-section book: use the first section offset to content start.
-      const uint32_t sourceOffset = sourceOffsets[0];
-      const size_t contentEstimate = fb2->getFileSize() > sourceOffset
-          ? (fb2->getFileSize() - sourceOffset) / 3  // crude: ~1/3 of FB2 is text
-          : 0;
-      itemSizes[0] = contentEstimate;
+      readerPerfLog("global-metrics-init", metricsStartedMs, "(source=cache sections=%d)", spineCount);
+      return;
     }
+    globalSectionPageMetrics_.clear();
+
+    // Cache miss: the estimates (one bulk metadata pass) and their persist
+    // run on ReaderAsync — this function runs inside the visible page render
+    // (1.6 s for 61 FB2 sections on device).  pollDeferredJobs() adopts the
+    // result; the status bar shows the local fallback until then.
+    requestGlobalMetricsCompute(type, bookCachePath, configHash, spineCount);
+    readerPerfLog("global-metrics-init", metricsStartedMs, "(source=deferred sections=%d)", spineCount);
   }
+}
 
-  globalSectionPageMetrics_.resize(static_cast<size_t>(spineCount));
-
-  for (int spineIndex = 0; spineIndex < spineCount; ++spineIndex) {
-    const size_t itemSize = itemSizes[static_cast<size_t>(spineIndex)];
-    auto& metric = globalSectionPageMetrics_[static_cast<size_t>(spineIndex)];
-    metric.byteSize = static_cast<uint32_t>(itemSize);
-    if (spineIndex == currentSpineIndex_ && currentSectionTotalPages > 0) {
-      metric.pages =
-          static_cast<uint16_t>(std::max(1, currentSectionTotalPages));
-      metric.exact = !currentSectionIsPartial;
-    }
-  }
-
-  size_t calibrationBytes = 0;
-  uint32_t calibrationPages = 0;
-  for (const auto& metric : globalSectionPageMetrics_) {
-    if (metric.exact && metric.byteSize > 0 && metric.pages > 0) {
-      calibrationBytes += metric.byteSize;
-      calibrationPages += metric.pages;
-    }
-  }
-  const size_t bytesPerPage =
-      calibrationPages > 0 ? std::max<size_t>(256, calibrationBytes / calibrationPages) : kEstimatedBytesPerPage;
-
-  for (int spineIndex = 0; spineIndex < spineCount; ++spineIndex) {
-    auto& metric = globalSectionPageMetrics_[static_cast<size_t>(spineIndex)];
-    const size_t itemSize = itemSizes[static_cast<size_t>(spineIndex)];
-    const uint16_t estimatedPages = estimatePagesForBytes(itemSize, bytesPerPage);
-    if (metric.pages == 0) {
-      metric.pages = estimatedPages;
-    } else if (!metric.exact && estimatedPages > metric.pages) {
-      metric.pages = estimatedPages;
-    }
-  }
-
-  recomputeGlobalPageMetricTotal();
-  globalSectionPageMetricsInitialized_ = true;
-
-  // Persist the freshly derived metrics so the next book-open session can take
-  // the fast path above.  Save once at init time; further refinements as the
-  // user reads (becameExact in updateGlobalPageMetrics) trigger their own
-  // saves.  Best-effort — failure leaves the next session repeating the batch
-  // metadata pass, but never breaks correctness.
-  saveGlobalPageMetricsToDisk(metricsCache, configHash);
-  readerPerfLog("global-metrics-init", metricsStartedMs,
-                "(source=batch sections=%d)", spineCount);
+void ReaderState::requestGlobalMetricsCompute(const ContentType type, const std::string& bookCachePath,
+                                              const uint32_t configHash, const int spineCount) {
+  if (metricsComputeFailed_ || metricsJob_.state() != reader::DeferredJobSlot::State::Idle) return;
+  metricsJobIo_.computeEstimates = true;
+  metricsJobIo_.type = type;
+  metricsJobIo_.configHash = configHash;
+  metricsJobIo_.spineCount = spineCount;
+  metricsJobIo_.bookCachePath = bookCachePath;
+  metricsJobIo_.metrics.clear();
+  metricsJobIo_.source = "";
+  metricsJobIo_.persisted = false;
+  metricsJob_.request();
 }
 
 void ReaderState::updateGlobalPageMetrics(Core& core, const int currentSectionTotalPages, const bool currentSectionIsPartial) {
@@ -572,15 +549,9 @@ void ReaderState::updateGlobalPageMetrics(Core& core, const int currentSectionTo
     // verbatim instead of re-probing.  Only on becameExact (not every partial
     // tick) to keep LittleFS write traffic bounded to spineCount writes per
     // book lifetime.  Best-effort; failures are silent.
-    const std::string bookCachePath = bookCachePathForMetrics(core);
-    if (!bookCachePath.empty()) {
-      const Theme& theme = THEME_MANAGER.current();
-      const auto vp = getReaderViewport(core.settings.statusBar != 0);
-      const auto config = core.settings.getRenderConfig(theme, vp.width, vp.height);
-      auto cache =
-          snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
-      saveGlobalPageMetricsToDisk(cache, computeMetricsConfigHash(config));
-    }
+    // v3.11.12 — persisted by ReaderAsync (a fresh UnifiedCache scan plus a
+    // writer-token wait of up to 300 ms used to run in this render).
+    scheduleGlobalMetricsSave();
   } else if (changed) {
     recomputeGlobalPageMetricTotal();
   }
@@ -650,6 +621,13 @@ ReaderState::GlobalPageMetrics ReaderState::resolveGlobalPageMetrics(Core& core,
       metrics.totalIsExact = totalIsExact;
       return metrics;
     }
+    // v3.11.12 — the book-wide estimates are still being built on ReaderAsync:
+    // show the page with an unknown total ("N/-") rather than a total that is
+    // really the spine count.
+    metrics.currentPage = std::max(currentSectionPage_, 0) + 1;
+    metrics.totalPages = 0;
+    metrics.totalIsExact = false;
+    return metrics;
   }
 
   if (type == ContentType::Fb2 && fb2UsesSectionNavigation(core.content.asFb2())) {
@@ -680,8 +658,15 @@ ReaderState::GlobalPageMetrics ReaderState::resolveGlobalPageMetrics(Core& core,
 
     int resolvedPage = std::max(currentSectionPage_, 0) + 1;
     if (fb2 && currentSpineIndex_ >= 0 && currentSpineIndex_ < static_cast<int>(fb2->tocCount()) && fb2->getFileSize() > 0) {
-      const Fb2::TocItem item = fb2->getTocItem(static_cast<uint16_t>(currentSpineIndex_));
-      const uint64_t scaled = static_cast<uint64_t>(estimatedTotalPages) * item.sourceOffset;
+      // v3.11.12 — memoised: getTocItem() opens meta.bin, and this runs for
+      // every status-bar draw until the estimates land.
+      if (fb2FallbackOffsetSpine_ != currentSpineIndex_) {
+        // A failed read gives offset 0 (the old per-call result too) and is
+        // retried at the next spine change only.
+        fb2FallbackOffset_ = fb2->getTocItem(static_cast<uint16_t>(currentSpineIndex_)).sourceOffset;
+        fb2FallbackOffsetSpine_ = currentSpineIndex_;
+      }
+      const uint64_t scaled = static_cast<uint64_t>(estimatedTotalPages) * fb2FallbackOffset_;
       resolvedPage = static_cast<int>(scaled / fb2->getFileSize()) + std::max(currentSectionPage_, 0) + 1;
     }
 
@@ -782,6 +767,10 @@ ReaderState::ReaderState(GfxRenderer& renderer)
                                        const reader::ReaderAsyncJobsController::AbortCallback& shouldAbort) {
     runPageFillJob(request, shouldAbort);
   });
+  asyncJobs_.setAuxHandler([this](const reader::ReaderAsyncJobsController::AuxRequest& request,
+                                  const reader::ReaderAsyncJobsController::AbortCallback& shouldAbort) {
+    runAuxJob(request, shouldAbort);
+  });
   contentPath_[0] = '\0';
 }
 
@@ -849,6 +838,7 @@ void ReaderState::enter(Core& core) {
   stopBackgroundCaching();  // Ensure any previous task is stopped
   cacheController_.resetSession();
   invalidateGlobalPageMetrics();
+  resetDeferredJobs();
   currentSpineIndex_ = 0;
   currentSectionPage_ = 0;  // Will be set to -1 after progress load if at start
   pagesUntilFullRefresh_ = (core.settings.getPagesPerRefreshValue() == 0) ? 0 : 1;
@@ -1039,11 +1029,15 @@ void ReaderState::enter(Core& core) {
 
 void ReaderState::exit(Core& core) {
   LOG_INF(TAG, "Exiting");
-  invalidateGlobalPageMetrics();
 
   // Stop background caching task first - BackgroundTask::stop() waits properly
   stopBackgroundCaching();
   asyncJobs_.stopWorker();
+  // v3.11.12 — worker stopped: persist the metrics this session learned
+  // (their saves ran on ReaderAsync), then drop all deferred-job state.
+  if (contentLoaded_) flushGlobalMetricsSaveNow(core);
+  invalidateGlobalPageMetrics();
+  resetDeferredJobs();
   asyncJobs_.clearPendingTocJump();
   asyncJobs_.clearPendingPageLoad();
   asyncJobs_.pendingRefresh().clear();
@@ -1272,6 +1266,9 @@ StateTransition ReaderState::update(Core& core) {
     return StateTransition::to(StateId::FileList);
   }
 
+  // v3.11.12 — results of work moved off the UI loop (cover BMP, metrics).
+  pollDeferredJobs(core);
+
   if (pendingTocJumpActive_ && !needsRender_) {
     processPendingTocJump(core);
     if (asyncJobs_.navigationJobBlocksInput()) {
@@ -1356,7 +1353,11 @@ StateTransition ReaderState::update(Core& core) {
   }
 
   Event e;
+  bool hadInputEvent = false;
   while (core.events.pop(e)) {
+    // v3.11.12 — any input supersedes owed XTCH gray passes (see render()).
+    hadInputEvent = true;
+    xtcGrayPassDue_ = false;
     if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_ &&
         reader::cancelsDeferredTocFollowup(e)) {
       LOG_INF(TAG,
@@ -1554,6 +1555,20 @@ StateTransition ReaderState::update(Core& core) {
     }
   }
 
+  // v3.11.12 — XTC follow-ups run only on a quiet loop step, one bounded
+  // piece each: first the owed gray passes of the page on screen (their own
+  // step, so the black & white page appeared one refresh earlier), then the
+  // cover/thumbnail strips.
+  if (core.content.metadata().type == ContentType::Xtc && !hadInputEvent && !pageTurnButtonHeld && !needsRender_ &&
+      !menuMode_ && !bookmarkMode_ && !tocMode_) {
+    if (xtcRenderer_.grayPending()) {
+      xtcGrayPassDue_ = true;
+      needsRender_ = true;
+    } else if (xtcCoverPhase_ != XtcCoverPhase::Idle) {
+      runXtcCoverSlice(core);
+    }
+  }
+
   if (!needsRender_ && !isWorkerRunning() && !pendingTocJumpActive_ && !pendingEpubPageLoadActive_ && !menuMode_ &&
       !bookmarkMode_ && !tocMode_) {
     const uint32_t nowMs = millis();
@@ -1569,6 +1584,12 @@ StateTransition ReaderState::update(Core& core) {
 void ReaderState::render(Core& core) {
   if (!needsRender_ || !contentLoaded_) {
     return;
+  }
+
+  // v3.11.12 — owed XTCH gray passes apply only over the black & white page
+  // they belong to: any other frame drops them (that page stays B/W).
+  if (!xtcGrayPassDue_) {
+    xtcRenderer_.cancelPendingGray();
   }
 
   // v3.11.12 — framebuffer arbitration (see InflateReader.h).  While a
@@ -2454,7 +2475,11 @@ void ReaderState::renderLoadedPage(Core& core, const std::shared_ptr<Page>& page
 
   const uint32_t renderBwMs = reader::perfMsNow();
   renderPageContents(core, *page, vp.marginTop, vp.marginRight, vp.marginBottom, vp.marginLeft);
+  // v3.11.12 — split timing: the status bar used to hide the global-metrics
+  // batch pass inside reader-render-bw.
+  const uint32_t statusBarMs = reader::perfMsNow();
   renderStatusBar(core, vp.marginRight, vp.marginBottom, vp.marginLeft, static_cast<int>(pageCount), cacheIsPartial);
+  readerPerfLog("reader-render-statusbar", statusBarMs, nullptr);
   readerPerfLog("reader-render-bw", renderBwMs, "(aa=%u images=%u)", static_cast<unsigned>(aaEnabled),
           static_cast<unsigned>(page->hasImages()));
 
@@ -2621,10 +2646,18 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
         markersSingleSection = true;  // v3.9.0 — chunked markers
       } else if (currentSpineIndex_ >= 0 &&
                  currentSpineIndex_ < static_cast<int>(fb2->tocCount())) {
-        const Fb2::TocItem item = fb2->getTocItem(static_cast<uint16_t>(currentSpineIndex_));
-        if (item.sectionIndex >= 0) {
+        // v3.11.12 — memoised per spine: getTocItem() opens meta.bin, and this
+        // runs for every page draw (twice per page with anti-aliasing).
+        if (fb2SectionMemoSpine_ != currentSpineIndex_) {
+          const int sectionIndex = fb2->getTocItem(static_cast<uint16_t>(currentSpineIndex_)).sectionIndex;
+          if (sectionIndex >= 0) {  // a failed read is not memoised
+            fb2SectionMemoIndex_ = sectionIndex;
+            fb2SectionMemoSpine_ = currentSpineIndex_;
+          }
+        }
+        if (fb2SectionMemoSpine_ == currentSpineIndex_ && fb2SectionMemoIndex_ >= 0) {
           bookCachePath = fb2->getCachePath();
-          markersKey = item.sectionIndex;
+          markersKey = fb2SectionMemoIndex_;
         }
       }
     }
@@ -3159,6 +3192,22 @@ void ReaderState::renderXtcPage(Core& core) {
 
   const Theme& theme = THEME_MANAGER.current();
 
+  if (xtcGrayPassDue_) {
+    // v3.11.12 — the owed gray passes of the page on screen (scheduled by
+    // update() on a quiet step).  Draws over the B/W base; no clear.
+    xtcGrayPassDue_ = false;
+    const uint32_t grayMs = reader::perfMsNow();
+    const auto grayResult = xtcRenderer_.renderPendingGray(provider->getParser());
+    readerPerfLog("xtc-render-gray", grayMs, "(page=%u gray=%u result=%d)", static_cast<unsigned>(currentPage_),
+                  static_cast<unsigned>(xtcRenderer_.lastRenderUsedGrayscale()), static_cast<int>(grayResult));
+    if (xtcRenderer_.lastRenderUsedGrayscale()) {
+      // Same baseline rebuild as an immediate gray render (see below).
+      pagesUntilFullRefresh_ = 1;
+      forceCleanRefreshOnNext_ = true;
+    }
+    return;
+  }
+
   // v2.0.202 — explicit clearScreen (renderCurrentPage no longer
   // eagerly clears; only render-bearing branches do).  XTC takes
   // over the full screen via xtcRenderer_.render, so a clean
@@ -3166,9 +3215,14 @@ void ReaderState::renderXtcPage(Core& core) {
   renderer_.clearScreen(theme.backgroundColor);
 
   // v3.11.12 — XTCH grayscale only when anti-aliasing is on (it was forced
-  // regardless of the setting).
+  // regardless of the setting), and its gray passes are deferred to their own
+  // loop step: B/W page + one refresh now (~1.2 s → ~0.6 s for this step).
+  const uint32_t renderMs = reader::perfMsNow();
   auto result = xtcRenderer_.render(provider->getParser(), currentPage_, [this, &core]() { displayWithRefresh(core); },
-                                    core.settings.textAntiAliasing != 0);
+                                    core.settings.textAntiAliasing != 0, /*deferGray=*/true);
+  readerPerfLog("xtc-render", renderMs, "(page=%u bits=%u grayOwed=%u)", static_cast<unsigned>(currentPage_),
+                static_cast<unsigned>(provider->getParser().getBitDepth()),
+                static_cast<unsigned>(xtcRenderer_.grayPending()));
 
   switch (result) {
     case XtcPageRenderer::RenderResult::Success:
@@ -3397,45 +3451,39 @@ ReaderState::Viewport ReaderState::getReaderViewport(bool showStatusBar) const {
 }
 
 bool ReaderState::renderCoverPage(Core& core) {
-  LOG_DBG(TAG, "Generating cover for reader...");
-  if (core.content.metadata().type == ContentType::Epub) {
-    const std::string existingCoverPath = core.content.getCoverPath();
-    const bool coverCached = !existingCoverPath.empty() && SdMan.exists(existingCoverPath.c_str());
-    if (!coverCached) {
-      const reader::HeapState heap = reader::readHeapState();
-      if (reader::isHeapCritical(heap)) {
-        LOG_INF(TAG, "Skipping uncached EPUB cover due to tight heap free=%u largest=%u",
-                static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlock));
-        return false;
-      }
+  const uint32_t startedMs = reader::perfMsNow();
+  const std::string coverPath = core.content.getCoverPath();
+  const bool coverReady = !coverPath.empty() && (LittleFS.exists(coverPath.c_str()) || SdMan.exists(coverPath.c_str()));
+
+  if (!coverReady) {
+    // v3.11.12 — the BMP is decoded on ReaderAsync (ZIP extract + JPEG decode
+    // took ~5 s of one UI-loop step on a first EPUB open).  Show a title page
+    // now; pollDeferredJobs() repaints with the real cover, or leaves the
+    // cover page when the book has none.
+    if (coverPath.empty() || coverGenerationFailed_) return false;
+    const size_t slash = coverPath.find_last_of('/');
+    const std::string failedMarker =
+        (slash == std::string::npos ? std::string() : coverPath.substr(0, slash)) + "/.cover.failed";
+    if (LittleFS.exists(failedMarker.c_str())) return false;  // known: no cover image
+    const reader::HeapState heap = reader::readHeapState();
+    if (reader::isHeapCritical(heap)) {
+      LOG_INF(TAG, "Skipping uncached cover due to tight heap free=%u largest=%u",
+              static_cast<unsigned>(heap.freeBytes), static_cast<unsigned>(heap.largestBlock));
+      return false;
     }
+    (void)coverJob_.request();
+    LOG_DBG(TAG, "Cover not generated yet: title page now, BMP on ReaderAsync");
+    renderCoverPlaceholder(core);
+    coverPlaceholderShown_ = true;
+    // A chapter-cache job (resumable) yields so the cover is decoded first.
+    if (isWorkerRunning() && coverJob_.state() == reader::DeferredJobSlot::State::Pending) {
+      requestWorkerCancel();
+    }
+    pagesUntilFullRefresh_ = 1;
+    readerPerfLog("cover-page", startedMs, "(source=placeholder)");
+    return true;
   }
 
-  std::string coverPath = core.content.generateCover(true);  // Always 1-bit in reader (saves ~48KB grayscale buffer)
-
-  // v2.0.101 (architectural fix — post-cover "no-return" point):
-  // Cover-gen via JPEGDEC pins ~25 KB (shared decoder instance) + ~7-32 KB
-  // (decode arena) mid-heap for the rest of the session.  The next chapter
-  // parser then starts with `largest_free` artificially shrunk to ~25 KB
-  // instead of the ~70 KB it actually has — and a handful of ParsedText
-  // allocations later (each ~1.8 KB contiguous from words.reserve(64))
-  // collapse below the MIN_LAYOUT_FREE_HEAP=10240 watermark, aborting
-  // every retry forever.  The "no-return" point.
-  //
-  // Releasing the JPEGDEC instance + arena here is cheap (one-line free,
-  // ~100 µs) and the next image decode pays one re-allocation (~10 ms),
-  // which is in the noise compared to the 50-200 ms per-image decode
-  // total.  releaseAllPersistent() is a no-op when SNAPIX_SMOL_JPEG=1
-  // (v3_alpha) because the SmolJpeg path never instantiates JPEGDEC at
-  // all — costs nothing in either env, helps default env enormously.
-  JpegToBmpConverter::releaseAllPersistent();
-
-  if (coverPath.empty()) {
-    LOG_DBG(TAG, "No cover available, skipping cover page");
-    return false;
-  }
-
-  memCheckpoint("cover generation");
   LOG_DBG(TAG, "Rendering cover page from: %s", coverPath.c_str());
   const auto vp = getReaderViewport(core.settings.statusBar != 0);
   int pagesUntilRefresh = pagesUntilFullRefresh_;
@@ -3444,10 +3492,12 @@ bool ReaderState::renderCoverPage(Core& core) {
   bool rendered = CoverHelpers::renderCoverFromBmp(renderer_, coverPath, vp.marginTop, vp.marginRight, vp.marginBottom,
                                                    vp.marginLeft, pagesUntilRefresh,
                                                    core.settings.getPagesPerRefreshValue(), turnOffScreen);
+  coverPlaceholderShown_ = false;
 
   // После полноэкранной обложки следующая текстовая страница должна пройти через
   // обычную более "тяжёлую" ступень cadence, но без отдельного промежуточного кадра.
   pagesUntilFullRefresh_ = 1;
+  readerPerfLog("cover-page", startedMs, "(source=bmp ok=%u)", static_cast<unsigned>(rendered));
   return rendered;
 }
 
@@ -3532,20 +3582,13 @@ void ReaderState::startBackgroundCaching(Core& core, const char* trigger) {
   }
 
   const BackgroundCachePlan plan = planBackgroundCacheWork(core);
-  if (!plan.shouldStart) {
-    return;
-  }
-
-  if (trigger && strcmp(trigger, "post-render") == 0 && plan.reason == BackgroundCacheWakeReason::FarPrefetchReady) {
-    LOG_DBG(TAG, "[CACHE] background cache skip trigger=%s reason=far-prefetch-deferred activeSpine=%d candidate=%d",
-            trigger, plan.activeSpine, plan.candidateSpine);
-    return;
-  }
 
   if (core.content.metadata().type == ContentType::Xtc) {
-    if (!thumbnailDone_) {
-      core.content.generateCover(true);
-      core.content.generateThumbnail();
+    if (plan.shouldStart && !thumbnailDone_) {
+      // v3.11.12 — was generateCover() + generateThumbnail() right here, in the
+      // first page's loop step (a 96 KB page buffer, failing with ~60-90 KB
+      // free).  Now strips between frames: see runXtcCoverSlice().
+      beginXtcCoverJob(core);
       thumbnailDone_ = true;
     }
     return;
@@ -3553,6 +3596,20 @@ void ReaderState::startBackgroundCaching(Core& core, const char* trigger) {
 
   if (isWorkerRunning()) {
     LOG_DBG(TAG, "[ASYNC] background cache request ignored because worker is already busy");
+    return;
+  }
+
+  // v3.11.12 — deferred work (cover BMP, global metrics) goes first: it is
+  // short, and the cover is what the reader is looking at.  FIFO worker.
+  queueDeferredJobs(core);
+
+  if (!plan.shouldStart) {
+    return;
+  }
+
+  if (trigger && strcmp(trigger, "post-render") == 0 && plan.reason == BackgroundCacheWakeReason::FarPrefetchReady) {
+    LOG_DBG(TAG, "[CACHE] background cache skip trigger=%s reason=far-prefetch-deferred activeSpine=%d candidate=%d",
+            trigger, plan.activeSpine, plan.candidateSpine);
     return;
   }
 

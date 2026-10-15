@@ -352,6 +352,18 @@ Content → ContentParser → Page → GfxRenderer → EInkDisplay
 
 The "Pages Per Refresh" setting controls how often full refresh occurs (1/5/10/15/30 pages).
 
+### Reader UI-Loop Budget
+
+The reader runs on one UI loop task plus the `ReaderAsync` worker. A loop step that draws a frame always includes the panel refresh (~420 ms fast refresh, blocking). Anything heavier than drawing goes elsewhere:
+
+- **Cover BMP** (ZIP extract + JPEG decode, seconds): an `Aux` job on `ReaderAsync`. The cover page shows a title placeholder until the BMP exists. Then it repaints, or the reader leaves the cover page when the book has no cover. A page turn cancels the job (abort reaches the decoder through the stream adapters).
+- **Global page metrics**: the persisted frame is read once per session through the page render's `UnifiedCache`. On a miss the estimates are computed on `ReaderAsync` (one bulk metadata pass). Every later persist also runs there, and one final persist runs on book exit. Until the estimates arrive the status bar shows the local fallback (`N/-` for EPUB).
+- **XTCH grayscale**: the page is shown black & white first, in one step with one refresh. The gray passes run on the next quiet loop step. A page turn skips them.
+- **XTC cover / thumbnail**: `xtc::CoverBmpWriter` builds the cover in bounded strips (one page stream each, at most 16 KB resident) on idle loop steps. The XTC parser's SD handle belongs to the UI task, so this does not run on the worker.
+- **FB2 TOC**: `Fb2::readTocItems()` reads the whole TOC with one `meta.bin` open and one forward pass.
+
+`reader::DeferredJobSlot` (`src/states/reader/ReaderTypes.h`) is the UI ↔ worker hand-off. Its states are request → queued → running → done/failed. A command dropped by a worker cancel is recovered and requeued. Each step logs a `[PERF]` line (`cover-page`, `cover-generate-worker`, `global-metrics-init`/`-worker`, `toc-populate`, `xtc-render`, `xtc-render-gray`, `xtc-cover-strip`).
+
 ---
 
 ## Image Rendering

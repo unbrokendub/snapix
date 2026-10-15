@@ -38,9 +38,22 @@ class ReaderAsyncJobsController {
     bool requireComplete = false;
   };
 
+  // v3.11.12 — short background work moved off the UI loop (see
+  // DeferredJobSlot).  Runs at background priority; the request only names
+  // the work, its inputs travel through the slot.
+  enum class AuxJobKind : uint8_t {
+    None,
+    CoverImage,     // content cover BMP (JPEG/PNG decode)
+    GlobalMetrics,  // whole-book page estimates: compute and/or persist
+  };
+  struct AuxRequest {
+    AuxJobKind kind = AuxJobKind::None;
+  };
+
   using BackgroundCacheHandler = std::function<void(const BackgroundCacheRequest&, const AbortCallback&)>;
   using TocJumpHandler = std::function<void(const TocJumpRequest&, const AbortCallback&)>;
   using PageFillHandler = std::function<void(const PageFillRequest&, const AbortCallback&)>;
+  using AuxHandler = std::function<void(const AuxRequest&, const AbortCallback&)>;
 
   ReaderAsyncJobsController();
   ~ReaderAsyncJobsController();
@@ -56,10 +69,12 @@ class ReaderAsyncJobsController {
   void setBackgroundCacheHandler(BackgroundCacheHandler handler) { backgroundCacheHandler_ = std::move(handler); }
   void setTocJumpHandler(TocJumpHandler handler) { tocJumpHandler_ = std::move(handler); }
   void setPageFillHandler(PageFillHandler handler) { pageFillHandler_ = std::move(handler); }
+  void setAuxHandler(AuxHandler handler) { auxHandler_ = std::move(handler); }
 
   bool queueBackgroundCache(const BackgroundCacheRequest& request);
   bool queueTocJumpWork(const TocJumpRequest& request);
   bool queuePageFillWork(const PageFillRequest& request);
+  bool queueAuxWork(const AuxRequest& request);
 
   int& queuedPendingPageTurnRef() { return navigationJob_.queuedTurn; }
   uint32_t& queuedPendingPageTurnQueuedMsRef() { return navigationJob_.queuedTurnQueuedMs; }
@@ -170,6 +185,7 @@ class ReaderAsyncJobsController {
     BackgroundCache,
     TocJump,
     PageFill,
+    Aux,
   };
 
   struct Command {
@@ -178,6 +194,7 @@ class ReaderAsyncJobsController {
     BackgroundCacheRequest background;
     TocJumpRequest tocJump;
     PageFillRequest pageFill;
+    AuxRequest aux;
   };
 
   void workerLoop();
@@ -199,6 +216,7 @@ class ReaderAsyncJobsController {
   BackgroundCacheHandler backgroundCacheHandler_;
   TocJumpHandler tocJumpHandler_;
   PageFillHandler pageFillHandler_;
+  AuxHandler auxHandler_;
 
   ReaderNavigationJob navigationJob_;
 

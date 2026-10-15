@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "../core/Result.h"
 #include "ContentTypes.h"
 #include "EpubProvider.h"
@@ -59,7 +61,9 @@ struct ContentHandle {
   std::string getThumbnailPath() const;              // Get path without generating (for existence check)
   std::string getCoverPath() const;                  // Get cover.bmp path without generating
   std::string generateThumbnail();                   // For home screen (THUMB_WIDTH x THUMB_HEIGHT 1-bit)
-  std::string generateCover(bool use1BitDithering);  // For reader cover page
+  // For reader cover page.  v3.11.12: `shouldAbort` lets ReaderAsync cancel
+  // the decode; a cancelled attempt returns "" without a failure marker.
+  std::string generateCover(bool use1BitDithering, const std::function<bool()>& shouldAbort = nullptr);
 
   // Direct provider access (for format-specific operations)
   EpubProvider* asEpub();
