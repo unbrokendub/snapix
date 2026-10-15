@@ -19,7 +19,9 @@ constexpr uint16_t MAX_PAGE_HEIGHT = 2048;
 XtcPageRenderer::XtcPageRenderer(GfxRenderer& renderer) : renderer_(renderer) {}
 
 XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, uint32_t pageNum,
-                                                      std::function<void()> refreshCallback) {
+                                                      std::function<void()> refreshCallback,
+                                                      const bool allowGrayscale) {
+  lastRenderUsedGrayscale_ = false;
   // Bounds check
   if (pageNum >= parser.getPageCount()) {
     return RenderResult::EndOfBook;
@@ -39,6 +41,10 @@ XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, ui
   size_t bufferSize;
   uint8_t* plane1Buffer = nullptr;
   uint8_t* plane2Buffer = nullptr;
+
+  if (bitDepth == 2 && !allowGrayscale) {
+    return renderStreaming2BitAsBw(parser, pageNum, pageWidth, pageHeight, planeSize, refreshCallback);
+  }
 
   if (bitDepth == 2) {
     // Split allocation: allocate two separate buffers to handle heap fragmentation
@@ -182,6 +188,7 @@ XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, ui
       if (y % 100 == 0) esp_task_wdt_reset();
     }
     LOG_DBG(TAG, "Rendered page %u/%u (2-bit grayscale)", pageNum + 1, parser.getPageCount());
+    lastRenderUsedGrayscale_ = true;
     free(plane2Buffer);
   } else {
     render1Bit(plane1Buffer, pageWidth, pageHeight);
@@ -323,6 +330,7 @@ XtcPageRenderer::RenderResult XtcPageRenderer::renderGrayscaleOnePlane(xtc::XtcP
     return fail();
   }
   free(plane1);
+  lastRenderUsedGrayscale_ = true;
   LOG_DBG(TAG, "Rendered page %u/%u (2-bit grayscale, one plane resident)", pageNum + 1, parser.getPageCount());
   return RenderResult::Success;
 }

@@ -22,10 +22,18 @@ class XtcPageRenderer {
 
   // Render a page from the parser
   // refreshCallback is called when display refresh is needed (for pagesUntilFullRefresh logic)
-  RenderResult render(xtc::XtcParser& parser, uint32_t pageNum, std::function<void()> refreshCallback);
+  // v3.11.12 — `allowGrayscale` = the reader's anti-aliasing setting: when off,
+  // 2-bit (XTCH) pages are drawn black & white in one refresh, skipping the
+  // gray LUT passes entirely.
+  RenderResult render(xtc::XtcParser& parser, uint32_t pageNum, std::function<void()> refreshCallback,
+                      bool allowGrayscale = true);
+  // True when the last successful render left the panel in grayscale mode
+  // (the next refresh must then rebuild the B/W baseline — see ReaderState).
+  bool lastRenderUsedGrayscale() const { return lastRenderUsedGrayscale_; }
 
  private:
   GfxRenderer& renderer_;
+  bool lastRenderUsedGrayscale_ = false;
 
   // Render 1-bit B&W page (standard XTC)
   void render1Bit(const uint8_t* buffer, uint16_t width, uint16_t height);

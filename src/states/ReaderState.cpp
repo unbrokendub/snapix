@@ -3165,12 +3165,22 @@ void ReaderState::renderXtcPage(Core& core) {
   // background is required.
   renderer_.clearScreen(theme.backgroundColor);
 
-  auto result = xtcRenderer_.render(provider->getParser(), currentPage_, [this, &core]() { displayWithRefresh(core); });
+  // v3.11.12 — XTCH grayscale only when anti-aliasing is on (it was forced
+  // regardless of the setting).
+  auto result = xtcRenderer_.render(provider->getParser(), currentPage_, [this, &core]() { displayWithRefresh(core); },
+                                    core.settings.textAntiAliasing != 0);
 
   switch (result) {
     case XtcPageRenderer::RenderResult::Success:
-      if (provider->getParser().getBitDepth() == 2) {
+      if (xtcRenderer_.lastRenderUsedGrayscale()) {
         pagesUntilFullRefresh_ = 1;
+        // v3.11.12 — the gray passes leave the LSB/MSB planes in the panel's
+        // BW/RED RAM, so the next FAST refresh diffs against gray data instead
+        // of the previous B/W page and leaves it ghosting.  pagesUntilFullRefresh_
+        // was meant to force a half refresh, but with the refresh cadence off
+        // (pagesPerRefresh = 0) displayWithRefresh never looked at it.  Rebuild
+        // the baseline with the existing no-flash drive-all refresh instead.
+        forceCleanRefreshOnNext_ = true;
       }
       break;
     case XtcPageRenderer::RenderResult::EndOfBook:
