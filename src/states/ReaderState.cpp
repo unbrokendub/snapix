@@ -16,6 +16,7 @@
 #include <LittleFS.h>  // v2.0.153 — metrics.bin sidecar load/save (used in every env)
 #include <UnifiedCache.h>  // v2.0.166 — Phase 5 unified streaming cache
 #include <Logging.h>
+#include <MemCheckpoint.h>
 #include <MarkdownParser.h>
 #include <Page.h>
 #include <PageCache.h>
@@ -2501,6 +2502,7 @@ void ReaderState::renderLoadedPage(Core& core, const std::shared_ptr<Page>& page
 
   LOG_DBG(TAG, "Rendered page %d/%d", currentSectionPage_ + 1, pageCount);
   readerPerfLog("reader-total", totalStartMs, "(spine=%d page=%d)", currentSpineIndex_, currentSectionPage_);
+  memCheckpoint("page render");
   // Count actual visible page presentation as reader activity so far-idle
   // sweeps do not relaunch immediately on a stale input timestamp.
   lastReaderInteractionMs_ = millis();
@@ -3423,6 +3425,7 @@ bool ReaderState::renderCoverPage(Core& core) {
     return false;
   }
 
+  memCheckpoint("cover generation");
   LOG_DBG(TAG, "Rendering cover page from: %s", coverPath.c_str());
   const auto vp = getReaderViewport(core.settings.statusBar != 0);
   int pagesUntilRefresh = pagesUntilFullRefresh_;

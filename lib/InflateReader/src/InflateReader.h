@@ -62,6 +62,13 @@ class InflateReader {
   // possible display-corruption glitch (see Epub.cpp comments).
   bool init(bool streaming, uint8_t* externalBuffer);
 
+  // v3.11.12 — streaming init with a caller-owned window SMALLER than 32 KB.
+  // Valid only when the caller reads at most `windowSize` bytes of output in
+  // total: a deflate back-reference can never reach before the start of the
+  // stream, so it then always lands inside the window.  Used to sniff image
+  // headers with an 8 KB window instead of 32 KB.  Not owned, never claimed.
+  bool initWithWindow(uint8_t* window, size_t windowSize);
+
   // Release the ring buffer (if owned) and reset internal state.
   void deinit();
 

@@ -3,6 +3,7 @@
 #include <InflateReader.h>
 
 #include <cstring>
+#include <vector>
 #include <string>
 
 // clang-format off
@@ -137,6 +138,21 @@ int main() {
     std::string expected = makeExpectedLarge();
     runner.expectTrue(memcmp(out, expected.data(), kLargeInflatedSize) == 0,
                       "streaming with external buffer: output matches");
+  }
+
+  // ---- v3.11.12: small caller window, output never exceeds the window ----
+  // Back-references cannot reach before byte 0, so a window as large as the
+  // total output (here exactly 1040 B, and 2 KB) decodes correctly.
+  for (size_t windowSize : {static_cast<size_t>(kLargeInflatedSize), static_cast<size_t>(2048)}) {
+    std::vector<uint8_t> window(windowSize, 0xAA);
+    InflateReader r;
+    runner.expectTrue(r.initWithWindow(window.data(), window.size()), "small window init");
+    r.setSource(kLargeDeflated, kLargeDeflatedSize);
+    uint8_t out[kLargeInflatedSize] = {};
+    const bool ok = r.read(out, kLargeInflatedSize);
+    const std::string expected = makeExpectedLarge();
+    runner.expectTrue(ok && memcmp(out, expected.data(), kLargeInflatedSize) == 0,
+                      "small window (" + std::to_string(windowSize) + " B): output matches");
   }
 
   // ---- Streaming with read callback (chunked input) ----

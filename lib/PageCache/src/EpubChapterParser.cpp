@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <FS.h>          // Arduino base File (LittleFS, v2.0.73)
 #include <FsHelpers.h>
+#include <MemCheckpoint.h>
 #include <LittleFS.h>
 // v2.0.161 — dropped `<Epub/parsers/ChapterHtmlSlimParser.h>` and
 // `<Html5Normalizer.h>` — both belonged to the legacy expat parse path
@@ -449,6 +450,7 @@ bool EpubChapterParser::tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& 
           spineIndex_, static_cast<unsigned>(heapBeforeZip),
           static_cast<unsigned>(heapWithZip),
           static_cast<unsigned>(heapAfterZip));
+  memCheckpoint("EPUB markerize");
 
   if (!ok || status != snapix::smolport::MarkerizeStatus::Success) {
     LOG_ERR(TAG,
@@ -823,6 +825,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
               "bytes=%u boundaries=%u",
               spineIndex_, static_cast<unsigned>(stats.bytesConsumed),
               static_cast<unsigned>(captured.size()));
+      memCheckpoint("EPUB idx walk (cancelled)");
       return false;
     }
     if (indexStatus == snapix::smolport::MarkerizedRenderResult::ReadError) {
@@ -890,6 +893,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
             spineIndex_, static_cast<unsigned>(captured.size() + 1),
             static_cast<unsigned>(anchorMap_.size()),
             static_cast<unsigned>(stats.bytesConsumed), static_cast<unsigned>(walkMs));
+    memCheckpoint("EPUB idx walk");
   } while (false);
 #endif
 

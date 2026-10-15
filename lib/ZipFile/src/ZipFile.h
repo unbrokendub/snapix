@@ -149,8 +149,11 @@ class ZipFile {
   bool indexEntries(std::vector<IndexedEntry>& out, bool (*accept)(const char* name, size_t len));
   static const IndexedEntry* findIndexed(const std::vector<IndexedEntry>& index, const char* name);
   // Open an entry already resolved via indexEntries() (no directory scan).
+  // `windowSize` > 0: `dictBuffer` is a caller-owned window of that size used
+  // directly (see InflateReader::initWithWindow) — the caller must read at most
+  // windowSize bytes from the returned reader.
   std::unique_ptr<ZipItemReader> openItemStream(const FileStatSlim& stat, size_t chunkSize, uint8_t* dictBuffer,
-                                                const char* nameForLog);
+                                                const char* nameForLog, size_t windowSize = 0);
   // Find first existing file from a list of paths. Returns index into paths array, or -1 if none found.
   // More efficient than calling getInflatedFileSize() for each path individually.
   int findFirstExisting(const char* const* paths, int pathCount);

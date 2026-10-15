@@ -1,6 +1,7 @@
 #include "PageCache.h"
 
 #include <Logging.h>
+#include <MemCheckpoint.h>
 
 #define TAG "CACHE"
 
@@ -805,6 +806,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     LOG_INF(TAG, "[CACHE] create partial path=%s pages=%u success=%u aborted=%u", cachePath_.c_str(),
             static_cast<unsigned>(pageCount_), static_cast<unsigned>(success), static_cast<unsigned>(aborted));
     perfLog("cache-create", startMs, "(pages=%u partial=%u)", pageCount_, static_cast<unsigned>(isPartial_));
+  memCheckpoint("page cache create");
     return true;
   }
 
@@ -837,6 +839,7 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
   LOG_INF(TAG, "[CACHE] create done path=%s pages=%u partial=%u", cachePath_.c_str(),
           static_cast<unsigned>(pageCount_), static_cast<unsigned>(isPartial_));
   perfLog("cache-create", startMs, "(pages=%u partial=%u)", pageCount_, static_cast<unsigned>(isPartial_));
+  memCheckpoint("page cache create");
   return true;
 }
 

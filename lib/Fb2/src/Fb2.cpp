@@ -15,6 +15,7 @@
 #include <FsHelpers.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
+#include <MemCheckpoint.h>
 #include <PngToBmpConverter.h>
 
 #if SNAPIX_SMOL_JPEG
@@ -836,6 +837,7 @@ void Fb2::postProcessMetadata() {
   }
 
   LOG_INF(TAG, "XML parsing complete: title='%s', author='%s'", title.c_str(), author.c_str());
+  memCheckpoint("FB2 XML parse");
 }
 
 bool Fb2::clearCache() const {

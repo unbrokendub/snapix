@@ -1041,7 +1041,8 @@ const ZipFile::IndexedEntry* ZipFile::findIndexed(const std::vector<IndexedEntry
 }
 
 std::unique_ptr<ZipItemReader> ZipFile::openItemStream(const FileStatSlim& fileStat, const size_t chunkSize,
-                                                       uint8_t* dictBuffer, const char* filename) {
+                                                       uint8_t* dictBuffer, const char* filename,
+                                                       const size_t windowSize) {
   snapix::spi::SharedBusLock busLock;
   if (!busLock) {
     LOG_ERR(TAG, "openItemStream: SPI bus unavailable for %s", filename);
@@ -1118,7 +1119,9 @@ std::unique_ptr<ZipItemReader> ZipFile::openItemStream(const FileStatSlim& fileS
   impl.ctx.readBuf = impl.readBuffer;
   impl.ctx.readBufSize = chunkSize;
 
-  if (!impl.ctx.reader.init(true, dictBuffer)) {
+  const bool inflaterReady = windowSize > 0 ? impl.ctx.reader.initWithWindow(dictBuffer, windowSize)
+                                            : impl.ctx.reader.init(true, dictBuffer);
+  if (!inflaterReady) {
     LOG_ERR(TAG, "openItemStream: InflateReader init failed for %s (largest free=%u)", filename,
             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
     impl.file.close();

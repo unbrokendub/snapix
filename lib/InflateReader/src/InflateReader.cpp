@@ -147,6 +147,16 @@ bool InflateReader::init(const bool streaming, uint8_t* externalBuffer) {
   return true;
 }
 
+bool InflateReader::initWithWindow(uint8_t* window, const size_t windowSize) {
+  deinit();
+  if (window == nullptr || windowSize == 0) return false;
+  ringBuffer = window;
+  ownsRingBuffer = false;
+  memset(ringBuffer, 0, windowSize);
+  uzlib_uncompress_init(&decomp, ringBuffer, static_cast<unsigned int>(windowSize));
+  return true;
+}
+
 void InflateReader::deinit() {
   // v2.0.178 — back to two release paths:
   //   * Heap (owned): free the malloc'd block.

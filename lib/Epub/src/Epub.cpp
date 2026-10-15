@@ -8,6 +8,7 @@
 #include <GfxRenderer.h>
 #include <ImageConverter.h>
 #include <ImageHeaderSniffer.h>
+#include <MemCheckpoint.h>
 #include <Logging.h>
 #include <SDCardManager.h>
 #include <ZipFile.h>
@@ -975,17 +976,20 @@ std::unique_ptr<ZipItemReader> Epub::openItemStream(const std::string& itemHref,
 
 namespace {
 // Feed a ZIP entry reader into the header sniffer; 1 found / 0 unusable / -1 transient.
+// Returns 1 found / 0 unusable / -1 transient / kProbeLimitHit when `maxBytes`
+// of output went by without a header (the caller may retry with a bigger budget).
+constexpr int kProbeLimitHit = -2;
 int sniffImageLayoutSize(ZipItemReader& reader, const uint16_t maxW, const uint16_t maxH, uint16_t& outW,
-                         uint16_t& outH) {
+                         uint16_t& outH, const uint32_t maxBytes = 128 * 1024) {
   // Headers sit in the first few hundred bytes (PNG/BMP) or after the APPn
   // segments (JPEG: EXIF/ICC can push SOF out to ~64 KB).  Bound the inflate.
-  constexpr uint32_t kMaxProbeBytes = 128 * 1024;
   snapix::image::ImageHeaderSniffer sniffer;
   uint8_t buf[512];
   uint32_t total = 0;
   while (sniffer.result() == snapix::image::ImageHeaderSniffer::Result::NeedMore) {
-    if (total >= kMaxProbeBytes) return -1;
-    const int n = reader.read(buf, sizeof(buf));
+    if (total >= maxBytes) return kProbeLimitHit;
+    const uint32_t want = maxBytes - total < sizeof(buf) ? maxBytes - total : static_cast<uint32_t>(sizeof(buf));
+    const int n = reader.read(buf, want);
     if (n < 0) return -1;
     if (n == 0) return 0;  // EOF before any size — corrupt / truncated
     total += static_cast<uint32_t>(n);
@@ -1048,13 +1052,30 @@ int Epub::ImageProbeSession::probe(const std::string& itemHref, const uint16_t m
     impl_->probeMs += millis() - t0;
     return 0;  // not in the archive — the image can never be shown
   }
-  // Background walk: heap window first, arbitrated framebuffer fallback.
-  auto reader = impl_->zip.openItemStream(e->stat, 1024, sharedZipDictBuffer(), path.c_str());
-  int rc = -1;
-  if (reader) rc = sniffImageLayoutSize(*reader, maxW, maxH, outW, outH);
-  reader.reset();
+  int rc = kProbeLimitHit;
+  // Stage 1: an 8 KB inflate window instead of 32 KB — enough for PNG/BMP and
+  // for any JPEG whose SOF sits in its first 8 KB (no big EXIF block), since
+  // back-references never reach before byte 0 of the entry.  This probe runs
+  // inside the page-index walk, so a 32 KB window here pushed the heap to its
+  // lowest point of the whole chapter open.
+  constexpr size_t kSmallWindow = 8 * 1024;
+  if (uint8_t* window = static_cast<uint8_t*>(malloc(kSmallWindow))) {
+    auto small = impl_->zip.openItemStream(e->stat, 1024, window, path.c_str(), kSmallWindow);
+    if (small) rc = sniffImageLayoutSize(*small, maxW, maxH, outW, outH, kSmallWindow);
+    small.reset();
+    free(window);
+  }
+  if (rc == kProbeLimitHit) {
+    // Stage 2 (header beyond 8 KB): full window — heap first, arbitrated
+    // framebuffer fallback (background walk).
+    auto reader = impl_->zip.openItemStream(e->stat, 1024, sharedZipDictBuffer(), path.c_str());
+    rc = reader ? sniffImageLayoutSize(*reader, maxW, maxH, outW, outH) : -1;
+    reader.reset();
+    if (rc == kProbeLimitHit) rc = -1;
+  }
   if (rc == 1) ++impl_->found;
   impl_->probeMs += millis() - t0;
+  memCheckpoint("image probe");
   return rc;
 }
 
@@ -1120,7 +1141,8 @@ int Epub::probeImageLayoutSize(const std::string& itemHref, const uint16_t maxW,
     reader = ZipFile(filepath).openItemStream(path.c_str(), 1024, /*dictBuffer=*/nullptr);  // heap only
   }
   if (!reader) return -1;
-  return sniffImageLayoutSize(*reader, maxW, maxH, outW, outH);
+  const int rc = sniffImageLayoutSize(*reader, maxW, maxH, outW, outH);
+  return rc == kProbeLimitHit ? -1 : rc;
 }
 
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {
