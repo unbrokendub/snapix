@@ -2,6 +2,7 @@
 
 #include <atomic>
 
+#include <Arduino.h>
 #include <Logging.h>
 
 #include <algorithm>
@@ -32,13 +33,42 @@ constexpr size_t kCompactionMinGarbageBytes = 64 * 1024;
 // snapshot is still current without rescanning the file.
 std::atomic<uint32_t> gWriteGeneration{0};
 
+// v3.11.12 — process-wide writer token.  Every modification of a cache file
+// (append, self-heal, wipe, compaction, swap recovery) runs while one instance
+// holds it.  A load without it only reads: an incomplete tail or an empty file
+// may be another task's frame in flight (the detached warm-page render loads
+// while the ReaderAsync worker writes), and healing it truncated that frame
+// under its writer.  One token for all books: concurrent writes to two books
+// do not happen in practice and would only queue.
+std::atomic<bool> gWriterBusy{false};
+// Writers wait up to kWriterWaitPolls x kWriterPollMs, then fail; cache writes
+// are retryable.  The worker holds the token for a whole markerize pass, so a
+// UI-side idx/metrics save gives up rather than stalling the page turn.
+constexpr uint32_t kWriterPollMs = 10;
+constexpr uint32_t kWriterWaitPolls = 30;
+
+// v3.11.12 — bumped around every remove/rename (compaction swap, self-heal
+// swap, wipe, backup restore).  Scanned frame offsets are valid only while it
+// is unchanged; appends keep them valid and do not bump it.
+std::atomic<uint32_t> gLayoutEpoch{0};
+
+// Bumps on entry AND exit: a reader that scanned or opened the file mid-swap
+// sees a changed value.
+struct LayoutChangeScope {
+  LayoutChangeScope() { gLayoutEpoch.fetch_add(1); }
+  ~LayoutChangeScope() { gLayoutEpoch.fetch_add(1); }
+};
+
 bool fsRemove(const char* path) {
+  if (!LittleFS.exists(path)) return false;
+  const LayoutChangeScope layoutScope;
   const bool ok = LittleFS.remove(path);
   if (ok) gWriteGeneration.fetch_add(1);
   return ok;
 }
 
 bool fsRename(const char* from, const char* to) {
+  const LayoutChangeScope layoutScope;
   const bool ok = LittleFS.rename(from, to);
   if (ok) gWriteGeneration.fetch_add(1);
   return ok;
@@ -77,6 +107,51 @@ inline uint32_t directoryId(Kind kind, uint16_t key) {
 }
 
 }  // namespace
+
+class UnifiedCache::WriterLock {
+ public:
+  WriterLock(UnifiedCache& cache, const uint32_t waitPolls) : cache_(cache) {
+    if (cache_.writerDepth_ > 0) {
+      ++cache_.writerDepth_;
+      held_ = true;
+      return;
+    }
+    for (uint32_t poll = 0;; ++poll) {
+      bool expected = false;
+      if (gWriterBusy.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) break;
+      if (poll >= waitPolls) return;
+      delay(kWriterPollMs);
+    }
+    cache_.writerDepth_ = 1;
+    held_ = true;
+    // Another instance may have appended, compacted or healed since this one
+    // scanned (every such change bumps the generation under the token):
+    // rescan before appending at EOF, recreating the file or compacting.
+    if (cache_.loaded_ &&
+        (cache_.repairDeferred_ || cache_.scanGeneration_ != gWriteGeneration.load() ||
+         cache_.scanLayout_ != gLayoutEpoch.load())) {
+      cache_.loaded_ = false;
+    }
+  }
+
+  ~WriterLock() {
+    if (!held_ || --cache_.writerDepth_ > 0) return;
+    // No other instance changed anything while the token was held, so the
+    // directory reflects the file (or loaded_ was reset on failure).
+    cache_.scanGeneration_ = gWriteGeneration.load();
+    cache_.scanLayout_ = gLayoutEpoch.load();
+    gWriterBusy.store(false, std::memory_order_release);
+  }
+
+  WriterLock(const WriterLock&) = delete;
+  WriterLock& operator=(const WriterLock&) = delete;
+
+  explicit operator bool() const { return held_; }
+
+ private:
+  UnifiedCache& cache_;
+  bool held_ = false;
+};
 
 uint32_t UnifiedCache::writeGeneration() { return gWriteGeneration.load(); }
 
@@ -144,11 +219,58 @@ bool UnifiedCache::writeFileHeader(File& file) {
   return true;
 }
 
+UnifiedCache::RepairMode UnifiedCache::claimRepair(bool* result) {
+  if (writerDepth_ > 0) return RepairMode::Repair;
+  const WriterLock lock(*this, 0);
+  if (lock) {
+    // The token-less scan may already be stale: redo the whole load under it.
+    *result = loadDirectory();
+    return RepairMode::Done;
+  }
+  repairDeferred_ = true;
+  return RepairMode::ReadOnly;
+}
+
+bool UnifiedCache::deferRepair(const size_t visibleEnd, const char* what) {
+  LOG_INF(TAG, "%s at %zu in %s — another writer is active; left for it", what, visibleEnd,
+          path_.c_str());
+  fileSize_ = visibleEnd;
+  headerInitialized_ = visibleEnd >= kHeaderSize;
+  loaded_ = true;
+  return true;
+}
+
 bool UnifiedCache::loadDirectory() {
   directory_.clear();
   fileSize_ = 0;
+  repairDeferred_ = false;
+  scanGeneration_ = gWriteGeneration.load();
+  scanLayout_ = gLayoutEpoch.load();
 
-  if (!recoverCompactionSwap()) return false;
+  // v3.11.12 — every repair below rewrites or removes files.  Without the
+  // writer token, what looks damaged may be another instance's frame or swap
+  // in flight: rescan under the token when it is free (Done), otherwise read
+  // what is there and change nothing (ReadOnly).
+  bool result = true;
+  RepairMode mode = writerDepth_ > 0 ? RepairMode::Repair : RepairMode::Unclaimed;
+  auto claim = [&]() {
+    if (mode == RepairMode::Unclaimed) mode = claimRepair(&result);
+    return mode;
+  };
+
+  const std::string backupPath = path_ + ".bak";
+  if (LittleFS.exists(backupPath.c_str()) || LittleFS.exists((path_ + ".compact").c_str()) ||
+      LittleFS.exists((path_ + ".heal").c_str()) || LittleFS.exists((path_ + ".heal.bak").c_str())) {
+    switch (claim()) {
+      case RepairMode::Done:
+        return result;
+      case RepairMode::Repair:
+        if (!recoverCompactionSwap()) return false;
+        break;
+      default:  // ReadOnly: scan the main file as it is (a missing one reads as empty)
+        break;
+    }
+  }
 
   if (!LittleFS.exists(path_.c_str())) {
     // Fresh cache — header gets written on first appendFrame.
@@ -159,19 +281,26 @@ bool UnifiedCache::loadDirectory() {
 
   File f = LittleFS.open(path_.c_str(), "r");
   if (!f) {
-    LOG_ERR(TAG, "Failed to open %s for read", path_.c_str());
-    const std::string backupPath = path_ + ".bak";
     if (LittleFS.exists(backupPath.c_str())) {
+      switch (claim()) {
+        case RepairMode::Done:
+          return result;
+        case RepairMode::ReadOnly:
+          return deferRepair(0, "Unreadable file");
+        default:
+          break;
+      }
+      LOG_ERR(TAG, "Failed to open %s for read — restoring backup", path_.c_str());
       fsRemove(path_.c_str());
       if (fsRename(backupPath.c_str(), path_.c_str())) {
         loaded_ = false;
         return loadDirectory();
       }
     }
+    LOG_ERR(TAG, "Failed to open %s for read", path_.c_str());
     return false;
   }
   fileSize_ = f.size();
-  const std::string backupPath = path_ + ".bak";
   auto restoreBackup = [&]() -> bool {
     if (!LittleFS.exists(backupPath.c_str())) return false;
     fsRemove(path_.c_str());
@@ -181,8 +310,18 @@ bool UnifiedCache::loadDirectory() {
   };
 
   if (fileSize_ < kHeaderSize) {
-    LOG_ERR(TAG, "File %s too small (%zu bytes) — treating as empty", path_.c_str(), fileSize_);
+    // Also the state of a file another task has just created and not yet
+    // flushed its first frame to.
     f.close();
+    switch (claim()) {
+      case RepairMode::Done:
+        return result;
+      case RepairMode::ReadOnly:
+        return deferRepair(0, "Short file");
+      default:
+        break;
+    }
+    LOG_ERR(TAG, "File %s too small (%zu bytes) — treating as empty", path_.c_str(), fileSize_);
     if (restoreBackup()) return true;
     fsRemove(path_.c_str());
     fileSize_ = 0;
@@ -192,15 +331,27 @@ bool UnifiedCache::loadDirectory() {
   }
 
   uint8_t hdr[kHeaderSize];
-  if (f.read(hdr, kHeaderSize) != static_cast<int>(kHeaderSize)) {
-    LOG_ERR(TAG, "Failed to read file header from %s", path_.c_str());
+  const bool headerRead = f.read(hdr, kHeaderSize) == static_cast<int>(kHeaderSize);
+  const bool magicOk = headerRead && std::memcmp(hdr, kMagic, sizeof(kMagic)) == 0;
+  const uint16_t version = magicOk ? readU16LE(hdr + 4) : 0;
+  if (!magicOk || version != kFormatVersion) {
     f.close();
+    switch (claim()) {
+      case RepairMode::Done:
+        return result;
+      case RepairMode::ReadOnly:
+        return deferRepair(0, "Unusable header");
+      default:
+        break;
+    }
+  }
+  if (!headerRead) {
+    LOG_ERR(TAG, "Failed to read file header from %s", path_.c_str());
     if (restoreBackup()) return true;
     return false;
   }
-  if (std::memcmp(hdr, kMagic, sizeof(kMagic)) != 0) {
+  if (!magicOk) {
     LOG_ERR(TAG, "Bad magic in %s — wiping", path_.c_str());
-    f.close();
     if (restoreBackup()) return true;
     fsRemove(path_.c_str());
     fileSize_ = 0;
@@ -208,11 +359,9 @@ bool UnifiedCache::loadDirectory() {
     loaded_ = true;
     return true;
   }
-  const uint16_t version = readU16LE(hdr + 4);
   if (version != kFormatVersion) {
     LOG_INF(TAG, "Format version mismatch in %s (found %u, want %u) — wiping", path_.c_str(),
             static_cast<unsigned>(version), static_cast<unsigned>(kFormatVersion));
-    f.close();
     fsRemove(path_.c_str());
     fsRemove(backupPath.c_str());
     fileSize_ = 0;
@@ -230,14 +379,15 @@ bool UnifiedCache::loadDirectory() {
   // append bug that left unpatched size-0 placeholders + 4 bytes of
   // misplaced size-field garbage at EOF) without losing the valid prefix.
   size_t cursor = kHeaderSize;
-  bool needsHealAtCursor = false;
+  // Set when the scan stops before EOF; names what it stopped at.
+  const char* tailProblem = nullptr;
+  bool abandonedFrame = false;  // an aborted write's frame: routine, not corruption
+  uint32_t badFrameSize = 0;
   uint8_t frameHdr[kFrameHeaderSize];
   while (cursor + kFrameHeaderSize <= fileSize_) {
     if (!f.seek(cursor)) break;
     if (f.read(frameHdr, kFrameHeaderSize) != static_cast<int>(kFrameHeaderSize)) {
-      LOG_ERR(TAG, "Truncated frame header at offset %zu in %s — will self-heal", cursor,
-              path_.c_str());
-      needsHealAtCursor = true;
+      tailProblem = "Truncated frame header";
       break;
     }
     const uint8_t kindByte = frameHdr[0];
@@ -246,16 +396,16 @@ bool UnifiedCache::loadDirectory() {
     const uint32_t size = readU32LE(frameHdr + 4);
     const uint32_t payloadOffset = static_cast<uint32_t>(cursor + kFrameHeaderSize);
     if ((flags & kFlagIncomplete) != 0) {
-      LOG_INF(TAG, "Incomplete frame at %zu in %s — will self-heal", cursor,
-              path_.c_str());
-      needsHealAtCursor = true;
+      // After a reset: a torn write.  While another task writes: its frame,
+      // still being produced or published.
+      tailProblem = "Incomplete frame";
+      abandonedFrame = true;
       break;
     }
     if (static_cast<size_t>(payloadOffset) + static_cast<size_t>(size) >
         fileSize_) {
-      LOG_ERR(TAG, "Frame at %zu has size %u that extends past file (%zu) — will self-heal",
-              cursor, static_cast<unsigned>(size), fileSize_);
-      needsHealAtCursor = true;
+      tailProblem = "Frame extending past EOF";
+      badFrameSize = size;
       break;
     }
     if (!isKnownKind(kindByte)) {
@@ -276,13 +426,29 @@ bool UnifiedCache::loadDirectory() {
   // A reset can interrupt even the 8-byte frame header.  Without trimming
   // this short tail, the next append starts after it and the scanner never
   // reaches any later frames.
-  if (!needsHealAtCursor && cursor != fileSize_) {
-    LOG_INF(TAG, "Partial frame header at %zu in %s — will self-heal",
-            cursor, path_.c_str());
-    needsHealAtCursor = true;
-  }
+  if (tailProblem == nullptr && cursor != fileSize_) tailProblem = "Partial frame header";
 
   f.close();
+
+  const bool needsHealAtCursor = tailProblem != nullptr;
+  if (needsHealAtCursor) {
+    switch (claim()) {
+      case RepairMode::Done:
+        return result;
+      case RepairMode::ReadOnly:
+        // Frames before the tail are published and stay valid; the tail
+        // becomes visible once its writer publishes it.
+        return deferRepair(cursor, tailProblem);
+      default:
+        break;
+    }
+    if (abandonedFrame) {
+      LOG_INF(TAG, "%s at %zu in %s — will self-heal", tailProblem, cursor, path_.c_str());
+    } else {
+      LOG_ERR(TAG, "%s at %zu in %s (frame size %u, file %zu) — will self-heal", tailProblem, cursor,
+              path_.c_str(), static_cast<unsigned>(badFrameSize), fileSize_);
+    }
+  }
 
   // v2.0.182 — self-heal pass.  Atomically rewrite the file to its
   // valid-prefix length via temp file + rename, then update fileSize_
@@ -372,8 +538,12 @@ bool UnifiedCache::loadDirectory() {
 
   headerInitialized_ = true;
   loaded_ = true;
-  if (LittleFS.exists(backupPath.c_str())) {
+  if (mode == RepairMode::Repair) {
+    // The main file is validated; a compaction `.bak` is no longer needed.
     fsRemove(backupPath.c_str());
+    // This load's own heal/cleanup is in the directory: no rescan for it.
+    scanGeneration_ = gWriteGeneration.load();
+    scanLayout_ = gLayoutEpoch.load();
   }
   // Operation-local instances still scan once at first use, hence DBG.
   LOG_DBG(TAG, "Loaded %s: fileSize=%zu directoryEntries=%zu", path_.c_str(), fileSize_,
@@ -382,8 +552,42 @@ bool UnifiedCache::loadDirectory() {
 }
 
 bool UnifiedCache::ensureLoaded() {
+  // v3.11.12 — another instance compacted, healed or wiped the file since this
+  // one scanned it: the offsets may now point into a different file.
+  if (loaded_ && scanLayout_ != gLayoutEpoch.load()) loaded_ = false;
   if (loaded_) return true;
   return loadDirectory();
+}
+
+bool UnifiedCache::openPayload(Kind kind, uint16_t key, File& f, uint32_t* outSize) {
+  // A swap can also land between the lookup and the open; then the handle is
+  // the new file and the offset the old one's.  Rescan and retry.
+  constexpr int kAttempts = 3;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    if (!ensureLoaded()) return false;
+    const auto it = findEntry(kind, key);
+    if (it == directory_.end() || it->tombstone) return false;
+    const uint32_t offset = it->offset;
+    f = LittleFS.open(path_.c_str(), "r");
+    if (!f) {
+      LOG_ERR(TAG, "Failed to open %s for read", path_.c_str());
+      return false;
+    }
+    if (scanLayout_ != gLayoutEpoch.load()) {
+      f.close();
+      loaded_ = false;
+      continue;
+    }
+    if (!f.seek(offset)) {
+      LOG_ERR(TAG, "Seek to %u failed in %s", static_cast<unsigned>(offset), path_.c_str());
+      f.close();
+      return false;
+    }
+    *outSize = it->size;
+    return true;
+  }
+  LOG_ERR(TAG, "%s kept changing during read", path_.c_str());
+  return false;
 }
 
 std::vector<DirectoryEntry>::const_iterator UnifiedCache::findEntry(Kind kind, uint16_t key) const {
@@ -425,30 +629,15 @@ bool UnifiedCache::segmentSize(Kind kind, uint16_t key, size_t* outSize) {
 
 bool UnifiedCache::readSegment(Kind kind, uint16_t key, std::vector<uint8_t>& out) {
   // v2.0.173 — mutex removed (see top-of-file rationale).
-  uint32_t offset = 0;
+  File f;
   uint32_t size = 0;
-  if (!ensureLoaded()) return false;
-  auto it = findEntry(kind, key);
-  if (it == directory_.end() || it->tombstone) return false;
-  offset = it->offset;
-  size = it->size;
-
-  File f = LittleFS.open(path_.c_str(), "r");
-  if (!f) {
-    LOG_ERR(TAG, "Failed to open %s for read", path_.c_str());
-    return false;
-  }
-  if (!f.seek(offset)) {
-    f.close();
-    LOG_ERR(TAG, "Seek to %u failed in %s", static_cast<unsigned>(offset), path_.c_str());
-    return false;
-  }
+  if (!openPayload(kind, key, f, &size)) return false;
   out.resize(size);
   const int n = size == 0 ? 0 : f.read(out.data(), size);
   f.close();
   if (n != static_cast<int>(size)) {
-    LOG_ERR(TAG, "Short read at %u (got %d want %u) in %s", static_cast<unsigned>(offset), n,
-            static_cast<unsigned>(size), path_.c_str());
+    LOG_ERR(TAG, "Short read (got %d want %u) of kind=%u key=%u in %s", n, static_cast<unsigned>(size),
+            static_cast<unsigned>(kind), static_cast<unsigned>(key), path_.c_str());
     out.clear();
     return false;
   }
@@ -457,23 +646,8 @@ bool UnifiedCache::readSegment(Kind kind, uint16_t key, std::vector<uint8_t>& ou
 
 bool UnifiedCache::openSegmentReader(Kind kind, uint16_t key, File& outFile, size_t* outSize) {
   // v2.0.173 — mutex removed (see top-of-file rationale).
-  uint32_t offset = 0;
   uint32_t size = 0;
-  if (!ensureLoaded()) return false;
-  auto it = findEntry(kind, key);
-  if (it == directory_.end() || it->tombstone) return false;
-  offset = it->offset;
-  size = it->size;
-  outFile = LittleFS.open(path_.c_str(), "r");
-  if (!outFile) {
-    LOG_ERR(TAG, "Failed to open %s for streaming read", path_.c_str());
-    return false;
-  }
-  if (!outFile.seek(offset)) {
-    LOG_ERR(TAG, "Seek to %u failed in %s (streaming)", static_cast<unsigned>(offset), path_.c_str());
-    outFile.close();
-    return false;
-  }
+  if (!openPayload(kind, key, outFile, &size)) return false;
   if (outSize) *outSize = size;
   return true;
 }
@@ -481,8 +655,15 @@ bool UnifiedCache::openSegmentReader(Kind kind, uint16_t key, File& outFile, siz
 bool UnifiedCache::appendFrame(Kind kind, uint16_t key, uint8_t flags,
                                  const std::function<bool(File&)>& writePayload,
                                  size_t payloadSize) {
+  // Declared before the generation scope: its release records the
+  // generation after the scope's exit bump.
+  const WriterLock lock(*this, kWriterWaitPolls);
+  if (!lock) {
+    LOG_ERR(TAG, "Another writer kept %s busy; frame kind=%u key=%u not written", path_.c_str(),
+            static_cast<unsigned>(kind), static_cast<unsigned>(key));
+    return false;
+  }
   const WriteGenerationScope generationScope;
-  // v2.0.173 — mutex removed (see top-of-file rationale).
   if (!ensureLoaded()) return false;
 
   // Use r+ rather than append mode so the incomplete bit can be cleared only
@@ -587,8 +768,15 @@ bool UnifiedCache::writeSegment(Kind kind, uint16_t key, const uint8_t* data, si
 
 bool UnifiedCache::writeSegmentStreamingDeferred(Kind kind, uint16_t key,
                                                   const std::function<bool(File&)>& writeCb) {
+  // Held for the whole callback: until the frame is published, other
+  // instances must neither heal it away nor append behind it.
+  const WriterLock lock(*this, kWriterWaitPolls);
+  if (!lock) {
+    LOG_ERR(TAG, "Another writer kept %s busy; deferred frame kind=%u key=%u not written",
+            path_.c_str(), static_cast<unsigned>(kind), static_cast<unsigned>(key));
+    return false;
+  }
   const WriteGenerationScope generationScope;
-  // v2.0.173 — mutex removed (see top-of-file rationale).
   if (!ensureLoaded()) return false;
 
   // v2.0.174 — open existing files in "r+" mode, NOT "a" mode.  This is the
@@ -778,6 +966,14 @@ bool UnifiedCache::compactIfNeeded() {
 }
 
 bool UnifiedCache::compact() {
+  // Optional work: never wait for another task's write.  Taking the token
+  // also rescans if another instance wrote since this one's scan — compacting
+  // a stale directory dropped the newer frames.
+  const WriterLock lock(*this, 0);
+  if (!lock) {
+    LOG_INF(TAG, "Compaction of %s skipped: another writer is active", path_.c_str());
+    return false;
+  }
   const WriteGenerationScope generationScope;
   if (!ensureLoaded() || !headerInitialized_ || !LittleFS.exists(path_.c_str())) {
     return true;

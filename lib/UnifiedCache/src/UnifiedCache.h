@@ -30,6 +30,13 @@
 //
 // Directory is built in memory on first open by sequentially scanning all
 // frames.  Subsequent reads do a single-table lookup → seek → read.
+//
+// v3.11.12 — instances are operation-local, but the UI task and the ReaderAsync
+// worker open their own instances on the same file.  Every modification
+// (append, self-heal, wipe, compaction, swap recovery) runs under one
+// process-wide writer token; a load that cannot take it never modifies the file
+// and treats an incomplete tail as another task's frame in flight.  Offsets are
+// rescanned after any rename/remove (compaction, heal) by another instance.
 
 #include <FS.h>
 #include <LittleFS.h>
@@ -72,7 +79,9 @@ constexpr uint16_t kGlobalKey = 0xFFFF;
 constexpr uint8_t kFlagTombstone = 0x01;
 // Deferred streaming writes publish the frame header before its final payload
 // size is known.  The incomplete bit stays set until size patch + flush
-// succeeds; loadDirectory truncates at an incomplete frame after a reset.
+// succeeds; loadDirectory truncates at an incomplete frame after a reset, but
+// only under the writer token — while another instance writes, it is that
+// writer's frame and the scan just stops there.
 constexpr uint8_t kFlagIncomplete = 0x02;
 
 enum class Kind : uint8_t {
@@ -128,6 +137,13 @@ class UnifiedCache {
   // explicitly want an isolated instance (e.g., one-shot diagnostics).
   // Production code should use `shared()` for consistency.
   explicit UnifiedCache(std::string bookCachePath);
+
+  // Move-only: a copy made inside a write callback would share this
+  // instance's hold on the writer token.
+  UnifiedCache(const UnifiedCache&) = delete;
+  UnifiedCache& operator=(const UnifiedCache&) = delete;
+  UnifiedCache(UnifiedCache&&) = default;
+  UnifiedCache& operator=(UnifiedCache&&) = default;
 
   // Reads the whole segment into `out`.  Returns false if the segment doesn't
   // exist or on I/O error.  Suitable for small segments (idx, metrics).
@@ -185,6 +201,8 @@ class UnifiedCache {
   // recoverable through a `.bak` file if power is lost between renames.
   // compactIfNeeded() is cheap when thresholds are not met and is called after
   // successful writes; compact() forces a pass (primarily diagnostics/tests).
+  // compact() returns false without touching the file while another instance
+  // is writing.
   bool compact();
   bool compactIfNeeded();
 
@@ -192,15 +210,32 @@ class UnifiedCache {
   const std::string& path() const { return path_; }
 
  private:
+  // Holds the process-wide writer token (re-entrant per instance); see
+  // UnifiedCache.cpp.
+  class WriterLock;
+  enum class RepairMode : uint8_t { Unclaimed, Repair, Done, ReadOnly };
+
   std::string path_;
   std::vector<DirectoryEntry> directory_;
   size_t fileSize_ = 0;
   bool loaded_ = false;
   bool headerInitialized_ = false;
-  // No per-instance mutex: objects are scoped to one caller operation.  Reader
-  // resource ownership serialises foreground/background document access.
+  // The last scan stopped at something only the writer-token holder may
+  // repair; the next write rescans under the token.
+  bool repairDeferred_ = false;
+  uint8_t writerDepth_ = 0;
+  // writeGeneration() / layout epoch the directory reflects.
+  uint32_t scanGeneration_ = 0;
+  uint32_t scanLayout_ = 0;
+  // No per-instance mutex: objects are scoped to one caller operation.  Other
+  // instances (other tasks) on the same file are coordinated by the writer
+  // token + layout epoch, not by reader resource ownership — the detached
+  // warm-page render runs while the worker writes.
   bool ensureLoaded();
   bool loadDirectory();
+  RepairMode claimRepair(bool* result);
+  bool deferRepair(size_t visibleEnd, const char* what);
+  bool openPayload(Kind kind, uint16_t key, File& f, uint32_t* outSize);
   bool writeFileHeader(File& file);
   bool recoverCompactionSwap();
   void upsertDirectoryEntry(DirectoryEntry entry);

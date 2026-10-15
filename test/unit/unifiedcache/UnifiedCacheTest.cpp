@@ -28,6 +28,240 @@ std::string read(UnifiedCache& cache, Kind kind, uint16_t key) {
   return std::string(data.begin(), data.end());
 }
 
+std::string readFresh(const std::string& book, Kind kind, uint16_t key) {
+  auto cache = UnifiedCache::shared(book);
+  return read(cache, kind, key);
+}
+
+std::string readViaHandle(UnifiedCache& cache, Kind kind, uint16_t key) {
+  File f;
+  size_t size = 0;
+  if (!cache.openSegmentReader(kind, key, f, &size)) return {};
+  std::string out(size, '\0');
+  const int got = size == 0 ? 0 : f.read(reinterpret_cast<uint8_t*>(&out[0]), size);
+  f.close();
+  return got == static_cast<int>(size) ? out : std::string();
+}
+
+bool writeRaw(File& out, const std::string& value) {
+  return out.write(reinterpret_cast<const uint8_t*>(value.data()), value.size()) == value.size();
+}
+
+// A fresh instance scans the file to its end: true when no garbage tail is
+// left behind (the scan would stop early and self-heal it otherwise).
+bool scansClean(const std::string& book) {
+  auto cache = UnifiedCache::shared(book);
+  size_t ignored = 0;
+  (void)cache.segmentSize(Kind::Metrics, 0xFFFE, &ignored);
+  return cache.isLoaded() &&
+         cache.fileSize() == LittleFS.getWrittenData(book + "/streaming.cache").size();
+}
+
+// v3.11.12 — instances are operation-local, but the UI task (detached warm-page
+// render, status-bar metrics, idx save) and the ReaderAsync worker open their
+// own instances on the SAME streaming.cache.  The tests below drive the other
+// task's instance from inside a writer's payload callback, i.e. while the
+// writer's frame is still flagged incomplete.  `out.flush()` commits that
+// state the way littlefs does mid-write (the publish flush rewrites the frame).
+void testCrossInstanceRaces(TestUtils::TestRunner& runner) {
+  {
+    const std::string book = "/cache/race-deferred";
+    {
+      auto seed = UnifiedCache::shared(book);
+      runner.expectTrue(write(seed, Kind::Markers, 0, "stable"), "race_deferred_seed");
+    }
+    std::string seenStable;
+    bool newFrameVisible = true;
+    auto writer = UnifiedCache::shared(book);
+    const bool ok = writer.writeSegmentStreamingDeferred(Kind::Markers, 1, [&](File& out) {
+      if (!writeRaw(out, "part1-")) return false;
+      out.flush();
+      auto reader = UnifiedCache::shared(book);
+      seenStable = read(reader, Kind::Markers, 0);
+      size_t ignored = 0;
+      newFrameVisible = reader.segmentSize(Kind::Markers, 1, &ignored);
+      return writeRaw(out, "part2");
+    });
+    runner.expectTrue(ok, "race_deferred_writer_succeeds");
+    runner.expectEqual("stable", seenStable, "race_deferred_reader_sees_published_frames");
+    runner.expectFalse(newFrameVisible, "race_deferred_in_flight_frame_invisible");
+    runner.expectEqual("part1-part2", readFresh(book, Kind::Markers, 1),
+                       "race_deferred_frame_survives_concurrent_load");
+    runner.expectEqual("stable", readFresh(book, Kind::Markers, 0), "race_deferred_old_frame_intact");
+    runner.expectTrue(scansClean(book), "race_deferred_no_garbage_tail");
+    runner.expectEqual("part1-part2", read(writer, Kind::Markers, 1), "race_deferred_writer_view_matches_disk");
+  }
+
+  {
+    // Same race through appendFrame (fixed-size streaming write, also idx /
+    // metrics writeSegment): the header carries the final size + incomplete bit.
+    const std::string book = "/cache/race-append";
+    {
+      auto seed = UnifiedCache::shared(book);
+      runner.expectTrue(write(seed, Kind::Idx, 3, "index"), "race_append_seed");
+    }
+    std::string seen;
+    auto writer = UnifiedCache::shared(book);
+    const bool ok = writer.writeSegmentStreaming(snapix::unifiedcache::markerChunkKind(2), 3, 10, [&](File& out) {
+      if (!writeRaw(out, "chunk")) return false;
+      out.flush();
+      seen = readFresh(book, Kind::Idx, 3);
+      return writeRaw(out, "-two!");
+    });
+    runner.expectTrue(ok, "race_append_writer_succeeds");
+    runner.expectEqual("index", seen, "race_append_reader_sees_published_frames");
+    runner.expectEqual("chunk-two!", readFresh(book, snapix::unifiedcache::markerChunkKind(2), 3),
+                       "race_append_frame_survives_concurrent_load");
+    runner.expectTrue(scansClean(book), "race_append_no_garbage_tail");
+  }
+
+  {
+    // First write into a brand-new file: until its first flush the file exists
+    // but is empty.  A concurrent load must not delete it as "too small".
+    const std::string book = "/cache/race-fresh-file";
+    std::string seen = "unset";
+    auto writer = UnifiedCache::shared(book);
+    const bool ok = writer.writeSegmentStreamingDeferred(Kind::Markers, 0, [&](File& out) {
+      if (!writeRaw(out, "first-")) return false;
+      seen = readFresh(book, Kind::Markers, 0);
+      return writeRaw(out, "chapter");
+    });
+    runner.expectTrue(ok, "race_fresh_writer_succeeds");
+    runner.expectEqual("", seen, "race_fresh_reader_sees_nothing_yet");
+    runner.expectEqual("first-chapter", readFresh(book, Kind::Markers, 0), "race_fresh_file_not_deleted");
+    runner.expectTrue(scansClean(book), "race_fresh_no_garbage_tail");
+  }
+
+  {
+    // A second writer (UI idx/metrics save) while the worker's frame is in
+    // flight must not append behind/over it or heal it away; it gives up.
+    const std::string book = "/cache/race-two-writers";
+    {
+      auto seed = UnifiedCache::shared(book);
+      runner.expectTrue(write(seed, Kind::Markers, 0, "stable"), "race_writers_seed");
+    }
+    bool secondWrote = true;
+    auto writer = UnifiedCache::shared(book);
+    const bool ok = writer.writeSegmentStreamingDeferred(Kind::Markers, 1, [&](File& out) {
+      if (!writeRaw(out, "worker-")) return false;
+      out.flush();
+      auto other = UnifiedCache::shared(book);
+      const std::string idx = "ui-idx";
+      secondWrote = other.writeSegment(Kind::Idx, 1, reinterpret_cast<const uint8_t*>(idx.data()), idx.size());
+      return writeRaw(out, "frame");
+    });
+    runner.expectTrue(ok, "race_writers_first_succeeds");
+    runner.expectFalse(secondWrote, "race_writers_second_backs_off");
+    runner.expectEqual("worker-frame", readFresh(book, Kind::Markers, 1), "race_writers_first_frame_intact");
+    runner.expectEqual("stable", readFresh(book, Kind::Markers, 0), "race_writers_old_frame_intact");
+    runner.expectTrue(scansClean(book), "race_writers_no_garbage_tail");
+    runner.expectTrue(write(writer, Kind::Idx, 1, "later"), "race_writers_later_write_succeeds");
+    runner.expectEqual("later", readFresh(book, Kind::Idx, 1), "race_writers_later_write_visible");
+  }
+
+  {
+    // A failed writer leaves a real incomplete tail; with no writer active the
+    // next load (any instance) still self-heals it.
+    const std::string book = "/cache/race-real-tail";
+    {
+      auto seed = UnifiedCache::shared(book);
+      runner.expectTrue(write(seed, Kind::Markers, 0, "stable"), "real_tail_seed");
+      const bool deferred = seed.writeSegmentStreamingDeferred(Kind::Markers, 0, [](File& out) {
+        writeRaw(out, "torn");
+        out.flush();
+        return false;
+      });
+      runner.expectFalse(deferred, "real_tail_write_fails");
+    }
+    const size_t tornSize = LittleFS.getWrittenData(book + "/streaming.cache").size();
+    runner.expectEqual("stable", readFresh(book, Kind::Markers, 0), "real_tail_old_value_wins");
+    runner.expectTrue(LittleFS.getWrittenData(book + "/streaming.cache").size() < tornSize,
+                      "real_tail_truncated_by_heal");
+    runner.expectTrue(scansClean(book), "real_tail_healed_clean");
+    {
+      auto cache = UnifiedCache::shared(book);
+      runner.expectTrue(write(cache, Kind::Idx, 0, "after"), "real_tail_append_after_heal");
+    }
+    runner.expectEqual("after", readFresh(book, Kind::Idx, 0), "real_tail_append_reachable");
+  }
+
+  {
+    // Compaction by one instance moves every frame; another instance that
+    // scanned before must not read the new file at its old offsets.
+    const std::string book = "/cache/race-stale-offsets";
+    {
+      auto seed = UnifiedCache::shared(book);
+      runner.expectTrue(write(seed, Kind::Markers, 1, "aaaaaaaaaaaaaaaa"), "stale_seed_old");
+      runner.expectTrue(write(seed, Kind::Markers, 1, "bbbb"), "stale_seed_new");
+      runner.expectTrue(write(seed, Kind::Markers, 2, "second-value"), "stale_seed_second");
+    }
+    auto reader = UnifiedCache::shared(book);
+    size_t size = 0;
+    runner.expectTrue(reader.segmentSize(Kind::Markers, 2, &size), "stale_reader_scans_first");
+    {
+      auto compactor = UnifiedCache::shared(book);
+      runner.expectTrue(compactor.compact(), "stale_other_instance_compacts");
+    }
+    runner.expectEqual("second-value", read(reader, Kind::Markers, 2), "stale_offsets_revalidated_read");
+    runner.expectEqual("bbbb", readViaHandle(reader, Kind::Markers, 1), "stale_offsets_revalidated_handle");
+  }
+
+  {
+    // Compaction from an instance whose snapshot predates another instance's
+    // append must not drop that newer frame.
+    const std::string book = "/cache/race-stale-compact";
+    {
+      auto seed = UnifiedCache::shared(book);
+      runner.expectTrue(write(seed, Kind::Markers, 1, "old-old-old"), "stale_compact_seed");
+      runner.expectTrue(write(seed, Kind::Markers, 1, "new"), "stale_compact_seed_new");
+    }
+    auto stale = UnifiedCache::shared(book);
+    size_t size = 0;
+    runner.expectTrue(stale.segmentSize(Kind::Markers, 1, &size), "stale_compact_scans_first");
+    {
+      auto other = UnifiedCache::shared(book);
+      runner.expectTrue(write(other, Kind::Idx, 1, "late-frame"), "stale_compact_other_appends");
+    }
+    runner.expectTrue(stale.compact(), "stale_compact_runs");
+    runner.expectEqual("late-frame", readFresh(book, Kind::Idx, 1), "stale_compact_keeps_newer_frame");
+    runner.expectEqual("new", readFresh(book, Kind::Markers, 1), "stale_compact_keeps_latest_value");
+  }
+
+  {
+    // An instance that scanned before the file existed must not recreate
+    // (truncate) it after another instance wrote the first frames.
+    const std::string book = "/cache/race-stale-create";
+    auto early = UnifiedCache::shared(book);
+    size_t size = 0;
+    runner.expectFalse(early.segmentSize(Kind::Markers, 0, &size), "stale_create_scans_missing_file");
+    {
+      auto other = UnifiedCache::shared(book);
+      runner.expectTrue(write(other, Kind::Markers, 0, "chapter-zero"), "stale_create_other_writes");
+    }
+    runner.expectTrue(write(early, Kind::Idx, 0, "idx"), "stale_create_early_writes");
+    runner.expectEqual("chapter-zero", readFresh(book, Kind::Markers, 0), "stale_create_keeps_other_frame");
+    runner.expectEqual("idx", readFresh(book, Kind::Idx, 0), "stale_create_keeps_own_frame");
+  }
+
+  {
+    // Plain reads must not bump the write generation: the reader's per-page
+    // render reuses one instance while it is unchanged.
+    const std::string book = "/cache/race-generation";
+    {
+      auto seed = UnifiedCache::shared(book);
+      runner.expectTrue(write(seed, Kind::Markers, 0, "text"), "generation_seed");
+    }
+    const uint32_t before = UnifiedCache::writeGeneration();
+    runner.expectEqual("text", readFresh(book, Kind::Markers, 0), "generation_read");
+    runner.expectEq(before, UnifiedCache::writeGeneration(), "generation_unchanged_by_reads");
+    {
+      auto cache = UnifiedCache::shared(book);
+      runner.expectTrue(write(cache, Kind::Idx, 0, "i"), "generation_write");
+    }
+    runner.expectTrue(UnifiedCache::writeGeneration() != before, "generation_bumped_by_write");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -132,6 +366,8 @@ int main() {
     runner.expectEqual("two", read(cache, Kind::Markers, 0),
                        "rename_failure_keeps_original");
   }
+
+  testCrossInstanceRaces(runner);
 
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
