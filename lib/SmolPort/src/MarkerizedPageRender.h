@@ -343,7 +343,13 @@ constexpr uint32_t kPageIndexMagic = 0x58495053;
 // EPUB/FB2 chapters with block elements.  On-disk entry layout is unchanged
 // (still 8 bytes; the bytes were reserved/zero), but old v17 indices carry
 // zeroes (= the buggy "no indent" assumption) so the bump forces a rebuild.
-constexpr uint16_t kPageIndexVersion = 18;
+// v3.11.12: bumped 18 → 19.  BUGFIX — pagination completeness (property fuzz,
+// PaginationCompletenessFuzzTest): the idx walk and the seek-resume render now
+// agree at every boundary (marker pre-roll, deferred image/ornament snapshots,
+// carry/spillover start offsets, emergency word split), so no word/sentence is
+// lost or duplicated at page seams.  Old indices hold boundaries from the
+// divergent walk.
+constexpr uint16_t kPageIndexVersion = 19;
 constexpr size_t   kPageIndexHeaderBytes = 12;
 constexpr size_t   kPageIndexEntryBytes = 8;
 

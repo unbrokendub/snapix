@@ -384,6 +384,18 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/lib/SmolPort/src
       ${PROJECT_ROOT}/lib/Hyphenation/src
     )
+  elseif(TEST_NAME STREQUAL "HtmlStripperIntegrityTest")
+    # v3.11.12 — stripper must neither drop nor invent text (bare '&', stray
+    # '<', <head><title>, invisible format chars, SVG <image> refs).
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
   elseif(TEST_NAME STREQUAL "MarkerizeChapterTest")
     # v2.0.116 Phase R2 — markerize side-channel.  Drives HtmlStripper over
     # an HTML/FB2 byte stream via callback I/O so the same code path runs

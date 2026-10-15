@@ -54,7 +54,12 @@ namespace snapix::unifiedcache {
 // v4: standalone Markdown/HTML switched from one whole-file Markers frame to
 // consecutive progressive chunks.  Wipe v3 so a legacy key-0 frame is never
 // mistaken for progressive chunk 0.
-constexpr uint16_t kFormatVersion = 4;
+// v5: v3.11.12 — HtmlStripper no longer drops text: a bare '&' / unknown entity
+// / stray '<' is literal (pre-fix it swallowed up to the next ';'/'<'/'>' —
+// often the rest of the paragraph), <title> is suppressed, self-closing tags
+// close what they open, invisible format chars are dropped, full HTML 4 entity
+// set, SVG/FB2 <image *:href>.  Markers change for many EPUB/FB2 chapters.
+constexpr uint16_t kFormatVersion = 5;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kFrameHeaderSize = 8;
 constexpr uint16_t kGlobalKey = 0xFFFF;

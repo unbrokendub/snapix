@@ -37,52 +37,125 @@ inline bool eqIc(const uint8_t* name, const uint8_t len, const char* s,
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3c: named entity table.
+// Phase 3c / v3.11.12: named entity tables — the full HTML 4 set plus &apos;.
+// Pre-v3.11.12 only ~60 names were known and the rest were DROPPED (&bdquo;
+// &aacute; &minus; &prime; Greek, arrows …); unknown names now stay literal.
 // ---------------------------------------------------------------------------
-struct NamedEntity {
-  const char* name;
-  uint8_t     nameLen;
-  uint32_t    codepoint;
+// Latin-1 block: kLatin1Names[i] is the name of U+00A0 + i.
+constexpr const char* kLatin1Names[96] = {
+    "nbsp",   "iexcl",  "cent",   "pound",  "curren", "yen",    "brvbar", "sect",
+    "uml",    "copy",   "ordf",   "laquo",  "not",    "shy",    "reg",    "macr",
+    "deg",    "plusmn", "sup2",   "sup3",   "acute",  "micro",  "para",   "middot",
+    "cedil",  "sup1",   "ordm",   "raquo",  "frac14", "frac12", "frac34", "iquest",
+    "Agrave", "Aacute", "Acirc",  "Atilde", "Auml",   "Aring",  "AElig",  "Ccedil",
+    "Egrave", "Eacute", "Ecirc",  "Euml",   "Igrave", "Iacute", "Icirc",  "Iuml",
+    "ETH",    "Ntilde", "Ograve", "Oacute", "Ocirc",  "Otilde", "Ouml",   "times",
+    "Oslash", "Ugrave", "Uacute", "Ucirc",  "Uuml",   "Yacute", "THORN",  "szlig",
+    "agrave", "aacute", "acirc",  "atilde", "auml",   "aring",  "aelig",  "ccedil",
+    "egrave", "eacute", "ecirc",  "euml",   "igrave", "iacute", "icirc",  "iuml",
+    "eth",    "ntilde", "ograve", "oacute", "ocirc",  "otilde", "ouml",   "divide",
+    "oslash", "ugrave", "uacute", "ucirc",  "uuml",   "yacute", "thorn",  "yuml",
 };
 
-constexpr NamedEntity kNamedEntities[] = {
-    // XML / HTML builtins.
-    {"amp",     3, 0x0026}, {"lt",      2, 0x003C}, {"gt",      2, 0x003E},
-    {"quot",    4, 0x0022}, {"apos",    4, 0x0027},
-    // Whitespace / formatting.
-    {"nbsp",    4, 0x00A0}, {"shy",     3, 0x00AD},
-    {"thinsp",  6, 0x2009}, {"ensp",    4, 0x2002}, {"emsp",    4, 0x2003},
-    // Typographic punctuation.
-    {"mdash",   5, 0x2014}, {"ndash",   5, 0x2013}, {"hellip",  6, 0x2026},
-    {"lsquo",   5, 0x2018}, {"rsquo",   5, 0x2019},
-    {"ldquo",   5, 0x201C}, {"rdquo",   5, 0x201D},
-    {"laquo",   5, 0x00AB}, {"raquo",   5, 0x00BB},
-    {"bull",    4, 0x2022}, {"middot",  6, 0x00B7},
-    {"dagger",  6, 0x2020}, {"Dagger",  6, 0x2021},
-    // Symbols.
-    {"copy",    4, 0x00A9}, {"reg",     3, 0x00AE}, {"trade",   5, 0x2122},
-    {"deg",     3, 0x00B0}, {"sect",    4, 0x00A7}, {"para",    4, 0x00B6},
-    // Currency.
-    {"euro",    4, 0x20AC}, {"pound",   5, 0x00A3}, {"yen",     3, 0x00A5},
-    {"cent",    4, 0x00A2},
-    // Math.
-    {"times",   5, 0x00D7}, {"divide",  6, 0x00F7}, {"plusmn",  6, 0x00B1},
-    {"frac12",  6, 0x00BD}, {"frac14",  6, 0x00BC}, {"frac34",  6, 0x00BE},
-    // Latin extended (French / Spanish / German).
-    {"iexcl",   5, 0x00A1}, {"iquest",  6, 0x00BF}, {"szlig",   5, 0x00DF},
-    {"agrave",  6, 0x00E0}, {"Agrave",  6, 0x00C0},
-    {"eacute",  6, 0x00E9}, {"Eacute",  6, 0x00C9},
-    {"egrave",  6, 0x00E8}, {"Egrave",  6, 0x00C8},
-    {"ecirc",   5, 0x00EA}, {"Ecirc",   5, 0x00CA},
-    {"icirc",   5, 0x00EE}, {"Icirc",   5, 0x00CE},
-    {"ocirc",   5, 0x00F4}, {"Ocirc",   5, 0x00D4},
-    {"ucirc",   5, 0x00FB}, {"Ucirc",   5, 0x00DB},
-    {"ccedil",  6, 0x00E7}, {"Ccedil",  6, 0x00C7},
-    {"ntilde",  6, 0x00F1}, {"Ntilde",  6, 0x00D1},
-    {"auml",    4, 0x00E4}, {"Auml",    4, 0x00C4},
-    {"ouml",    4, 0x00F6}, {"Ouml",    4, 0x00D6},
-    {"uuml",    4, 0x00FC}, {"Uuml",    4, 0x00DC},
+struct NamedEntity {
+  const char* name;
+  uint16_t    codepoint;
 };
+
+// Everything outside Latin-1.  Most frequent in books first (dashes, quotes,
+// ellipsis) so the linear scan exits early on the common names.  The first
+// kLegacyNamedEntities entries also decode without a trailing ';'.
+constexpr size_t kLegacyNamedEntities = 4;
+constexpr NamedEntity kNamedEntities[] = {
+    {"amp", 0x0026}, {"lt", 0x003C}, {"gt", 0x003E}, {"quot", 0x0022}, {"apos", 0x0027},
+    {"mdash", 0x2014}, {"ndash", 0x2013}, {"hellip", 0x2026},
+    {"lsquo", 0x2018}, {"rsquo", 0x2019}, {"sbquo", 0x201A},
+    {"ldquo", 0x201C}, {"rdquo", 0x201D}, {"bdquo", 0x201E},
+    {"lsaquo", 0x2039}, {"rsaquo", 0x203A},
+    {"ensp", 0x2002}, {"emsp", 0x2003}, {"thinsp", 0x2009},
+    {"zwnj", 0x200C}, {"zwj", 0x200D}, {"lrm", 0x200E}, {"rlm", 0x200F},
+    {"dagger", 0x2020}, {"Dagger", 0x2021}, {"bull", 0x2022}, {"permil", 0x2030},
+    {"prime", 0x2032}, {"Prime", 0x2033}, {"oline", 0x203E}, {"frasl", 0x2044},
+    {"euro", 0x20AC}, {"trade", 0x2122},
+    {"OElig", 0x0152}, {"oelig", 0x0153}, {"Scaron", 0x0160}, {"scaron", 0x0161},
+    {"Yuml", 0x0178}, {"fnof", 0x0192}, {"circ", 0x02C6}, {"tilde", 0x02DC},
+    // Greek.
+    {"Alpha", 0x0391}, {"Beta", 0x0392}, {"Gamma", 0x0393}, {"Delta", 0x0394},
+    {"Epsilon", 0x0395}, {"Zeta", 0x0396}, {"Eta", 0x0397}, {"Theta", 0x0398},
+    {"Iota", 0x0399}, {"Kappa", 0x039A}, {"Lambda", 0x039B}, {"Mu", 0x039C},
+    {"Nu", 0x039D}, {"Xi", 0x039E}, {"Omicron", 0x039F}, {"Pi", 0x03A0},
+    {"Rho", 0x03A1}, {"Sigma", 0x03A3}, {"Tau", 0x03A4}, {"Upsilon", 0x03A5},
+    {"Phi", 0x03A6}, {"Chi", 0x03A7}, {"Psi", 0x03A8}, {"Omega", 0x03A9},
+    {"alpha", 0x03B1}, {"beta", 0x03B2}, {"gamma", 0x03B3}, {"delta", 0x03B4},
+    {"epsilon", 0x03B5}, {"zeta", 0x03B6}, {"eta", 0x03B7}, {"theta", 0x03B8},
+    {"iota", 0x03B9}, {"kappa", 0x03BA}, {"lambda", 0x03BB}, {"mu", 0x03BC},
+    {"nu", 0x03BD}, {"xi", 0x03BE}, {"omicron", 0x03BF}, {"pi", 0x03C0},
+    {"rho", 0x03C1}, {"sigmaf", 0x03C2}, {"sigma", 0x03C3}, {"tau", 0x03C4},
+    {"upsilon", 0x03C5}, {"phi", 0x03C6}, {"chi", 0x03C7}, {"psi", 0x03C8},
+    {"omega", 0x03C9}, {"thetasym", 0x03D1}, {"upsih", 0x03D2}, {"piv", 0x03D6},
+    // Letterlike / arrows.
+    {"image", 0x2111}, {"weierp", 0x2118}, {"real", 0x211C}, {"alefsym", 0x2135},
+    {"larr", 0x2190}, {"uarr", 0x2191}, {"rarr", 0x2192}, {"darr", 0x2193},
+    {"harr", 0x2194}, {"crarr", 0x21B5}, {"lArr", 0x21D0}, {"uArr", 0x21D1},
+    {"rArr", 0x21D2}, {"dArr", 0x21D3}, {"hArr", 0x21D4},
+    // Math.
+    {"forall", 0x2200}, {"part", 0x2202}, {"exist", 0x2203}, {"empty", 0x2205},
+    {"nabla", 0x2207}, {"isin", 0x2208}, {"notin", 0x2209}, {"ni", 0x220B},
+    {"prod", 0x220F}, {"sum", 0x2211}, {"minus", 0x2212}, {"lowast", 0x2217},
+    {"radic", 0x221A}, {"prop", 0x221D}, {"infin", 0x221E}, {"ang", 0x2220},
+    {"and", 0x2227}, {"or", 0x2228}, {"cap", 0x2229}, {"cup", 0x222A},
+    {"int", 0x222B}, {"there4", 0x2234}, {"sim", 0x223C}, {"cong", 0x2245},
+    {"asymp", 0x2248}, {"ne", 0x2260}, {"equiv", 0x2261}, {"le", 0x2264},
+    {"ge", 0x2265}, {"sub", 0x2282}, {"sup", 0x2283}, {"nsub", 0x2284},
+    {"sube", 0x2286}, {"supe", 0x2287}, {"oplus", 0x2295}, {"otimes", 0x2297},
+    {"perp", 0x22A5}, {"sdot", 0x22C5}, {"lceil", 0x2308}, {"rceil", 0x2309},
+    {"lfloor", 0x230A}, {"rfloor", 0x230B}, {"lang", 0x2329}, {"rang", 0x232A},
+    {"loz", 0x25CA}, {"spades", 0x2660}, {"clubs", 0x2663}, {"hearts", 0x2665},
+    {"diams", 0x2666},
+};
+
+// Exact, case-sensitive match of a NUL-terminated table name.
+inline bool nameEq(const char* name, const uint8_t* buf, const uint8_t len) {
+  for (uint8_t i = 0; i < len; ++i) {
+    if (name[i] != static_cast<char>(buf[i])) return false;
+  }
+  return name[len] == '\0';
+}
+
+// windows-1252 meaning of 0x80..0x9F (0 = undefined → dropped).  Browsers
+// apply this to &#128;..&#159; — old converted books use &#151; for an em dash.
+constexpr uint16_t kCp1252C1[32] = {
+    0x20AC, 0,      0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0,      0x017D, 0,
+    0,      0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
+};
+
+// Zero-width / invisible format characters.  No glyph in the reader fonts —
+// they rendered as '?' (or split words visibly).  Soft hyphen included: the
+// paginator does its own hyphenation.
+inline bool isInvisibleCodepoint(const uint32_t cp) {
+  return cp == 0x00AD || cp == 0x061C || cp == 0x180E ||
+         (cp >= 0x200B && cp <= 0x200F) ||   // ZWSP ZWNJ ZWJ LRM RLM
+         (cp >= 0x202A && cp <= 0x202E) ||   // bidi embeddings / overrides
+         (cp >= 0x2060 && cp <= 0x2064) ||   // word joiner, invisible math
+         (cp >= 0x2066 && cp <= 0x206F) ||   // bidi isolates, deprecated
+         (cp >= 0xFE00 && cp <= 0xFE0F) ||   // variation selectors
+         cp == 0xFEFF ||                     // BOM / ZWNBSP
+         (cp >= 0xE0000 && cp <= 0xE007F);   // tag characters
+}
+
+// Entity-name byte: alnum, plus '#' as the first byte of a numeric reference.
+inline bool isEntityChar(const uint8_t b, const uint8_t pos) {
+  return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') ||
+         (b == '#' && pos == 0);
+}
+
+// `href` or any `prefix:href` (xlink:href, l:href, …).
+inline bool isHrefAttr(const uint8_t* name, const uint8_t len) {
+  if (eqIc(name, len, "href", 4)) return true;
+  return len > 5 && name[len - 5] == ':' && eqIc(name + len - 4, 4, "href", 4);
+}
 
 }  // namespace
 
@@ -95,10 +168,13 @@ HtmlStripper::HtmlStripper(HtmlStripperSink& sink, Mode mode)
       mode_(mode),
       tagNameLen_(0),
       isEndTag_(false),
+      selfClosing_(false),
       attrNameLen_(0),
       attrQuote_(0),
       captureCurrent_(false),
       entityLen_(0),
+      utf8Len_(0),
+      utf8Need_(0),
       payloadLen_(0),
       captureKind_(AttrKind::None),
       rawBody_(RawBodyKind::None),
@@ -108,10 +184,13 @@ void HtmlStripper::reset() {
   state_ = State::Text;
   tagNameLen_ = 0;
   isEndTag_ = false;
+  selfClosing_ = false;
   attrNameLen_ = 0;
   attrQuote_ = 0;
   captureCurrent_ = false;
   entityLen_ = 0;
+  utf8Len_ = 0;
+  utf8Need_ = 0;
   payloadLen_ = 0;
   captureKind_ = AttrKind::None;
   rawBody_ = RawBodyKind::None;
@@ -119,42 +198,117 @@ void HtmlStripper::reset() {
 }
 
 void HtmlStripper::finish() {
-  // No-op for now.  Future: emit trailing kParagraphBreak / close open scope.
+  // Input ended mid-construct: whatever was held back as a possible entity or
+  // tag start is plain text after all.
+  if (state_ == State::EntityBody) {
+    flushEntityLiteral();
+  } else if (state_ == State::TagOpen) {
+    emitChar('<');
+  }
+  state_ = State::Text;
+  flushUtf8();
 }
 
 // ===========================================================================
 // Emit helpers.
 // ===========================================================================
 void HtmlStripper::emitChar(const uint8_t b) {
+  if (utf8Need_ > 0) {
+    if ((b & 0xC0u) == 0x80u) {
+      utf8Buf_[utf8Len_++] = b;
+      if (--utf8Need_ == 0) {
+        uint32_t cp;
+        if (utf8Len_ == 2) {
+          cp = ((utf8Buf_[0] & 0x1Fu) << 6) | (utf8Buf_[1] & 0x3Fu);
+        } else if (utf8Len_ == 3) {
+          cp = ((utf8Buf_[0] & 0x0Fu) << 12) | ((utf8Buf_[1] & 0x3Fu) << 6) | (utf8Buf_[2] & 0x3Fu);
+        } else {
+          cp = ((utf8Buf_[0] & 0x07u) << 18) | ((utf8Buf_[1] & 0x3Fu) << 12) |
+               ((utf8Buf_[2] & 0x3Fu) << 6) | (utf8Buf_[3] & 0x3Fu);
+        }
+        const uint8_t n = utf8Len_;
+        utf8Len_ = 0;
+        emitCodepoint(cp, utf8Buf_, n);
+      }
+      return;
+    }
+    flushUtf8();  // truncated sequence — pass it through, then handle `b`
+  }
+  if (b >= 0xC2u && b <= 0xF4u) {
+    utf8Buf_[0] = b;
+    utf8Len_ = 1;
+    utf8Need_ = b >= 0xF0u ? 3 : (b >= 0xE0u ? 2 : 1);
+    return;
+  }
   if (b == kMarker) {
     const uint8_t pair[2] = {kMarker, kMarker};
     sink_.emit(pair, 2);
-  } else {
-    sink_.emit(&b, 1);
+    return;
   }
+  if (b < 0x20u || b == 0x7Fu) {
+    // C0 controls have no glyph.  Keep the whitespace ones; VT/FF are spaces.
+    if (b == '\t' || b == '\n' || b == '\r') {
+      sink_.emit(&b, 1);
+    } else if (b == 0x0Bu || b == 0x0Cu) {
+      const uint8_t sp = ' ';
+      sink_.emit(&sp, 1);
+    }
+    return;
+  }
+  sink_.emit(&b, 1);
+}
+
+// Final per-code-point gate for multi-byte text (raw UTF-8 or an entity).
+void HtmlStripper::emitCodepoint(const uint32_t cp, const uint8_t* bytes, const uint8_t n) {
+  if (isInvisibleCodepoint(cp)) return;
+  if (cp >= 0x80u && cp <= 0x9Fu) {
+    // C1 control — almost always windows-1252 text mis-decoded as Latin-1.
+    const uint16_t mapped = kCp1252C1[cp - 0x80u];
+    if (mapped != 0) emitUtf8(mapped);
+    return;
+  }
+  if (cp == 0x2028u || cp == 0x2029u) {  // LINE / PARAGRAPH SEPARATOR
+    const uint8_t sp = ' ';
+    sink_.emit(&sp, 1);
+    return;
+  }
+  sink_.emit(bytes, n);
+}
+
+void HtmlStripper::flushUtf8() {
+  if (utf8Len_ == 0) return;
+  sink_.emit(utf8Buf_, utf8Len_);
+  utf8Len_ = 0;
+  utf8Need_ = 0;
+}
+
+void HtmlStripper::emitRaw(const uint8_t* data, const size_t len) {
+  flushUtf8();
+  sink_.emit(data, len);
 }
 
 void HtmlStripper::emitMarker(const uint8_t tag) {
   const uint8_t bytes[2] = {kMarker, tag};
-  sink_.emit(bytes, 2);
+  emitRaw(bytes, 2);
 }
 
 void HtmlStripper::emitPayloadMarker(const uint8_t tag) {
   const uint8_t hdr[4] = {kMarker, tag,
                            static_cast<uint8_t>(payloadLen_ & 0xFFu),
                            static_cast<uint8_t>((payloadLen_ >> 8) & 0xFFu)};
-  sink_.emit(hdr, 4);
+  emitRaw(hdr, 4);
   if (payloadLen_ > 0) sink_.emit(payload_, payloadLen_);
 }
 
 void HtmlStripper::emitUtf8(const uint32_t cp) {
-  if (cp > 0x10FFFFu) return;
+  if (cp < 0x80u) {
+    emitChar(static_cast<uint8_t>(cp));
+    return;
+  }
+  flushUtf8();
   uint8_t buf[4];
   uint8_t n;
-  if (cp < 0x80u) {
-    buf[0] = static_cast<uint8_t>(cp);
-    n = 1;
-  } else if (cp < 0x800u) {
+  if (cp < 0x800u) {
     buf[0] = static_cast<uint8_t>(0xC0u | (cp >> 6));
     buf[1] = static_cast<uint8_t>(0x80u | (cp & 0x3Fu));
     n = 2;
@@ -170,7 +324,13 @@ void HtmlStripper::emitUtf8(const uint32_t cp) {
     buf[3] = static_cast<uint8_t>(0x80u | (cp & 0x3Fu));
     n = 4;
   }
-  for (uint8_t i = 0; i < n; ++i) emitChar(buf[i]);
+  emitCodepoint(cp, buf, n);
+}
+
+void HtmlStripper::flushEntityLiteral() {
+  emitChar('&');
+  for (uint8_t i = 0; i < entityLen_; ++i) emitChar(entityBuf_[i]);
+  entityLen_ = 0;
 }
 
 // ===========================================================================
@@ -202,7 +362,7 @@ void HtmlStripper::dispatchTag() {
       } else {
         emitMarker(kCenterOn);
         const uint8_t bytes[3] = {kMarker, kHeadingOn, '2'};
-        sink_.emit(bytes, 3);
+        emitRaw(bytes, 3);
       }
       return;
     }
@@ -214,7 +374,7 @@ void HtmlStripper::dispatchTag() {
       } else {
         emitMarker(kCenterOn);
         const uint8_t bytes[3] = {kMarker, kHeadingOn, '3'};
-        sink_.emit(bytes, 3);
+        emitRaw(bytes, 3);
       }
       return;
     }
@@ -326,7 +486,7 @@ void HtmlStripper::dispatchTag() {
       emitMarker(kParagraphBreak);
       emitMarker(kCenterOn);
       const uint8_t bytes[3] = {kMarker, kHeadingOn, tagName_[1]};
-      sink_.emit(bytes, 3);
+      emitRaw(bytes, 3);
     }
     return;
   }
@@ -406,7 +566,7 @@ void HtmlStripper::dispatchTag() {
     if (!isEndTag_) {
       emitMarker(kLineBreak);
       static const uint8_t kBulletBytes[] = {0xE2, 0x80, 0xA2, ' '};
-      sink_.emit(kBulletBytes, sizeof(kBulletBytes));
+      emitRaw(kBulletBytes, sizeof(kBulletBytes));
     }
     return;
   }
@@ -444,7 +604,7 @@ void HtmlStripper::dispatchTag() {
   if (eqIc(tagName_, tagNameLen_, "td", 2) || eqIc(tagName_, tagNameLen_, "th", 2)) {
     if (isEndTag_) {
       static const uint8_t kCellGap[] = {' ', ' '};
-      sink_.emit(kCellGap, sizeof(kCellGap));
+      emitRaw(kCellGap, sizeof(kCellGap));
     }
     return;
   }
@@ -480,50 +640,60 @@ void HtmlStripper::dispatchTag() {
 }
 
 // ===========================================================================
-// Entity dispatch (Phase 3c).
+// Entity dispatch (Phase 3c).  Returns false when the buffered name is not an
+// entity we can decode — the caller then emits it literally.  `terminated` is
+// false when no ';' followed: then only numeric references and the legacy
+// names browsers accept without ';' (Latin-1 + amp/lt/gt/quot) decode, so a
+// bare "this&or that" stays text instead of becoming "this∨ that".
 // ===========================================================================
-void HtmlStripper::dispatchEntity() {
-  if (entityLen_ == 0) return;
+bool HtmlStripper::dispatchEntity(const bool terminated) {
+  if (entityLen_ == 0) return false;
 
   if (entityBuf_[0] == '#') {
-    if (entityLen_ < 2) return;
+    if (entityLen_ < 2) return false;
     uint32_t cp = 0;
+    bool overflow = false;
     if (entityBuf_[1] == 'x' || entityBuf_[1] == 'X') {
-      if (entityLen_ < 3) return;
+      if (entityLen_ < 3) return false;
       for (uint8_t i = 2; i < entityLen_; ++i) {
         const uint8_t c = entityBuf_[i];
         uint32_t d;
         if (c >= '0' && c <= '9') d = static_cast<uint32_t>(c - '0');
         else if (c >= 'a' && c <= 'f') d = static_cast<uint32_t>(c - 'a' + 10);
         else if (c >= 'A' && c <= 'F') d = static_cast<uint32_t>(c - 'A' + 10);
-        else return;
-        if (cp > (0x10FFFFu >> 4)) return;
-        cp = (cp << 4) | d;
+        else return false;
+        if (cp > (0x10FFFFu >> 4)) overflow = true;
+        else cp = (cp << 4) | d;
       }
     } else {
       for (uint8_t i = 1; i < entityLen_; ++i) {
         const uint8_t c = entityBuf_[i];
-        if (c < '0' || c > '9') return;
-        if (cp > (0x10FFFFu / 10)) return;
-        cp = cp * 10 + static_cast<uint32_t>(c - '0');
+        if (c < '0' || c > '9') return false;
+        if (cp > (0x10FFFFu / 10)) overflow = true;
+        else cp = cp * 10 + static_cast<uint32_t>(c - '0');
       }
     }
+    // Out-of-range / NUL / surrogate → U+FFFD, as browsers do.
+    if (overflow || cp == 0 || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) cp = 0xFFFDu;
     emitUtf8(cp);
-    return;
+    return true;
   }
 
-  for (const auto& e : kNamedEntities) {
-    if (e.nameLen != entityLen_) continue;
-    bool match = true;
-    for (uint8_t i = 0; i < entityLen_; ++i) {
-      if (e.name[i] != static_cast<char>(entityBuf_[i])) { match = false; break; }
-    }
-    if (match) {
-      emitUtf8(e.codepoint);
-      return;
+  for (uint8_t i = 0; i < 96; ++i) {
+    if (nameEq(kLatin1Names[i], entityBuf_, entityLen_)) {
+      emitUtf8(0x00A0u + i);
+      return true;
     }
   }
-  // Unknown — silently dropped.
+  const size_t searchable = terminated ? sizeof(kNamedEntities) / sizeof(kNamedEntities[0])
+                                       : kLegacyNamedEntities;
+  for (size_t i = 0; i < searchable; ++i) {
+    if (nameEq(kNamedEntities[i].name, entityBuf_, entityLen_)) {
+      emitUtf8(kNamedEntities[i].codepoint);
+      return true;
+    }
+  }
+  return false;
 }
 
 // ===========================================================================
@@ -543,47 +713,87 @@ void HtmlStripper::onAttrValueComplete() {
   attrNameLen_ = 0;
 }
 
+// Tags whose content is never rendered.  `id` on them is not an anchor.
+bool HtmlStripper::isRawBodyTag() const {
+  if (mode_ == Mode::Fb2) {
+    return eqIc(tagName_, tagNameLen_, "binary", 6) ||
+           eqIc(tagName_, tagNameLen_, "description", 11) ||
+           eqIc(tagName_, tagNameLen_, "stylesheet", 10);
+  }
+  return eqIc(tagName_, tagNameLen_, "script", 6) ||
+         eqIc(tagName_, tagNameLen_, "style", 5) ||
+         eqIc(tagName_, tagNameLen_, "title", 5) ||
+         eqIc(tagName_, tagNameLen_, "desc", 4) ||
+         eqIc(tagName_, tagNameLen_, "metadata", 8);
+}
+
+// An attribute value starts: decide whether (and as what) it is captured.
+//   `id` on any non-raw-body open tag            → kAnchor
+//   HTML `<img src>`                             → kImageRef
+//   `<image href>` / `<image xlink:href>` (SVG in HTML; FB2 `l:href` or any
+//   other namespace prefix)                       → kImageRef
+void HtmlStripper::beginAttrValue() {
+  captureKind_ = AttrKind::None;
+  if (!isEndTag_) {
+    if (eqIc(attrName_, attrNameLen_, "id", 2)) {
+      if (!isRawBodyTag()) captureKind_ = AttrKind::Id;
+    } else if (mode_ == Mode::Html && eqIc(tagName_, tagNameLen_, "img", 3)) {
+      if (eqIc(attrName_, attrNameLen_, "src", 3)) captureKind_ = AttrKind::Src;
+    } else if (eqIc(tagName_, tagNameLen_, "image", 5) ||
+               (mode_ == Mode::Html && eqIc(tagName_, tagNameLen_, "svg:image", 9))) {
+      if (isHrefAttr(attrName_, attrNameLen_)) captureKind_ = AttrKind::Src;
+    }
+  }
+  captureCurrent_ = (captureKind_ != AttrKind::None);
+  payloadLen_ = 0;
+}
+
 // At tag close we still need to:
 //   - emit style markers (kBoldOn/Off etc.)
-//   - enter raw-body suppression for <script>/<style>
+//   - enter raw-body suppression for <script>/<style>/<title>/…
 // Payload markers (img/a) were already emitted by onAttrValueComplete.
 void HtmlStripper::onTagComplete() {
   dispatchTag();
-  if (!isEndTag_) {
-    if (mode_ == Mode::Fb2) {
-      // FB2 raw bodies: <binary> holds base64 image data, <description>
-      // holds book metadata (title-info / publish-info), <stylesheet>
-      // holds CSS.  None contribute to renderable text.
-      if (eqIc(tagName_, tagNameLen_, "binary", 6)) {
-        rawBody_ = RawBodyKind::Binary;
-        state_ = State::RawBody;
-        return;
-      }
-      if (eqIc(tagName_, tagNameLen_, "description", 11)) {
-        rawBody_ = RawBodyKind::Description;
-        state_ = State::RawBody;
-        return;
-      }
-      if (eqIc(tagName_, tagNameLen_, "stylesheet", 10)) {
-        rawBody_ = RawBodyKind::Stylesheet;
-        state_ = State::RawBody;
-        return;
-      }
-    } else {
-      // HTML raw bodies.
-      if (eqIc(tagName_, tagNameLen_, "script", 6)) {
-        rawBody_ = RawBodyKind::Script;
-        state_ = State::RawBody;
-        return;
-      }
-      if (eqIc(tagName_, tagNameLen_, "style", 5)) {
-        rawBody_ = RawBodyKind::Style;
-        state_ = State::RawBody;
-        return;
-      }
+  state_ = State::Text;
+  if (isEndTag_) return;
+  if (selfClosing_) {
+    // v3.11.12 — `<p/>`, `<b/>`, `<h2/>`, FB2 `<title/>` … are open+close.
+    // Pre-fix only the OPEN was dispatched, so `<b/>` left bold on (and
+    // `<h2/>` a centred heading) for the rest of the chapter, and
+    // `<script src="x.js"/>` entered a raw body that swallowed every byte up
+    // to the next `</script>` — or the whole remaining chapter.
+    isEndTag_ = true;
+    dispatchTag();
+    return;
+  }
+  if (mode_ == Mode::Fb2) {
+    // FB2 raw bodies: <binary> holds base64 image data, <description>
+    // holds book metadata (title-info / publish-info), <stylesheet>
+    // holds CSS.  None contribute to renderable text.
+    if (eqIc(tagName_, tagNameLen_, "binary", 6)) {
+      rawBody_ = RawBodyKind::Binary;
+    } else if (eqIc(tagName_, tagNameLen_, "description", 11)) {
+      rawBody_ = RawBodyKind::Description;
+    } else if (eqIc(tagName_, tagNameLen_, "stylesheet", 10)) {
+      rawBody_ = RawBodyKind::Stylesheet;
+    }
+  } else {
+    // HTML raw bodies.  v3.11.12 — <title> (document title in <head>, and
+    // SVG <title>/<desc>/<metadata> tooltips/RDF) was rendered as the first
+    // line of every chapter, glued to the body text.
+    if (eqIc(tagName_, tagNameLen_, "script", 6)) {
+      rawBody_ = RawBodyKind::Script;
+    } else if (eqIc(tagName_, tagNameLen_, "style", 5)) {
+      rawBody_ = RawBodyKind::Style;
+    } else if (eqIc(tagName_, tagNameLen_, "title", 5)) {
+      rawBody_ = RawBodyKind::Title;
+    } else if (eqIc(tagName_, tagNameLen_, "desc", 4)) {
+      rawBody_ = RawBodyKind::SvgDesc;
+    } else if (eqIc(tagName_, tagNameLen_, "metadata", 8)) {
+      rawBody_ = RawBodyKind::SvgMetadata;
     }
   }
-  state_ = State::Text;
+  if (rawBody_ != RawBodyKind::None) state_ = State::RawBody;
 }
 
 // ===========================================================================
@@ -599,288 +809,287 @@ size_t HtmlStripper::feed(const uint8_t* data, const size_t len) {
       return i;
     }
     const uint8_t b = data[i];
-    switch (state_) {
-      // ----- text -----
-      case State::Text:
-        if (b == '<') {
-          state_ = State::TagOpen;
-          // Clean slate: per-attr capture state will be recomputed when
-          // each attribute's value starts.
-          captureCurrent_ = false;
-          captureKind_ = AttrKind::None;
-          payloadLen_ = 0;
-        } else if (b == '&') {
-          state_ = State::EntityBody;
-          entityLen_ = 0;
-        } else {
-          emitChar(b);
-        }
-        break;
-
-      // ----- tag open prefix -----
-      case State::TagOpen:
-        if (b == '!') {
-          state_ = State::TagOpenBang;
-        } else if (b == '/') {
-          isEndTag_ = true;
-          tagNameLen_ = 0;
-          state_ = State::TagName;
-        } else if (b == '>') {
-          state_ = State::Text;
-        } else if (isTagNameChar(b)) {
-          isEndTag_ = false;
-          tagNameLen_ = 0;
-          tagName_[tagNameLen_++] = b;
-          state_ = State::TagName;
-        } else {
-          state_ = State::AttrPreName;  // weird; skip until '>'
-        }
-        break;
-
-      case State::TagOpenBang:
-        if (b == '-')      state_ = State::TagOpenBangDash;
-        else if (b == '>') state_ = State::Text;
-        else               state_ = State::AttrPreName;
-        break;
-
-      case State::TagOpenBangDash:
-        if (b == '-')      state_ = State::CommentBody;
-        else if (b == '>') state_ = State::Text;
-        else               state_ = State::AttrPreName;
-        break;
-
-      // ----- tag name -----
-      case State::TagName:
-        if (isTagNameChar(b)) {
-          if (tagNameLen_ < kTagBufSize) tagName_[tagNameLen_++] = b;
-        } else if (b == '>') {
-          onTagComplete();
-        } else {
-          state_ = State::AttrPreName;
-        }
-        break;
-
-      // ----- attribute scanning -----
-      case State::AttrPreName:
-        if (b == '>') {
-          onTagComplete();
-        } else if (b == '/') {
-          // Self-closing slash before '>': stay, will hit '>' next.
-        } else if (isAttrNameStart(b)) {
-          attrNameLen_ = 0;
-          attrName_[attrNameLen_++] = b;
-          state_ = State::AttrName;
-        }
-        // Whitespace / other chars: skipped.
-        break;
-
-      case State::AttrName:
-        if (isTagNameChar(b)) {
-          if (attrNameLen_ < kAttrNameBufSize) attrName_[attrNameLen_++] = b;
-        } else if (b == '=') {
-          state_ = State::AttrPreValue;
-        } else if (b == '>') {
-          // Boolean attribute (no value), tag ends.
-          attrNameLen_ = 0;
-          onTagComplete();
-        } else {
-          // Whitespace: end of name, no value seen yet.  Treat as boolean.
-          attrNameLen_ = 0;
-          state_ = State::AttrPreName;
-        }
-        break;
-
-      case State::AttrPreValue:
-        if (b == '"' || b == '\'') {
-          attrQuote_ = b;
-          // `id` on any non-end tag → kAnchor.
-          // `src` specifically on <img> → kImageRef.
-          captureKind_ = AttrKind::None;
-          // `id` on raw-body tags (script/style/binary/description/
-          // stylesheet) is internal-reference-only — do NOT emit kAnchor
-          // for those (would dirty the anchor map with unreachable IDs).
-          const bool isRawBodyTag =
-              (mode_ == Mode::Html &&
-               (eqIc(tagName_, tagNameLen_, "script", 6) ||
-                eqIc(tagName_, tagNameLen_, "style", 5))) ||
-              (mode_ == Mode::Fb2 &&
-               (eqIc(tagName_, tagNameLen_, "binary", 6) ||
-                eqIc(tagName_, tagNameLen_, "description", 11) ||
-                eqIc(tagName_, tagNameLen_, "stylesheet", 10)));
-          if (!isEndTag_) {
-            if (!isRawBodyTag &&
-                eqIc(attrName_, attrNameLen_, "id", 2)) {
-              captureKind_ = AttrKind::Id;
-            } else if (mode_ == Mode::Html &&
-                       eqIc(attrName_, attrNameLen_, "src", 3) &&
-                       eqIc(tagName_, tagNameLen_, "img", 3)) {
-              captureKind_ = AttrKind::Src;
-            } else if (mode_ == Mode::Fb2 &&
-                       eqIc(attrName_, attrNameLen_, "l:href", 6) &&
-                       eqIc(tagName_, tagNameLen_, "image", 5)) {
-              captureKind_ = AttrKind::Src;  // emit as kImageRef
-            }
-          }
-          captureCurrent_ = (captureKind_ != AttrKind::None);
-          if (captureCurrent_) payloadLen_ = 0;
-          state_ = State::AttrValueQuoted;
-        } else if (b == '>') {
-          attrNameLen_ = 0;
-          onTagComplete();
-        } else if (isWhitespace(b)) {
-          // Skip; expect value next.
-        } else {
-          attrQuote_ = 0;
-          captureKind_ = AttrKind::None;
-          const bool isRawBodyTagUnq =
-              (mode_ == Mode::Html &&
-               (eqIc(tagName_, tagNameLen_, "script", 6) ||
-                eqIc(tagName_, tagNameLen_, "style", 5))) ||
-              (mode_ == Mode::Fb2 &&
-               (eqIc(tagName_, tagNameLen_, "binary", 6) ||
-                eqIc(tagName_, tagNameLen_, "description", 11) ||
-                eqIc(tagName_, tagNameLen_, "stylesheet", 10)));
-          if (!isEndTag_) {
-            if (!isRawBodyTagUnq &&
-                eqIc(attrName_, attrNameLen_, "id", 2)) {
-              captureKind_ = AttrKind::Id;
-            } else if (mode_ == Mode::Html &&
-                       eqIc(attrName_, attrNameLen_, "src", 3) &&
-                       eqIc(tagName_, tagNameLen_, "img", 3)) {
-              captureKind_ = AttrKind::Src;
-            } else if (mode_ == Mode::Fb2 &&
-                       eqIc(attrName_, attrNameLen_, "l:href", 6) &&
-                       eqIc(tagName_, tagNameLen_, "image", 5)) {
-              captureKind_ = AttrKind::Src;  // emit as kImageRef
-            }
-          }
-          captureCurrent_ = (captureKind_ != AttrKind::None);
-          if (captureCurrent_) {
+    // v3.11.12 — a state that discovers its held-back prefix was literal text
+    // (bare '&', stray '<') emits the prefix, switches to Text and sets
+    // `again` so the SAME byte is handled there (it may start a tag/entity).
+    bool again;
+    do {
+      again = false;
+      switch (state_) {
+        // ----- text -----
+        case State::Text:
+          if (b == '<') {
+            state_ = State::TagOpen;
+            tagNameLen_ = 0;
+            isEndTag_ = false;
+            selfClosing_ = false;
+            // Clean slate: per-attr capture state will be recomputed when
+            // each attribute's value starts.
+            captureCurrent_ = false;
+            captureKind_ = AttrKind::None;
             payloadLen_ = 0;
-            if (payloadLen_ < kPayloadBufSize) payload_[payloadLen_++] = b;
-          }
-          state_ = State::AttrValueUnq;
-        }
-        break;
-
-      case State::AttrValueQuoted:
-        if (b == attrQuote_) {
-          onAttrValueComplete();
-          state_ = State::AttrPreName;
-        } else if (captureCurrent_ && payloadLen_ < kPayloadBufSize) {
-          payload_[payloadLen_++] = b;
-        }
-        break;
-
-      case State::AttrValueUnq:
-        if (b == '>') {
-          onAttrValueComplete();
-          onTagComplete();
-        } else if (isWhitespace(b)) {
-          onAttrValueComplete();
-          state_ = State::AttrPreName;
-        } else if (captureCurrent_ && payloadLen_ < kPayloadBufSize) {
-          payload_[payloadLen_++] = b;
-        }
-        break;
-
-      // ----- comments -----
-      case State::CommentBody:
-        if (b == '-') state_ = State::CommentDash1;
-        break;
-      case State::CommentDash1:
-        if (b == '-') state_ = State::CommentDash2;
-        else          state_ = State::CommentBody;
-        break;
-      case State::CommentDash2:
-        if (b == '>')      state_ = State::Text;
-        else if (b == '-') state_ = State::CommentDash2;
-        else               state_ = State::CommentBody;
-        break;
-
-      // ----- entities -----
-      case State::EntityBody:
-        if (b == ';') {
-          dispatchEntity();
-          state_ = State::Text;
-        } else if (b == '<') {
-          state_ = State::TagOpen;
-        } else if (b == '&') {
-          entityLen_ = 0;
-        } else if (entityLen_ < kEntityBufSize) {
-          entityBuf_[entityLen_++] = b;
-        }
-        break;
-
-      // ----- raw body (script / style) -----
-      case State::RawBody:
-        if (b == '<') {
-          state_ = State::RawBodyLT;
-        }
-        // All other bytes silently consumed.
-        break;
-
-      case State::RawBodyLT:
-        if (b == '/')      state_ = State::RawBodyLTSlash;
-        else if (b == '<') state_ = State::RawBodyLT;
-        else               state_ = State::RawBody;
-        break;
-
-      case State::RawBodyLTSlash:
-        if (isTagNameChar(b)) {
-          rawBodyTagBufLen_ = 0;
-          rawBodyTagBuf_[rawBodyTagBufLen_++] = b;
-          state_ = State::RawBodyTagName;
-        } else if (b == '<') {
-          state_ = State::RawBodyLT;
-        } else {
-          state_ = State::RawBody;
-        }
-        break;
-
-      case State::RawBodyTagName:
-        if (isTagNameChar(b)) {
-          if (rawBodyTagBufLen_ < sizeof(rawBodyTagBuf_)) {
-            rawBodyTagBuf_[rawBodyTagBufLen_++] = b;
-          }
-        } else {
-          // End of inner tag name — does it match the open?
-          bool matchClose = false;
-          switch (rawBody_) {
-            case RawBodyKind::Script:
-              matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "script", 6);
-              break;
-            case RawBodyKind::Style:
-              matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "style", 5);
-              break;
-            case RawBodyKind::Binary:
-              matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "binary", 6);
-              break;
-            case RawBodyKind::Description:
-              matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "description", 11);
-              break;
-            case RawBodyKind::Stylesheet:
-              matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "stylesheet", 10);
-              break;
-            case RawBodyKind::None:
-              break;
-          }
-          if (matchClose) {
-            rawBody_ = RawBodyKind::None;
-            if (b == '>') state_ = State::Text;
-            else          state_ = State::RawBodyAfter;
+          } else if (b == '&') {
+            state_ = State::EntityBody;
+            entityLen_ = 0;
           } else {
-            // Not the closing tag we're waiting for; continue scanning.
-            if (b == '<') state_ = State::RawBodyLT;
-            else          state_ = State::RawBody;
+            emitChar(b);
           }
-        }
-        break;
+          break;
 
-      case State::RawBodyAfter:
-        if (b == '>') state_ = State::Text;
-        break;
-    }
+        // ----- tag open prefix -----
+        case State::TagOpen:
+          if (b == '!') {
+            state_ = State::TagOpenBang;
+          } else if (b == '?') {
+            state_ = State::AttrPreName;  // <?xml …?> — skip to '>'
+          } else if (b == '/') {
+            isEndTag_ = true;
+            state_ = State::TagName;
+          } else if (isAttrNameStart(b)) {
+            tagName_[tagNameLen_++] = b;
+            state_ = State::TagName;
+          } else {
+            // v3.11.12 — "5 < 10", "x<5", "<3": not a tag.  Pre-fix the
+            // text up to the next '>' (often the rest of the paragraph)
+            // was skipped as a bogus tag.
+            emitChar('<');
+            state_ = State::Text;
+            again = true;
+          }
+          break;
+
+        case State::TagOpenBang:
+          if (b == '-')      state_ = State::TagOpenBangDash;
+          else if (b == '>') state_ = State::Text;
+          else               state_ = State::AttrPreName;
+          break;
+
+        case State::TagOpenBangDash:
+          if (b == '-')      state_ = State::CommentBody;
+          else if (b == '>') state_ = State::Text;
+          else               state_ = State::AttrPreName;
+          break;
+
+        // ----- tag name -----
+        case State::TagName:
+          if (isEndTag_ && tagNameLen_ == 0 && !isAttrNameStart(b)) {
+            // "</" not followed by a name: "</>" is ignored, anything else
+            // ("a </ b") is literal text.
+            if (b == '>') {
+              state_ = State::Text;
+            } else {
+              emitChar('<');
+              emitChar('/');
+              state_ = State::Text;
+              again = true;
+            }
+          } else if (isTagNameChar(b)) {
+            if (tagNameLen_ < kTagBufSize) tagName_[tagNameLen_++] = b;
+          } else if (b == '>') {
+            onTagComplete();
+          } else {
+            selfClosing_ = (b == '/');
+            state_ = State::AttrPreName;
+          }
+          break;
+
+        // ----- attribute scanning -----
+        case State::AttrPreName:
+          if (b == '>') {
+            onTagComplete();
+          } else if (b == '/') {
+            selfClosing_ = true;  // only counts if '>' follows directly
+          } else if (isAttrNameStart(b)) {
+            selfClosing_ = false;
+            attrNameLen_ = 0;
+            attrName_[attrNameLen_++] = b;
+            state_ = State::AttrName;
+          } else if (!isWhitespace(b)) {
+            selfClosing_ = false;
+          }
+          break;
+
+        case State::AttrName:
+          if (isTagNameChar(b)) {
+            if (attrNameLen_ < kAttrNameBufSize) attrName_[attrNameLen_++] = b;
+          } else if (b == '=') {
+            state_ = State::AttrPreValue;
+          } else if (b == '>') {
+            // Boolean attribute (no value), tag ends.
+            attrNameLen_ = 0;
+            onTagComplete();
+          } else {
+            // Whitespace or '/': end of name, no value.  Treat as boolean.
+            attrNameLen_ = 0;
+            selfClosing_ = (b == '/');
+            state_ = State::AttrPreName;
+          }
+          break;
+
+        case State::AttrPreValue:
+          if (b == '"' || b == '\'') {
+            attrQuote_ = b;
+            beginAttrValue();
+            state_ = State::AttrValueQuoted;
+          } else if (b == '>') {
+            attrNameLen_ = 0;
+            onTagComplete();
+          } else if (isWhitespace(b)) {
+            // Skip; expect value next.
+          } else {
+            attrQuote_ = 0;
+            beginAttrValue();
+            if (captureCurrent_) payload_[payloadLen_++] = b;
+            state_ = State::AttrValueUnq;
+          }
+          break;
+
+        case State::AttrValueQuoted:
+          if (b == attrQuote_) {
+            onAttrValueComplete();
+            state_ = State::AttrPreName;
+          } else if (captureCurrent_ && payloadLen_ < kPayloadBufSize) {
+            payload_[payloadLen_++] = b;
+          }
+          break;
+
+        case State::AttrValueUnq:
+          if (b == '>') {
+            onAttrValueComplete();
+            onTagComplete();
+          } else if (isWhitespace(b)) {
+            onAttrValueComplete();
+            state_ = State::AttrPreName;
+          } else if (captureCurrent_ && payloadLen_ < kPayloadBufSize) {
+            payload_[payloadLen_++] = b;
+          }
+          break;
+
+        // ----- comments -----
+        case State::CommentBody:
+          if (b == '-') state_ = State::CommentDash1;
+          break;
+        case State::CommentDash1:
+          if (b == '-') state_ = State::CommentDash2;
+          else          state_ = State::CommentBody;
+          break;
+        case State::CommentDash2:
+          if (b == '>')      state_ = State::Text;
+          else if (b == '-') state_ = State::CommentDash2;
+          else               state_ = State::CommentBody;
+          break;
+
+        // ----- entities -----
+        // v3.11.12 — only [#]alnum+ followed by ';' is an entity.  Anything
+        // else ("Tom & Jerry", "AT&T", "?a=1&b=2", an unknown "&foo;") is
+        // literal text.  Pre-fix every byte up to the next ';' or '<' was
+        // swallowed — with a bare '&' that was usually the rest of the
+        // paragraph.  A legacy name terminated without ';' ("&nbsp ") is
+        // still decoded, like browsers do.
+        case State::EntityBody:
+          if (b == ';') {
+            if (dispatchEntity(true)) {
+              entityLen_ = 0;
+            } else {
+              flushEntityLiteral();
+              emitChar(';');
+            }
+            state_ = State::Text;
+          } else if (isEntityChar(b, entityLen_) && entityLen_ < kEntityBufSize) {
+            entityBuf_[entityLen_++] = b;
+          } else {
+            if (dispatchEntity(false)) entityLen_ = 0;
+            else                       flushEntityLiteral();
+            state_ = State::Text;
+            again = true;
+          }
+          break;
+
+        // ----- raw body (script / style / title …) -----
+        case State::RawBody:
+          if (b == '<') {
+            state_ = State::RawBodyLT;
+          }
+          // All other bytes silently consumed.
+          break;
+
+        case State::RawBodyLT:
+          if (b == '/')      state_ = State::RawBodyLTSlash;
+          else if (b == '<') state_ = State::RawBodyLT;
+          else               state_ = State::RawBody;
+          break;
+
+        case State::RawBodyLTSlash:
+          if (isTagNameChar(b)) {
+            rawBodyTagBufLen_ = 0;
+            rawBodyTagBuf_[rawBodyTagBufLen_++] = b;
+            state_ = State::RawBodyTagName;
+          } else if (b == '<') {
+            state_ = State::RawBodyLT;
+          } else {
+            state_ = State::RawBody;
+          }
+          break;
+
+        case State::RawBodyTagName:
+          if (isTagNameChar(b)) {
+            if (rawBodyTagBufLen_ < sizeof(rawBodyTagBuf_)) {
+              rawBodyTagBuf_[rawBodyTagBufLen_++] = b;
+            }
+          } else {
+            // End of inner tag name — does it match the open?
+            bool matchClose = false;
+            switch (rawBody_) {
+              case RawBodyKind::Script:
+                matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "script", 6);
+                break;
+              case RawBodyKind::Style:
+                matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "style", 5);
+                break;
+              // An unclosed <title>/<desc>/<metadata> (malformed source) must
+              // not swallow the chapter: the enclosing </head> / </svg> also
+              // ends the suppressed body.
+              case RawBodyKind::Title:
+                matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "title", 5) ||
+                             eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "head", 4);
+                break;
+              case RawBodyKind::SvgDesc:
+                matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "desc", 4) ||
+                             eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "svg", 3);
+                break;
+              case RawBodyKind::SvgMetadata:
+                matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "metadata", 8) ||
+                             eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "svg", 3);
+                break;
+              case RawBodyKind::Binary:
+                matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "binary", 6);
+                break;
+              case RawBodyKind::Description:
+                matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "description", 11);
+                break;
+              case RawBodyKind::Stylesheet:
+                matchClose = eqIc(rawBodyTagBuf_, rawBodyTagBufLen_, "stylesheet", 10);
+                break;
+              case RawBodyKind::None:
+                break;
+            }
+            if (matchClose) {
+              rawBody_ = RawBodyKind::None;
+              if (b == '>') state_ = State::Text;
+              else          state_ = State::RawBodyAfter;
+            } else {
+              // Not the closing tag we're waiting for; continue scanning.
+              if (b == '<') state_ = State::RawBodyLT;
+              else          state_ = State::RawBody;
+            }
+          }
+          break;
+
+        case State::RawBodyAfter:
+          if (b == '>') state_ = State::Text;
+          break;
+      }
+    } while (again);
   }
   return len;  // full consumption — no early exit was taken
 }
