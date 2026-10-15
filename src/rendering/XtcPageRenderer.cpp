@@ -44,16 +44,21 @@ XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, ui
     // Split allocation: allocate two separate buffers to handle heap fragmentation
     // Two 48KB blocks are easier to find than one 96KB contiguous block
     plane1Buffer = static_cast<uint8_t*>(malloc(planeSize));
-    if (plane1Buffer) plane2Buffer = static_cast<uint8_t*>(malloc(planeSize));
-    if (!plane1Buffer || !plane2Buffer) {
-      // v3.11.12 — grayscale needs 2 × 48 KB; after a heavy book the heap may
-      // not have them.  Show the page in black & white instead of "Memory
-      // error" (pre-fix the book could not be read at all until a reboot).
-      LOG_INF(TAG, "Grayscale planes unavailable (%zu B each, free=%lu largest=%lu) — rendering B/W",
-              planeSize, static_cast<unsigned long>(ESP.getFreeHeap()),
+    if (!plane1Buffer) {
+      // v3.11.12 — not even one 48 KB block: show the page in black & white
+      // straight from the stream instead of "Memory error".
+      LOG_INF(TAG, "No 48 KB block for a grayscale plane (free=%lu largest=%lu) — rendering B/W",
+              static_cast<unsigned long>(ESP.getFreeHeap()),
               static_cast<unsigned long>(ESP.getMaxAllocHeap()));
-      free(plane1Buffer);
       return renderStreaming2BitAsBw(parser, pageNum, pageWidth, pageHeight, planeSize, refreshCallback);
+    }
+    plane2Buffer = static_cast<uint8_t*>(malloc(planeSize));
+    if (!plane2Buffer) {
+      // v3.11.12 — the reader typically has ~85 KB free, so the second 48 KB
+      // plane rarely fits (pre-fix: "Memory error").  Keep plane 1 resident
+      // and re-stream plane 2 from the file for each grayscale pass.
+      return renderGrayscaleOnePlane(parser, pageNum, pageWidth, pageHeight, planeSize, plane1Buffer,
+                                     refreshCallback);
     }
 
     bufferSize = planeSize * 2;
@@ -220,6 +225,106 @@ void XtcPageRenderer::render1Bit(const uint8_t* buffer, uint16_t width, uint16_t
       }
     }
   }
+}
+
+namespace {
+// Stream one 2-bit page and call fn(x, y, value) for every pixel whose plane-2
+// byte arrives, combining it with the resident plane 1 (copied from the same
+// stream on the first pass).  XTCH layout: plane 1 then plane 2, each
+// column-major, columns right to left, MSB = topmost pixel; value = bit1<<1|bit2.
+template <typename Fn>
+bool streamGrayPixels(xtc::XtcParser& parser, const uint32_t pageNum, const uint16_t width, const uint16_t height,
+                      const size_t planeSize, uint8_t* plane1, bool& plane1Loaded, Fn&& fn) {
+  const size_t colBytes = (height + 7) / 8;
+  const bool copyPlane1 = !plane1Loaded;
+  const xtc::XtcError err = parser.loadPageStreaming(
+      pageNum,
+      [&](const uint8_t* data, size_t size, size_t offset) {
+        for (size_t i = 0; i < size; ++i) {
+          const size_t o = offset + i;
+          if (o < planeSize) {
+            if (copyPlane1) plane1[o] = data[i];
+            continue;
+          }
+          const size_t p = o - planeSize;
+          if (p >= planeSize) continue;
+          const size_t colIndex = p / colBytes;
+          if (colIndex >= width) continue;
+          const uint8_t b1 = plane1[p];
+          const uint8_t b2 = data[i];
+          const uint16_t x = static_cast<uint16_t>(width - 1 - colIndex);
+          const size_t yBase = (p % colBytes) * 8;
+          for (int b = 0; b < 8; ++b) {
+            const size_t y = yBase + static_cast<size_t>(b);
+            if (y >= height) break;
+            const uint8_t v = static_cast<uint8_t>((((b1 >> (7 - b)) & 1) << 1) | ((b2 >> (7 - b)) & 1));
+            fn(x, static_cast<uint16_t>(y), v);
+          }
+        }
+        esp_task_wdt_reset();
+      },
+      4096);
+  if (err != xtc::XtcError::OK) return false;
+  plane1Loaded = true;
+  return true;
+}
+}  // namespace
+
+XtcPageRenderer::RenderResult XtcPageRenderer::renderGrayscaleOnePlane(xtc::XtcParser& parser, uint32_t pageNum,
+                                                                      const uint16_t width, const uint16_t height,
+                                                                      const size_t planeSize, uint8_t* plane1,
+                                                                      const std::function<void()>& refreshCallback) {
+  // Same four passes as the two-buffer path in render(), each re-reading the
+  // page so plane 2 never needs its own 48 KB.
+  bool loaded = false;
+  auto fail = [&]() {
+    LOG_ERR(TAG, "Failed to load page %u (one-plane grayscale)", pageNum);
+    free(plane1);
+    return RenderResult::PageLoadFailed;
+  };
+
+  // Pass 1: B/W base — every non-white pixel black.
+  renderer_.clearScreen();
+  if (!streamGrayPixels(parser, pageNum, width, height, planeSize, plane1, loaded,
+                        [&](uint16_t x, uint16_t y, uint8_t v) {
+                          if (v >= 1) renderer_.drawPixel(x, y, true);
+                        })) {
+    return fail();
+  }
+  refreshCallback();
+
+  // Pass 2: LSB buffer — dark gray (value 1).
+  renderer_.clearScreen(0x00);
+  if (!streamGrayPixels(parser, pageNum, width, height, planeSize, plane1, loaded,
+                        [&](uint16_t x, uint16_t y, uint8_t v) {
+                          if (v == 1) renderer_.drawPixel(x, y, false);
+                        })) {
+    return fail();
+  }
+  renderer_.copyGrayscaleLsbBuffers();
+
+  // Pass 3: MSB buffer — light and dark gray (value 1 or 2).
+  renderer_.clearScreen(0x00);
+  if (!streamGrayPixels(parser, pageNum, width, height, planeSize, plane1, loaded,
+                        [&](uint16_t x, uint16_t y, uint8_t v) {
+                          if (v == 1 || v == 2) renderer_.drawPixel(x, y, false);
+                        })) {
+    return fail();
+  }
+  renderer_.copyGrayscaleMsbBuffers();
+  renderer_.displayGrayBuffer();
+
+  // Restore the B/W framebuffer for the next page (see render()).
+  renderer_.clearScreen();
+  if (!streamGrayPixels(parser, pageNum, width, height, planeSize, plane1, loaded,
+                        [&](uint16_t x, uint16_t y, uint8_t v) {
+                          if (v >= 1) renderer_.drawPixel(x, y, true);
+                        })) {
+    return fail();
+  }
+  free(plane1);
+  LOG_DBG(TAG, "Rendered page %u/%u (2-bit grayscale, one plane resident)", pageNum + 1, parser.getPageCount());
+  return RenderResult::Success;
 }
 
 XtcPageRenderer::RenderResult XtcPageRenderer::renderStreaming2BitAsBw(xtc::XtcParser& parser, uint32_t pageNum,

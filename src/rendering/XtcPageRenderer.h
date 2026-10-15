@@ -36,6 +36,11 @@ class XtcPageRenderer {
   void render2BitGrayscale(const uint8_t* plane1, const uint8_t* plane2, uint16_t width, uint16_t height);
   // v3.11.12 — black & white rendering of a 2-bit page straight from the file
   // stream, no plane buffers (used when the heap cannot give 2 × 48 KB).
+  // v3.11.12 — full grayscale with only plane 1 resident (48 KB); plane 2 is
+  // re-streamed from the file for each pass.  Takes ownership of `plane1`.
+  RenderResult renderGrayscaleOnePlane(xtc::XtcParser& parser, uint32_t pageNum, uint16_t width, uint16_t height,
+                                       size_t planeSize, uint8_t* plane1,
+                                       const std::function<void()>& refreshCallback);
   RenderResult renderStreaming2BitAsBw(xtc::XtcParser& parser, uint32_t pageNum, uint16_t width,
                                        uint16_t height, size_t planeSize, const std::function<void()>& refreshCallback);
 };
