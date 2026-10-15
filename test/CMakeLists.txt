@@ -446,6 +446,19 @@ foreach(TEST_SRC ${TEST_SOURCES})
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/lib/SmolPort/src
     )
+  elseif(TEST_NAME STREQUAL "EpubChunkEquivTest")
+    # v3.11.13 — big EPUB chapters are markerized in source chunks with one
+    # stripper kept alive (skip / replay per call); the chunks must concatenate
+    # byte-identically to one continuous pass.
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+    )
   elseif(TEST_NAME STREQUAL "PaginationCompletenessFuzzTest")
     # Property-based proof that pagination never drops or duplicates content:
     # random chapters, device-shaped idx-walk + seek-resume renders, compared

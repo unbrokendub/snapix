@@ -9,10 +9,15 @@
 #include <vector>
 
 #include "ContentParser.h"
+#include "StreamingSection.h"  // ChunkedIdxState / ChunkedIdxExtend (v3.11.13 progressive chapters)
 
 class GfxRenderer;
+class ZipItemReader;
 namespace snapix::unifiedcache {
 class UnifiedCache;
+}
+namespace snapix::smolport {
+class ChunkedMarkerizer;
 }
 
 /**
@@ -128,6 +133,49 @@ class EpubChapterParser : public ContentParser {
   // most-pressured chapters.  markerizeAttempted_ guards in-instance
   // retry; cross-instance retry happens via the file-existence check.
   bool tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& cache);
+
+  // ---- v3.11.13 — progressive (chunked) markerize for BIG chapters ---------
+  // A chapter whose source exceeds kProgressiveMinSourceBytes is markerized in
+  // 32 KB source chunks (UnifiedCache markerChunkKind(k), key = spine) instead
+  // of one Markers frame, and its idx grows chunk by chunk, so pages are
+  // emitted as soon as the walk has passed them — a saved page deep in a
+  // single-file book no longer waits for the whole chapter (60+ s on device).
+  // One HtmlStripper stays alive across the chunks (markers byte-identical to
+  // one pass); the ZIP stream is reopened per call and skipped forward, so its
+  // 32 KB inflate window is never held between calls.  Small chapters keep the
+  // one-shot tryMarkerizeChapter + R4.c path below.
+  bool progressiveDecided_ = false;
+  bool progressive_ = false;
+  bool progInit_ = false;
+  uint32_t progSrcSize_ = 0;  // uncompressed chapter bytes (valid when known)
+  bool progSrcSizeKnown_ = false;
+  int progChunks_ = 0;            // chunk frames stored
+  bool progSourceDone_ = false;   // all chunks stored (Kind::MarkerChunksDone)
+  bool progIdxComplete_ = false;  // idx walk reached the end of the last chunk
+  int progIdxChunks_ = 0;         // chunks covered by a walk since init
+  snapix::pagecache::ChunkedIdxState progIdx_;
+  uint16_t progEmitCursor_ = 0;
+  // Live stripper positioned where the stored chunks end.  Survives reset()
+  // while clean: rebuilding one replays (inflates + strips) the whole prefix.
+  std::unique_ptr<snapix::smolport::ChunkedMarkerizer> progMarkerizer_;
+  // Opened by the size decision; consumed (from byte 0) by whichever path
+  // markerizes in the same parsePages call, and never kept past it.
+  std::unique_ptr<ZipItemReader> pendingStream_;
+
+  bool useProgressiveMarkers(snapix::unifiedcache::UnifiedCache& cache);
+  bool ensureProgressiveInit(snapix::unifiedcache::UnifiedCache& cache);
+  void rebuildProgressiveAnchors(snapix::unifiedcache::UnifiedCache& cache);
+  int markerizeProgressiveChunks(snapix::unifiedcache::UnifiedCache& cache, int wanted,
+                                 const AbortCallback& shouldAbort);
+  snapix::pagecache::ChunkedIdxExtend extendProgressiveIdx(snapix::unifiedcache::UnifiedCache& cache,
+                                                           const AbortCallback& shouldAbort);
+  bool parsePagesProgressive(snapix::unifiedcache::UnifiedCache& cache,
+                             const std::function<void(std::unique_ptr<Page>)>& onPageComplete,
+                             uint16_t maxPages, const AbortCallback& shouldAbort);
+  uint16_t progPagesAvailable() const {
+    return static_cast<uint16_t>(progIdx_.boundaries.size() + (progIdxComplete_ ? 1 : 0));
+  }
+  uint16_t computeStreamingConfigHash() const;
 
  public:
   EpubChapterParser(std::shared_ptr<Epub> epub, int spineIndex, GfxRenderer& renderer, const RenderConfig& config,

@@ -28,12 +28,16 @@
 // can build the `.idx` upfront via a MEASURE-only walk, eliminating
 // the legacy parser dependency even on a chapter's first visit.
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+#include <ChunkedMarkerizer.h>      // v3.11.13 — progressive chapter markerize
+#include <ChunkedMarkersReader.h>
 #include <GfxRendererPaginatorAdapter.h>
 #include <HtmlStripper.h>
 #include <MarkerizedPageRender.h>
 #include <MarkerizeChapter.h>
 #include <MarkerStream.h>
 #include <StreamingPaginator.h>
+
+#include "UnifiedCacheChunkProvider.h"
 #endif
 
 #define TAG "EPUB_CHAP"
@@ -44,6 +48,21 @@
 #include <utility>
 
 namespace {
+
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+// v3.11.13 — progressive markerize tuning.  Chapters up to 64 KB of source keep
+// the one-shot path (≤2 chunks would gain little); bigger ones go in 32 KB
+// source chunks, the size TXT/FB2 lazy markerize proved on device.
+constexpr uint32_t kProgressiveMinSourceBytes = 64 * 1024;
+constexpr snapix::smolport::MarkerChunkPlan kProgressivePlan{
+    32 * 1024, snapix::unifiedcache::kMaxMarkerChunks};
+// Chunks one parsePages call may markerize before it walks + emits.  Each call
+// reopens the ZIP and skips to the next chunk, so batching saves re-inflating
+// the prefix; the cap bounds how long a call runs (≈2 s per chunk on device).
+constexpr int kProgressiveMaxChunksPerCall = 4;
+constexpr size_t kProgressiveReadBytes = 2048;   // inflated-source read buffer
+constexpr size_t kProgressiveStageBytes = 4096;  // marker write staging
+#endif
 
 // v2.0.116 Phase R2 — marker sidecar lives at `<cachePath>/markers/<spine>.bin`,
 // parallel to `<cachePath>/sections/`.  The directory is auto-created via
@@ -154,6 +173,20 @@ void EpubChapterParser::reset() {
   // instance re-evaluates the markers cache (file-existence check
   // inside tryMarkerizeChapter still short-circuits on disk hit).
   markerizeAttempted_ = false;
+  // v3.11.13 — progressive chapter: restart emission at page 0 from the stored
+  // chunks + idx (re-loaded next call).  The chunked-vs-one-shot decision and a
+  // clean live stripper are kept — the stripper is re-validated against the
+  // stored chunk count on init, and rebuilding it would replay the prefix.
+  progInit_ = false;
+  progIdx_.boundaries.clear();
+  progIdx_.configHashValid = false;
+  progIdxComplete_ = false;
+  progIdxChunks_ = 0;
+  progEmitCursor_ = 0;
+  pendingStream_.reset();
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  if (progMarkerizer_ && !progMarkerizer_->clean()) progMarkerizer_.reset();
+#endif
 }
 
 bool EpubChapterParser::canResume() const {
@@ -163,7 +196,22 @@ bool EpubChapterParser::canResume() const {
   // "hot-extend OK, no need to cold-rebuild", which is exactly what the
   // mid-emit short-circuit wants.
   return awaitingIndexBuild_ ||
-         (shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_);
+         (shortCircuitActive_ && shortCircuitNextPage_ < shortCircuitTotalPages_) ||
+         (progressive_ && progInit_ &&
+          (progEmitCursor_ < progPagesAvailable() || !progIdxComplete_));
+}
+
+uint16_t EpubChapterParser::computeStreamingConfigHash() const {
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  const auto cfg = makeEpubStreamingConfig(
+      renderer_, config_, streamingViewportMarginTop_, streamingViewportMarginBottom_,
+      streamingViewportMarginLeft_, streamingViewportMarginRight_, epub_->getLanguage());
+  return snapix::smolport::computePageIndexConfigHash(
+      cfg, config_.fontId, config_.fakeBold,
+      imageCachePath_.empty() ? snapix::smolport::kLayoutFlagNoImages : 0);
+#else
+  return 0;
+#endif
 }
 
 bool EpubChapterParser::rebuildAnchorMapFromCachedIndex() {
@@ -177,13 +225,7 @@ bool EpubChapterParser::rebuildAnchorMapFromCachedIndex() {
     return false;
   }
 
-  const auto cfg = makeEpubStreamingConfig(
-      renderer_, config_, streamingViewportMarginTop_,
-      streamingViewportMarginBottom_, streamingViewportMarginLeft_,
-      streamingViewportMarginRight_, epub_->getLanguage());
-  const uint16_t configHash = snapix::smolport::computePageIndexConfigHash(
-      cfg, config_.fontId, config_.fakeBold,
-      imageCachePath_.empty() ? snapix::smolport::kLayoutFlagNoImages : 0);
+  const uint16_t configHash = computeStreamingConfigHash();
 
   std::vector<snapix::smolport::PageBoundarySnapshot> boundaries;
   if (!snapix::smolport::deserializePageIndex(
@@ -191,6 +233,9 @@ bool EpubChapterParser::rebuildAnchorMapFromCachedIndex() {
     return false;
   }
 
+  // Whole-frame markers only: a progressive (chunked) chapter rebuilds its
+  // anchors itself (rebuildProgressiveAnchors) and its stored idx may cover
+  // just a prefix of the stored chunks.
   File markerFile;
   size_t markerBytes = 0;
   if (!cache.openSegmentReader(snapix::unifiedcache::Kind::Markers,
@@ -307,8 +352,12 @@ bool EpubChapterParser::tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& 
   // cold EPUB chapter.  Match the compressed-input buffer to the 4 KB
   // markerizer chunk and recover 4 KB of peak headroom; the modest increase
   // in ZIP refill calls is preferable to operating within 5 KB of OOM.
-  auto zipStream =
-      epub_->openItemStream(spineItem.href, 4096, /*dictBuffer=*/nullptr);
+  // v3.11.13 — reuse the stream the size decision (useProgressiveMarkers)
+  // already opened, if it is still at byte 0.
+  auto zipStream = (pendingStream_ && pendingStream_->bytesProduced() == 0)
+                       ? std::move(pendingStream_)
+                       : epub_->openItemStream(spineItem.href, 4096, /*dictBuffer=*/nullptr);
+  pendingStream_.reset();
   if (!zipStream) {
     LOG_ERR(TAG, "[CONTENT][EPUB] markerize open ZIP stream failed spine=%d href=%s", spineIndex_,
             spineItem.href.c_str());
@@ -456,6 +505,21 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   // Keep one directory snapshot for this parse operation.  Writes update the
   // snapshot in place, and the object is released before parsePages returns.
   auto ucache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
+
+  // v3.11.13 — the size decision may open the chapter's ZIP stream (32 KB
+  // inflate window); it must never outlive this call.
+  struct PendingStreamGuard {
+    std::unique_ptr<ZipItemReader>& stream;
+    ~PendingStreamGuard() { stream.reset(); }
+  } pendingStreamGuard{pendingStream_};
+
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  // v3.11.13 — big chapters: chunked markerize + incremental idx.
+  if (useProgressiveMarkers(ucache)) {
+    return parsePagesProgressive(ucache, onPageComplete, maxPages, shouldAbort);
+  }
+#endif
+
   (void)tryMarkerizeChapter(ucache);
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
@@ -463,10 +527,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
       renderer_, config_, streamingViewportMarginTop_,
       streamingViewportMarginBottom_, streamingViewportMarginLeft_,
       streamingViewportMarginRight_, epub_->getLanguage());
-  const uint16_t streamingConfigHash =
-      snapix::smolport::computePageIndexConfigHash(
-          streamingCfg, config_.fontId, config_.fakeBold,
-          imageCachePath_.empty() ? snapix::smolport::kLayoutFlagNoImages : 0);
+  const uint16_t streamingConfigHash = computeStreamingConfigHash();
 
   auto hasCurrentIndex = [&]() -> bool {
     File idxProbe;
@@ -898,3 +959,351 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   initialized_ = false;
   return false;
 }
+
+#if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+// =============================================================================
+// v3.11.13 — progressive (chunked) markerize for big chapters.  See the header.
+// =============================================================================
+
+bool EpubChapterParser::useProgressiveMarkers(snapix::unifiedcache::UnifiedCache& cache) {
+  if (progressiveDecided_) return progressive_;
+  progressiveDecided_ = true;
+  progressive_ = false;
+  const auto key = static_cast<uint16_t>(spineIndex_);
+  size_t sz = 0;
+  // Whole-chapter markers already stored (small chapter, or a cache written
+  // before v3.11.13) → keep using them.
+  if (cache.segmentSize(snapix::unifiedcache::Kind::Markers, key, &sz)) return false;
+  if (cache.segmentSize(snapix::unifiedcache::markerChunkKind(0), key, &sz)) {
+    progressive_ = true;
+    return true;
+  }
+  // Nothing stored yet: the entry's uncompressed size decides.  The stream is
+  // kept for whichever path markerizes next in this call (from byte 0).
+  const auto spineItem = epub_->getSpineItem(spineIndex_);
+  if (spineItem.href.empty()) return false;
+  pendingStream_ = epub_->openItemStream(spineItem.href, 4096, /*dictBuffer=*/nullptr);
+  if (!pendingStream_) {  // heap too tight right now: decide again next call
+    progressiveDecided_ = false;
+    return false;
+  }
+  progSrcSize_ = pendingStream_->totalUncompressedSize();
+  progSrcSizeKnown_ = true;
+  progressive_ = progSrcSize_ > kProgressiveMinSourceBytes;
+  LOG_INF(TAG, "[CONTENT][EPUB] [STREAM] chapter size spine=%d src=%u → %s", spineIndex_,
+          static_cast<unsigned>(progSrcSize_), progressive_ ? "progressive chunks" : "one-shot");
+  return progressive_;
+}
+
+bool EpubChapterParser::ensureProgressiveInit(snapix::unifiedcache::UnifiedCache& cache) {
+  if (progInit_) return true;
+  const auto key = static_cast<uint16_t>(spineIndex_);
+  size_t sz = 0;
+  int chunks = 0;
+  uint32_t storedBytes = 0;
+  while (chunks < snapix::unifiedcache::kMaxMarkerChunks &&
+         cache.segmentSize(snapix::unifiedcache::markerChunkKind(chunks), key, &sz)) {
+    storedBytes += static_cast<uint32_t>(sz);
+    ++chunks;
+  }
+  progChunks_ = chunks;
+  progSourceDone_ = chunks > 0 && cache.segmentSize(snapix::unifiedcache::Kind::MarkerChunksDone, key, &sz);
+
+  // A kept stripper must sit exactly where the stored chunks end.
+  if (progMarkerizer_ &&
+      (!progMarkerizer_->clean() || !progSrcSizeKnown_ ||
+       progMarkerizer_->offset() != kProgressivePlan.start(progChunks_, progSrcSize_))) {
+    progMarkerizer_.reset();
+  }
+
+  // Stored idx boundaries are final page starts (every boundary a walk fires is
+  // final; the trailing partial page is re-walked).  Reject an idx that points
+  // past the stored markers.
+  progIdxComplete_ = false;
+  (void)snapix::pagecache::loadChunkedIdx(progIdx_, cache, key, computeStreamingConfigHash());
+  if (!progIdx_.boundaries.empty() && progIdx_.boundaries.back().byteOffset > storedBytes) {
+    LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] progressive idx past markers spine=%d off=%u stored=%u — rebuilding",
+            spineIndex_, static_cast<unsigned>(progIdx_.boundaries.back().byteOffset),
+            static_cast<unsigned>(storedBytes));
+    progIdx_.boundaries.clear();
+  }
+  progIdx_.configHash = computeStreamingConfigHash();
+  progIdx_.configHashValid = true;
+  rebuildProgressiveAnchors(cache);
+  progIdxChunks_ = 0;
+  progEmitCursor_ = 0;
+  progInit_ = true;
+  LOG_INF(TAG,
+          "[CONTENT][EPUB] [STREAM] progressive init spine=%d chunks=%d markers=%u done=%u idxPages=%u "
+          "anchors=%u stripper=%u",
+          spineIndex_, progChunks_, static_cast<unsigned>(storedBytes), static_cast<unsigned>(progSourceDone_),
+          static_cast<unsigned>(progIdx_.boundaries.size()), static_cast<unsigned>(anchorMap_.size()),
+          static_cast<unsigned>(progMarkerizer_ != nullptr));
+  return true;
+}
+
+// Anchors before the last stored boundary — the walks only revisit the pages
+// from there on, and the .anchors sidecar is rewritten from anchorMap_.
+void EpubChapterParser::rebuildProgressiveAnchors(snapix::unifiedcache::UnifiedCache& cache) {
+  anchorMap_.clear();
+  if (progIdx_.boundaries.empty()) return;
+  uint32_t remaining = progIdx_.boundaries.back().byteOffset;
+  auto provider = snapix::pagecache::UnifiedCacheChunkProvider::section(cache, static_cast<uint16_t>(spineIndex_));
+  snapix::smolport::ChunkedMarkersReader markerReader(provider);
+  IndexedAnchorObserver observer(progIdx_.boundaries, anchorMap_);
+  snapix::smolport::MarkerStreamReader reader(observer);
+  constexpr size_t kScanBufferBytes = 2048;
+  std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[kScanBufferBytes]);
+  if (!buf) return;
+  while (remaining > 0) {
+    const int got = markerReader.read(buf.get(), std::min<size_t>(remaining, kScanBufferBytes));
+    if (got <= 0 || !reader.feed(buf.get(), static_cast<size_t>(got))) break;
+    remaining -= static_cast<uint32_t>(got);
+  }
+}
+
+int EpubChapterParser::markerizeProgressiveChunks(snapix::unifiedcache::UnifiedCache& cache, const int wanted,
+                                                  const AbortCallback& shouldAbort) {
+  if (progSourceDone_) return 0;
+  const auto key = static_cast<uint16_t>(spineIndex_);
+  const uint32_t heapBefore = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+
+  std::unique_ptr<ZipItemReader> stream;
+  if (pendingStream_ && pendingStream_->bytesProduced() == 0) {
+    stream = std::move(pendingStream_);
+  } else {
+    pendingStream_.reset();
+    const auto spineItem = epub_->getSpineItem(spineIndex_);
+    if (!spineItem.href.empty()) stream = epub_->openItemStream(spineItem.href, 4096, /*dictBuffer=*/nullptr);
+  }
+  if (!stream) {
+    LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] progressive open ZIP stream failed spine=%d", spineIndex_);
+    return -1;
+  }
+  progSrcSize_ = stream->totalUncompressedSize();
+  progSrcSizeKnown_ = true;
+  const int total = kProgressivePlan.count(progSrcSize_);
+
+  auto writeDone = [&]() {
+    uint8_t rec[6];
+    rec[0] = static_cast<uint8_t>(progChunks_ & 0xff);
+    rec[1] = static_cast<uint8_t>((progChunks_ >> 8) & 0xff);
+    for (int i = 0; i < 4; ++i) rec[2 + i] = static_cast<uint8_t>((progSrcSize_ >> (8 * i)) & 0xff);
+    (void)cache.writeSegment(snapix::unifiedcache::Kind::MarkerChunksDone, key, rec, sizeof(rec));
+    progSourceDone_ = true;
+  };
+  if (progChunks_ >= total) {  // every chunk stored; only the record was missing
+    writeDone();
+    return 0;
+  }
+
+  std::unique_ptr<uint8_t[]> readBuf(new (std::nothrow) uint8_t[kProgressiveReadBytes]);
+  std::unique_ptr<uint8_t[]> stage(new (std::nothrow) uint8_t[kProgressiveStageBytes]);
+  if (!readBuf || !stage) {
+    LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] progressive buffers alloc failed spine=%d", spineIndex_);
+    return -1;
+  }
+  const snapix::smolport::MarkerizeReadFn readFn = [&stream](uint8_t* buf, size_t len) -> int {
+    return stream->read(buf, len);
+  };
+
+  // Bring the stripper to where the next chunk starts: skip the inflated prefix
+  // for the live instance, or replay it through a fresh one.
+  const uint32_t start = kProgressivePlan.start(progChunks_, progSrcSize_);
+  const uint32_t prepStartMs = millis();
+  bool replayed = false;
+  if (progMarkerizer_ && progMarkerizer_->offset() != start) progMarkerizer_.reset();
+  if (!progMarkerizer_) {
+    progMarkerizer_.reset(new (std::nothrow) snapix::smolport::ChunkedMarkerizer(
+        snapix::smolport::HtmlStripper::Mode::Html));
+    if (!progMarkerizer_) return -1;
+    replayed = start > 0;
+    if (replayed && !progMarkerizer_->replayTo(readFn, start, readBuf.get(), kProgressiveReadBytes)) {
+      LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] progressive replay failed spine=%d to=%u", spineIndex_,
+              static_cast<unsigned>(start));
+      progMarkerizer_.reset();
+      return -1;
+    }
+  } else if (!snapix::smolport::skipSource(readFn, start, readBuf.get(), kProgressiveReadBytes)) {
+    LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] progressive skip failed spine=%d to=%u", spineIndex_,
+            static_cast<unsigned>(start));
+    return -1;
+  }
+  const uint32_t prepMs = millis() - prepStartMs;
+  const uint32_t heapActive = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+
+  int written = 0;
+  while (written < wanted && progChunks_ < total) {
+    if (written > 0 && shouldAbort && shouldAbort()) break;
+    const int k = progChunks_;
+    const uint32_t from = kProgressivePlan.start(k, progSrcSize_);
+    const uint32_t end = kProgressivePlan.end(k, progSrcSize_);
+    const bool last = k == total - 1;
+    const uint32_t chunkStartMs = millis();
+    snapix::smolport::MarkerizeStatus status = snapix::smolport::MarkerizeStatus::ReadError;
+    uint32_t outBytes = 0;
+    const bool ok = cache.writeSegmentStreamingDeferred(
+        snapix::unifiedcache::markerChunkKind(k), key, [&](File& outFile) -> bool {
+          const snapix::smolport::MarkerizeWriteFn writeFn = [&outFile](const uint8_t* d, size_t l) -> bool {
+            return outFile && outFile.write(d, l) == l;
+          };
+          status = progMarkerizer_->markerizeChunk(readFn, writeFn, end, last, readBuf.get(),
+                                                   kProgressiveReadBytes, stage.get(), kProgressiveStageBytes,
+                                                   &outBytes);
+          return status == snapix::smolport::MarkerizeStatus::Success;
+        });
+    if (!ok || status != snapix::smolport::MarkerizeStatus::Success) {
+      // The stripper consumed bytes whose markers were not stored.
+      progMarkerizer_.reset();
+      LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] progressive chunk %d failed spine=%d status=%u (UnifiedCache ok=%u)", k,
+              spineIndex_, static_cast<unsigned>(status), static_cast<unsigned>(ok));
+      return written > 0 ? written : -1;
+    }
+    ++progChunks_;
+    ++written;
+    LOG_INF(TAG, "[CONTENT][EPUB] [STREAM] chunk %d/%d markerized spine=%d src=[%u,%u) out=%u %u ms", k, total,
+            spineIndex_, static_cast<unsigned>(from), static_cast<unsigned>(end), static_cast<unsigned>(outBytes),
+            static_cast<unsigned>(millis() - chunkStartMs));
+    if (last) writeDone();
+  }
+  stream.reset();  // free the inflate window before the page walk
+  LOG_INF(TAG,
+          "[PERF] progressive markerize spine=%d chunks=+%d (%d/%d) %s=%u ms heap before=%u active=%u after=%u",
+          spineIndex_, written, progChunks_, total, replayed ? "replay" : "skip", static_cast<unsigned>(prepMs),
+          static_cast<unsigned>(heapBefore), static_cast<unsigned>(heapActive),
+          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
+  return written;
+}
+
+snapix::pagecache::ChunkedIdxExtend EpubChapterParser::extendProgressiveIdx(
+    snapix::unifiedcache::UnifiedCache& cache, const AbortCallback& shouldAbort) {
+  // The walk restarts on the page of the last boundary; its anchors are
+  // captured again.
+  const uint16_t resumePage = progIdx_.boundaries.empty() ? 0 : progIdx_.boundaries.back().pageIndex;
+  anchorMap_.erase(std::remove_if(anchorMap_.begin(), anchorMap_.end(),
+                                  [resumePage](const std::pair<std::string, uint16_t>& a) {
+                                    return a.second >= resumePage;
+                                  }),
+                   anchorMap_.end());
+
+  snapix::pagecache::ChunkedIdxWalk walk;
+  walk.idxKey = static_cast<uint16_t>(spineIndex_);
+  walk.cfg = makeEpubStreamingConfig(renderer_, config_, streamingViewportMarginTop_,
+                                     streamingViewportMarginBottom_, streamingViewportMarginLeft_,
+                                     streamingViewportMarginRight_, epub_->getLanguage());
+  walk.configHash = computeStreamingConfigHash();
+  walk.streamComplete = progSourceDone_;
+  walk.shouldAbort = shouldAbort;
+  walk.onAnchorPage = [this](const uint8_t* id, uint16_t len, uint16_t pageIndex) {
+    if (id == nullptr || len == 0) return;
+    anchorMap_.emplace_back(std::string(reinterpret_cast<const char*>(id), len), pageIndex);
+  };
+  // Same image hooks as the one-shot R4.c walk: deterministic BMP path, and the
+  // layout size from the ZIP header (decode-independent; pinned in a .dim
+  // sidecar by the adapter).  The probe session opens on the first image only.
+  if (!imageCachePath_.empty()) {
+    const std::string imageCacheDir = imageCachePath_;
+    const std::string chapterBase = chapterBasePath_;
+    walk.resolveImage = [imageCacheDir, chapterBase](const uint8_t* p, size_t l) -> std::string {
+      if (p == nullptr || l == 0) return {};
+      std::string src(reinterpret_cast<const char*>(p), l);
+      std::string resolved = chapterBase.empty() ? src : FsHelpers::normalisePath(chapterBase + src);
+      const size_t srcHash = std::hash<std::string>{}(resolved);
+      return imageCacheDir + "/" + std::to_string(srcHash) + ".bmp";
+    };
+    auto session = std::make_shared<std::unique_ptr<Epub::ImageProbeSession>>();
+    const std::shared_ptr<Epub> epub = epub_;
+    const uint16_t boxW = config_.viewportWidth;
+    const uint16_t boxH = config_.viewportHeight;
+    walk.probeImage = [session, epub, chapterBase, boxW, boxH](const uint8_t* p, size_t l, uint16_t& w,
+                                                              uint16_t& h) -> int {
+      if (p == nullptr || l == 0) return -1;
+      if (!*session) *session = epub->openImageProbeSession();
+      if (!*session) return -1;
+      const std::string src(reinterpret_cast<const char*>(p), l);
+      const std::string href = chapterBase.empty() ? src : FsHelpers::normalisePath(chapterBase + src);
+      return (*session)->probe(href, boxW, boxH, w, h);
+    };
+  }
+
+  auto provider = snapix::pagecache::UnifiedCacheChunkProvider::section(cache, static_cast<uint16_t>(spineIndex_));
+  const uint32_t walkStartMs = millis();
+  const auto r = snapix::pagecache::extendChunkedIdx(progIdx_, cache, provider, renderer_, config_, walk);
+  if (r.reachedEnd) progIdxComplete_ = true;
+  LOG_INF(TAG,
+          "[CONTENT][EPUB] [STREAM] progressive idx spine=%d pages=%u (+%u) chunks=%d done=%u complete=%u "
+          "aborted=%u anchors=%u walk=%u ms",
+          spineIndex_, static_cast<unsigned>(progPagesAvailable()), static_cast<unsigned>(r.added), progChunks_,
+          static_cast<unsigned>(progSourceDone_), static_cast<unsigned>(progIdxComplete_),
+          static_cast<unsigned>(r.aborted), static_cast<unsigned>(anchorMap_.size()),
+          static_cast<unsigned>(millis() - walkStartMs));
+  return r;
+}
+
+bool EpubChapterParser::parsePagesProgressive(snapix::unifiedcache::UnifiedCache& cache,
+                                              const std::function<void(std::unique_ptr<Page>)>& onPageComplete,
+                                              const uint16_t maxPages, const AbortCallback& shouldAbort) {
+  if (!ensureProgressiveInit(cache)) {
+    hasMore_ = false;
+    initialized_ = false;
+    return false;
+  }
+  initialized_ = true;
+
+  // Markerize + walk until there is something to emit.  A stored idx already
+  // covers its boundaries; stored chunks are walked (from the last boundary)
+  // before any new chunk is markerized.
+  int guard = 0;
+  while (progEmitCursor_ >= progPagesAvailable() && !progIdxComplete_) {
+    if (shouldAbort && shouldAbort()) break;
+    if (++guard > 64) break;
+    if (progIdxChunks_ >= progChunks_) {
+      // Chunks to fetch in one go: enough for this batch at the pages-per-chunk
+      // rate seen so far (one when unknown — first page as early as possible).
+      int wanted = 1;
+      if (maxPages == 0) {
+        wanted = kProgressiveMaxChunksPerCall;
+      } else if (progChunks_ > 0 && !progIdx_.boundaries.empty()) {
+        const size_t perChunk = std::max<size_t>(1, progIdx_.boundaries.size() / static_cast<size_t>(progChunks_));
+        const size_t need = static_cast<size_t>(progEmitCursor_) + maxPages - progPagesAvailable();
+        wanted = static_cast<int>(std::min<size_t>(kProgressiveMaxChunksPerCall,
+                                                   std::max<size_t>(1, (need + perChunk - 1) / perChunk)));
+      }
+      const int n = markerizeProgressiveChunks(cache, wanted, shouldAbort);
+      if (n < 0) break;                       // ZIP / LittleFS failure — a later call retries
+      if (n == 0 && !progSourceDone_) break;  // nothing stored
+    }
+    const int chunksWalked = progChunks_;
+    const auto r = extendProgressiveIdx(cache, shouldAbort);
+    if (!r.ok || r.aborted) break;
+    progIdxChunks_ = chunksWalked;
+  }
+  pendingStream_.reset();
+
+  uint16_t created = 0;
+  const uint16_t available = progPagesAvailable();
+  const uint16_t firstEmitted = progEmitCursor_;
+  while (progEmitCursor_ < available) {
+    if (maxPages > 0 && created >= maxPages) break;
+    onPageComplete(std::unique_ptr<Page>(new Page));
+    ++progEmitCursor_;
+    ++created;
+  }
+  hasMore_ = progEmitCursor_ < available || !progIdxComplete_;
+  if (!hasMore_) {
+    // Done: a later call (cache rebuild) re-initialises and emits from page 0,
+    // like the one-shot short-circuit does.
+    initialized_ = false;
+    progInit_ = false;
+    progMarkerizer_.reset();
+    renderer_.clearWidthCache();
+  }
+  LOG_INF(TAG,
+          "[CONTENT][EPUB] [STREAM] progressive batch spine=%d emitted=%u..%u avail=%u chunks=%d complete=%u "
+          "hasMore=%u",
+          spineIndex_, static_cast<unsigned>(firstEmitted), static_cast<unsigned>(progEmitCursor_),
+          static_cast<unsigned>(available), progChunks_, static_cast<unsigned>(progIdxComplete_),
+          static_cast<unsigned>(hasMore_));
+  return created > 0 || !hasMore_;
+}
+#endif

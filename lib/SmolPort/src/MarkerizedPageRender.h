@@ -425,6 +425,15 @@ bool deserializePageIndex(const uint8_t* buf, size_t bufSize,
 // source to a known offset and telling the paginator its initial
 // page index + style state.  See `PageBoundarySnapshot` and
 // `MarkerizedRenderResume` doc above.
+//
+// v3.11.13 — `streamComplete = false` marks `readChunk`'s EOF as the end of
+// the markers written SO FAR (progressive markerize), not the chapter's end.
+// The end-of-stream handling is then skipped: the trailing word may continue
+// in the next chunk ("foo" of "foobar", or a word whose hyphenation needs the
+// rest), so committing it could fire a boundary the full stream never has.
+// Every boundary fired before that EOF is final — the walk has no lookahead
+// past the event that fills a page — so a caller can keep them and resume
+// from the last one once more markers exist.
 MarkerizedRenderResult renderMarkerizedPage(
     StreamingPaginator& paginator,
     ChapterReadFn readChunk,
@@ -434,6 +443,11 @@ MarkerizedRenderResult renderMarkerizedPage(
     MarkerizedRenderStats* outStats = nullptr,
     const MarkerizedRenderResume& resume = {},
     const OnPageBoundaryFn& onPageBoundary = {},
-    const OnAnchorPageFn& onAnchorPage = {});
+    const OnAnchorPageFn& onAnchorPage = {},
+    bool streamComplete = true);
+
+// v3.11.13 — resume parameters that continue a page walk from `snap` (the
+// boundary where page snap.pageIndex starts).
+MarkerizedRenderResume resumeFromBoundary(const PageBoundarySnapshot& snap);
 
 }  // namespace snapix::smolport

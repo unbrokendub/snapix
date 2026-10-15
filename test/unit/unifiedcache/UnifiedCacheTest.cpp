@@ -97,6 +97,31 @@ int main() {
   }
 
   {
+    // v3.11.13 — progressive EPUB chapters store marker chunks under kinds
+    // markerChunkKind(k) (0x10 + k) plus a MarkerChunksDone record; a fresh
+    // instance (directory rebuilt from disk) and compaction must keep them.
+    using snapix::unifiedcache::kMaxMarkerChunks;
+    using snapix::unifiedcache::markerChunkKind;
+    {
+      auto cache = UnifiedCache::shared("/cache/chunks");
+      runner.expectTrue(write(cache, Kind::Markers, 3, "whole"), "chunks_seed_whole_frame");
+      runner.expectTrue(write(cache, markerChunkKind(0), 3, "c0"), "chunks_write_first");
+      runner.expectTrue(write(cache, markerChunkKind(1), 3, "c1"), "chunks_write_second");
+      runner.expectTrue(write(cache, markerChunkKind(kMaxMarkerChunks - 1), 3, "last"), "chunks_write_max_kind");
+      runner.expectTrue(write(cache, Kind::MarkerChunksDone, 3, "done"), "chunks_write_done_record");
+    }
+    auto reloaded = UnifiedCache::shared("/cache/chunks");
+    runner.expectEqual("c0", read(reloaded, markerChunkKind(0), 3), "chunk_kind_survives_reload");
+    runner.expectEqual("c1", read(reloaded, markerChunkKind(1), 3), "chunk_kinds_are_distinct");
+    runner.expectEqual("last", read(reloaded, markerChunkKind(kMaxMarkerChunks - 1), 3),
+                       "highest_chunk_kind_survives_reload");
+    runner.expectEqual("done", read(reloaded, Kind::MarkerChunksDone, 3), "done_record_survives_reload");
+    runner.expectEqual("whole", read(reloaded, Kind::Markers, 3), "chunk_kinds_do_not_clobber_markers");
+    runner.expectTrue(reloaded.compact(), "chunks_compaction_succeeds");
+    runner.expectEqual("c1", read(reloaded, markerChunkKind(1), 3), "chunk_kind_survives_compaction");
+  }
+
+  {
     auto cache = UnifiedCache::shared("/cache/rename");
     runner.expectTrue(write(cache, Kind::Markers, 0, "one"),
                       "rename_seed");

@@ -76,7 +76,26 @@ enum class Kind : uint8_t {
   Markers = 1,   // marker stream sidecar (per-spine)
   Idx = 2,       // page boundary index (per-spine, per render config)
   Metrics = 3,   // global page-count cache (key = kGlobalKey)
+  // v3.11.13 — written once a chunked section's last marker chunk is stored
+  // (see markerChunkKind); its presence means the chunk set is complete.
+  MarkerChunksDone = 4,
 };
+
+// v3.11.13 — a big EPUB chapter is markerized progressively: chunk k of section
+// `key` is stored under kind kMarkerChunkKindBase + k (one frame per chunk, so
+// each is written atomically and readable while later chunks are still being
+// produced).  A section has EITHER a whole Markers frame OR chunk frames.
+// Kind values below the base stay reserved for future fixed kinds.
+constexpr uint8_t kMarkerChunkKindBase = 0x10;
+constexpr int kMaxMarkerChunks = 0x100 - kMarkerChunkKindBase;  // 240
+inline Kind markerChunkKind(int chunk) {
+  return static_cast<Kind>(kMarkerChunkKindBase + chunk);
+}
+inline bool isKnownKind(uint8_t kindByte) {
+  return (kindByte >= static_cast<uint8_t>(Kind::Markers) &&
+          kindByte <= static_cast<uint8_t>(Kind::MarkerChunksDone)) ||
+         kindByte >= kMarkerChunkKindBase;
+}
 
 struct DirectoryEntry {
   Kind kind;

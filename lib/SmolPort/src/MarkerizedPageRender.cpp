@@ -343,7 +343,8 @@ MarkerizedRenderResult renderMarkerizedPage(StreamingPaginator& paginator, Chapt
                                               MarkerizedRenderStats* outStats,
                                               const MarkerizedRenderResume& resume,
                                               const OnPageBoundaryFn& onPageBoundary,
-                                              const OnAnchorPageFn& onAnchorPage) {
+                                              const OnAnchorPageFn& onAnchorPage,
+                                              const bool streamComplete) {
   if (!readChunk || chunkBuf == nullptr || chunkBufSize == 0) {
     if (outStats) {
       outStats->pagesAdvancedThrough = 0;
@@ -394,10 +395,13 @@ MarkerizedRenderResult renderMarkerizedPage(StreamingPaginator& paginator, Chapt
   RenderStats rstats{};
   const RenderStatus status =
       chapterRenderer.renderRange(readChunk, chunkBuf, chunkBufSize, shouldAbort, &rstats);
-  // Always finish so the paginator's last partial line gets flushed.
+  // Finish so the paginator's last partial line gets flushed.
   // If the observer asked Stop on the target page boundary, this is
   // a no-op for the inner paginator (its current page is empty).
-  chapterRenderer.finish();
+  // v3.11.13 — not at the end of a still-growing stream (see header).
+  if (streamComplete || status != RenderStatus::EofClean) {
+    chapterRenderer.finish();
+  }
 
   if (outStats) {
     outStats->pagesAdvancedThrough = counter.pagesAdvancedThrough();
@@ -427,6 +431,17 @@ MarkerizedRenderResult renderMarkerizedPage(StreamingPaginator& paginator, Chapt
       return MarkerizedRenderResult::ReadError;
   }
   return MarkerizedRenderResult::ReadError;
+}
+
+MarkerizedRenderResume resumeFromBoundary(const PageBoundarySnapshot& snap) {
+  MarkerizedRenderResume r;
+  r.startPage = snap.pageIndex;
+  r.byteOffset = snap.byteOffset;
+  r.styleBits = snap.styleBits;
+  r.atParagraphStart = snap.atParagraphStart;
+  r.indentDepth = snap.indentDepth;
+  r.centered = snap.centered;
+  return r;
 }
 
 // =============================================================================

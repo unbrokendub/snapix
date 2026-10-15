@@ -203,18 +203,45 @@ uint16_t extendChunkedSectionIdx(
     const char* hyphenLang,
     std::function<std::string(const uint8_t*, size_t)> resolveImage,
     std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)> probeImage) {
-  const snapix::smolport::StreamingPaginatorConfig cfg =
-      makeSectionConfig(renderer, config, mT, mB, mL, mR, hyphenLang);
-  st.configHash = snapix::smolport::computePageIndexConfigHash(cfg, config.fontId, config.fakeBold);
-  st.configHashValid = true;
+  ChunkedIdxWalk walk;
+  walk.idxKey = 0;
+  walk.cfg = makeSectionConfig(renderer, config, mT, mB, mL, mR, hyphenLang);
+  walk.configHash = snapix::smolport::computePageIndexConfigHash(walk.cfg, config.fontId, config.fakeBold);
+  walk.streamComplete = sourceExhausted;
+  // FB2 passes a cacheImage-backed resolver so image heights shift boundaries;
+  // TXT/MD have no inline images → no-op.
+  walk.resolveImage = std::move(resolveImage);
+  walk.probeImage = std::move(probeImage);
 
   // Present Markers keys 0..N as one logical stream so the resume walk spans the
   // chunk boundaries.  At least chunk 0 must exist by the time we're called.
   auto provider = UnifiedCacheChunkProvider::singleSection(cache);
+  {
+    snapix::smolport::ChunkedMarkersReader probe(provider);
+    if (probe.totalSize() == 0) {
+      LOG_ERR(TAG, "[STREAM] extend: no marker chunks present");
+      return 0;
+    }
+  }
+  const ChunkedIdxExtend r = extendChunkedIdx(st, cache, provider, renderer, config, walk);
+  if (!r.ok && st.boundaries.empty()) return 0;
+  return static_cast<uint16_t>(st.boundaries.size() + (sourceExhausted ? 1 : 0));
+}
+
+ChunkedIdxExtend extendChunkedIdx(ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache,
+                                  snapix::smolport::MarkerChunkProvider& provider, GfxRenderer& renderer,
+                                  const RenderConfig& config, const ChunkedIdxWalk& walk) {
+  ChunkedIdxExtend out;
+  st.configHash = walk.configHash;
+  st.configHashValid = true;
+  auto pagesNow = [&]() {
+    return static_cast<uint16_t>(st.boundaries.size() + (out.reachedEnd ? 1 : 0));
+  };
+
   snapix::smolport::ChunkedMarkersReader reader(provider);
-  if (reader.chunkCount() <= 0 || reader.totalSize() == 0) {
-    LOG_ERR(TAG, "[STREAM] extend: no marker chunks present");
-    return 0;
+  if (reader.chunkCount() <= 0) {
+    LOG_ERR(TAG, "[STREAM] extend: no marker chunks present key=%u", static_cast<unsigned>(walk.idxKey));
+    return out;
   }
 
   // Resume from the last (still-incomplete) page boundary so we only measure the
@@ -222,35 +249,26 @@ uint16_t extendChunkedSectionIdx(
   // walks from page 0 / offset 0.
   snapix::smolport::MarkerizedRenderResume resume{};
   if (!st.boundaries.empty()) {
-    const auto& last = st.boundaries.back();
-    resume.startPage = last.pageIndex;
-    resume.byteOffset = last.byteOffset;
-    resume.styleBits = last.styleBits;
-    resume.atParagraphStart = last.atParagraphStart;
-    // v3.10.5 — restore block-level layout context so idx entries appended by
-    // this extend (resuming mid-<blockquote>/<li>/centered block) use the same
-    // wrap width as a continuous walk would; otherwise the extended boundaries
-    // diverge and a word gets duplicated/eaten at those page breaks.
-    resume.indentDepth = last.indentDepth;
-    resume.centered = last.centered;
-    if (!reader.seekGlobal(last.byteOffset)) {
+    // v3.10.5 — the snapshot carries the block-level layout context too
+    // (indentDepth / centered), so boundaries appended by this extend use the
+    // same wrap width as a continuous walk would.
+    resume = snapix::smolport::resumeFromBoundary(st.boundaries.back());
+    if (!reader.seekGlobal(resume.byteOffset)) {
       LOG_ERR(TAG, "[STREAM] extend: seek to resume offset %u failed",
-              static_cast<unsigned>(last.byteOffset));
-      return 0;
+              static_cast<unsigned>(resume.byteOffset));
+      return out;
     }
   }
 
-  // FB2 passes a cacheImage-backed resolver so image heights shift boundaries;
-  // TXT/MD have no inline images → no-op.
   snapix::smolport::ResolveImagePathFn resolveFn =
-      resolveImage ? std::move(resolveImage)
-                   : snapix::smolport::ResolveImagePathFn(
-                         [](const uint8_t*, size_t) -> std::string { return {}; });
+      walk.resolveImage ? walk.resolveImage
+                        : snapix::smolport::ResolveImagePathFn(
+                              [](const uint8_t*, size_t) -> std::string { return {}; });
   snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer, config.fontId, config.fontId,
                                                         /*black=*/true, resolveFn, config.fakeBold,
                                                         config.superSubFontId);
-  adapter.setImageSizeProbe(std::move(probeImage));
-  snapix::smolport::StreamingPaginator paginator(cfg, adapter);
+  adapter.setImageSizeProbe(walk.probeImage);
+  snapix::smolport::StreamingPaginator paginator(walk.cfg, adapter);
 
   // HEAP-allocate the streaming buffer — NOT a 4 KB stack array.  This MEASURE
   // walk runs on the 20 KB ReaderAsync task and, for FB2, descends into JPEG
@@ -263,7 +281,8 @@ uint16_t extendChunkedSectionIdx(
   std::unique_ptr<uint8_t[]> chunkBuf(new (std::nothrow) uint8_t[kChunkBufBytes]);
   if (!chunkBuf) {
     LOG_ERR(TAG, "[STREAM] extend chunkBuf alloc failed");
-    return static_cast<uint16_t>(st.boundaries.size() + (sourceExhausted ? 1 : 0));
+    out.totalPages = pagesNow();
+    return out;
   }
   auto readFn = [&reader](uint8_t* buf, size_t bufSize) -> int { return reader.read(buf, bufSize); };
 
@@ -273,34 +292,45 @@ uint16_t extendChunkedSectionIdx(
   auto captureFn = [&fresh](const snapix::smolport::PageBoundarySnapshot& s) { fresh.push_back(s); };
 
   snapix::smolport::MarkerizedRenderStats stats{};
-  (void)snapix::smolport::renderMarkerizedPage(paginator, readFn, chunkBuf.get(), kChunkBufBytes,
-                                               UINT16_MAX, {}, &stats, resume, captureFn);
+  const auto status = snapix::smolport::renderMarkerizedPage(
+      paginator, readFn, chunkBuf.get(), kChunkBufBytes, UINT16_MAX, walk.shouldAbort, &stats, resume,
+      captureFn, walk.onAnchorPage, walk.streamComplete);
+  chunkBuf.reset();
 
   for (const auto& b : fresh) st.boundaries.push_back(b);
-
-  const uint16_t totalPages =
-      static_cast<uint16_t>(st.boundaries.size() + (sourceExhausted ? 1 : 0));
+  out.added = static_cast<uint16_t>(fresh.size());
+  out.aborted = status == snapix::smolport::MarkerizedRenderResult::Aborted;
+  out.ok = status != snapix::smolport::MarkerizedRenderResult::ReadError;
+  out.reachedEnd = walk.streamComplete && status == snapix::smolport::MarkerizedRenderResult::PageNotFound;
+  out.totalPages = pagesNow();
+  if (!out.ok) {
+    LOG_ERR(TAG, "[STREAM] extend read error key=%u", static_cast<unsigned>(walk.idxKey));
+  }
 
   // Persist the full idx (heap-sized, nothrow → degrade not reboot).  A later
   // open re-uses it; if the write fails the count is still returned and the
   // render path cold-walks.
+  if (fresh.empty() && !st.boundaries.empty() && !out.reachedEnd) return out;
   const size_t needed = snapix::smolport::kPageIndexHeaderBytes +
                         st.boundaries.size() * snapix::smolport::kPageIndexEntryBytes;
   std::unique_ptr<uint8_t[]> serdebuf(new (std::nothrow) uint8_t[needed]);
   if (!serdebuf) {
     LOG_ERR(TAG, "[STREAM] extend idx alloc failed bytes=%zu pages=%u", needed,
-            static_cast<unsigned>(totalPages));
-    return totalPages;
+            static_cast<unsigned>(out.totalPages));
+    return out;
   }
   const size_t wrote = snapix::smolport::serializePageIndex(st.boundaries.data(), st.boundaries.size(),
                                                             st.configHash, serdebuf.get(), needed);
-  if (wrote > 0 && !cache.writeSegment(snapix::unifiedcache::Kind::Idx, 0, serdebuf.get(), wrote)) {
-    LOG_ERR(TAG, "[STREAM] extend idx write failed pages=%u", static_cast<unsigned>(totalPages));
+  if (wrote > 0 && !cache.writeSegment(snapix::unifiedcache::Kind::Idx, walk.idxKey, serdebuf.get(), wrote)) {
+    LOG_ERR(TAG, "[STREAM] extend idx write failed key=%u pages=%u", static_cast<unsigned>(walk.idxKey),
+            static_cast<unsigned>(out.totalPages));
   } else {
-    LOG_INF(TAG, "[STREAM] idx extend pages=%u (+%u) exhausted=%u", static_cast<unsigned>(totalPages),
-            static_cast<unsigned>(fresh.size()), static_cast<unsigned>(sourceExhausted));
+    LOG_INF(TAG, "[STREAM] idx extend key=%u pages=%u (+%u) complete=%u aborted=%u",
+            static_cast<unsigned>(walk.idxKey), static_cast<unsigned>(out.totalPages),
+            static_cast<unsigned>(fresh.size()), static_cast<unsigned>(out.reachedEnd),
+            static_cast<unsigned>(out.aborted));
   }
-  return totalPages;
+  return out;
 }
 
 uint16_t loadChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCachePath,
@@ -327,6 +357,21 @@ uint16_t loadChunkedSectionIdx(ChunkedIdxState& st,
     return 0;  // stale / wrong version / wrong config → caller re-measures
   }
   st.configHash = hash;
+  st.configHashValid = true;
+  return static_cast<uint16_t>(st.boundaries.size());
+}
+
+uint16_t loadChunkedIdx(ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache, uint16_t idxKey,
+                        uint16_t configHash) {
+  st.boundaries.clear();
+  st.configHashValid = false;
+  std::vector<uint8_t> bytes;
+  if (!cache.readSegment(snapix::unifiedcache::Kind::Idx, idxKey, bytes) || bytes.empty()) return 0;
+  if (!snapix::smolport::deserializePageIndex(bytes.data(), bytes.size(), configHash, st.boundaries)) {
+    st.boundaries.clear();
+    return 0;  // stale / wrong version / wrong config → caller re-measures
+  }
+  st.configHash = configHash;
   st.configHashValid = true;
   return static_cast<uint16_t>(st.boundaries.size());
 }

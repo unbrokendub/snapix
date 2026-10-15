@@ -15,6 +15,7 @@
 // mismatches and every render rebuilds it.
 // =============================================================================
 
+#include <ChunkedMarkersReader.h>  // MarkerChunkProvider
 #include <MarkerizedPageRender.h>  // PageBoundarySnapshot
 
 #include <RenderConfig.h>
@@ -97,6 +98,40 @@ uint16_t extendChunkedSectionIdx(
     std::function<std::string(const uint8_t*, size_t)> resolveImage = {},
     std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)> probeImage = {});
 
+// v3.11.13 — the incremental-idx core behind extendChunkedSectionIdx, for any
+// section whose markers arrive in chunks (EPUB chapters use their own idx key,
+// paginator config, image hooks and anchor capture).
+struct ChunkedIdxWalk {
+  uint16_t idxKey = 0;  // Idx segment key the grown idx is written under
+  snapix::smolport::StreamingPaginatorConfig cfg{};
+  uint16_t configHash = 0;
+  // The provider's chunks end at the document's end: the trailing partial page
+  // counts and the walk flushes the last word.  False while more chunks will
+  // follow — see renderMarkerizedPage(streamComplete).
+  bool streamComplete = false;
+  std::function<std::string(const uint8_t*, size_t)> resolveImage;
+  std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)> probeImage;
+  // Anchors met by this walk; it starts at the last boundary's page, so the
+  // caller drops anchors it recorded for pages >= that page beforehand.
+  snapix::smolport::OnAnchorPageFn onAnchorPage;
+  std::function<bool()> shouldAbort;
+};
+
+struct ChunkedIdxExtend {
+  uint16_t totalPages = 0;  // boundaries + (reachedEnd ? 1 : 0)
+  uint16_t added = 0;       // boundaries appended by this walk
+  bool reachedEnd = false;  // streamComplete and the walk got to the end
+  bool aborted = false;     // shouldAbort fired (boundaries so far are kept)
+  bool ok = false;          // false: no markers / read error / alloc failure
+};
+
+// Resume from st.boundaries.back() over the provider's chunks, append the new
+// boundaries and persist the whole idx under walk.idxKey.  Boundaries found
+// before an abort are final and kept.
+ChunkedIdxExtend extendChunkedIdx(ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache,
+                                  snapix::smolport::MarkerChunkProvider& provider, GfxRenderer& renderer,
+                                  const RenderConfig& config, const ChunkedIdxWalk& walk);
+
 // Load the CURRENT (version + configHash matching) idx into `st` so a cold
 // (post-reboot) parser skips re-measuring chunks it already indexed.  Returns
 // the number of boundaries loaded, or 0 if no current idx exists (caller then
@@ -110,5 +145,8 @@ uint16_t loadChunkedSectionIdx(ChunkedIdxState& st,
                                GfxRenderer& renderer, const RenderConfig& config, int marginTop,
                                int marginBottom, int marginLeft, int marginRight,
                                const char* hyphenLang);
+// v3.11.13 — same for an explicit idx key + config hash (EPUB chapters).
+uint16_t loadChunkedIdx(ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache, uint16_t idxKey,
+                        uint16_t configHash);
 
 }  // namespace snapix::pagecache

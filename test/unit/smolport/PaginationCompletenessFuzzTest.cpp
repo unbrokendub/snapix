@@ -40,6 +40,11 @@
 //      path A drew for page N.
 //   BND resume-captured next-page boundary must equal the idx walk's boundary
 //      for that page (the divergence that causes seams to drop/duplicate).
+//   D  v3.11.13 progressive idx: the marker stream grows in random byte
+//      prefixes (cut mid-word / mid-marker / mid-UTF-8, as chunk segments end);
+//      each step resumes from the last boundary and walks the prefix without the
+//      end-of-stream flush (streamComplete=false) until the stream is complete.
+//      Boundaries AND anchor pages must equal the continuous walk's.
 //
 // Usage: PaginationCompletenessFuzzTest [chaptersPerConfig] [verbose=0|1]
 // =============================================================================
@@ -355,8 +360,60 @@ bool sameSnap(const PageBoundarySnapshot& x, const PageBoundarySnapshot& y) {
 
 struct RunResult {
   bool skipped = false;
-  bool okA = true, okB = true, okC = true, okBnd = true;
+  bool okA = true, okB = true, okC = true, okBnd = true, okD = true;
 };
+
+using AnchorList = std::vector<std::pair<std::string, uint16_t>>;
+
+// Continuous walk capturing boundaries + anchor pages (EpubChapterParser R4.c).
+void continuousWalk(const StreamingPaginatorConfig& cfg, const std::vector<uint8_t>& m, uint32_t seed,
+                    std::vector<PageBoundarySnapshot>& caps, AnchorList& anchors) {
+  RecordingRenderer rr;
+  StreamingPaginator pag(cfg, rr);
+  uint8_t buf[256];
+  renderMarkerizedPage(
+      pag, makeReader(m, 0, seed, 97), buf, sizeof(buf), UINT16_MAX, {}, nullptr, {},
+      [&](const PageBoundarySnapshot& s) { caps.push_back(s); },
+      [&](const uint8_t* id, uint16_t len, uint16_t page) {
+        anchors.emplace_back(std::string(reinterpret_cast<const char*>(id), len), page);
+      });
+}
+
+// Progressive walk over growing prefixes (EpubChapterParser::extendProgressiveIdx).
+void progressiveWalk(const StreamingPaginatorConfig& cfg, const std::vector<uint8_t>& m, uint32_t seed,
+                     std::vector<PageBoundarySnapshot>& caps, AnchorList& anchors) {
+  std::mt19937 rng(seed);
+  // Dense cuts (a stream grown a few dozen bytes at a time) so prefix ends
+  // regularly land on the last word of a full page.
+  std::vector<size_t> ends;
+  if (m.size() > 1) {
+    const size_t step = 16 + rng() % 400;
+    for (size_t at = 1 + rng() % step; at < m.size(); at += 1 + rng() % step) ends.push_back(at);
+  }
+  ends.push_back(m.size());
+  for (size_t step = 0; step < ends.size(); ++step) {
+    const bool complete = ends[step] == m.size();
+    const std::vector<uint8_t> prefix(m.begin(), m.begin() + static_cast<std::ptrdiff_t>(ends[step]));
+    MarkerizedRenderResume resume;
+    if (!caps.empty()) resume = resumeFromBoundary(caps.back());
+    const uint16_t resumePage = caps.empty() ? 0 : caps.back().pageIndex;
+    anchors.erase(std::remove_if(anchors.begin(), anchors.end(),
+                                 [resumePage](const AnchorList::value_type& a) { return a.second >= resumePage; }),
+                  anchors.end());
+    RecordingRenderer rr;
+    StreamingPaginator pag(cfg, rr);
+    uint8_t buf[256];
+    std::vector<PageBoundarySnapshot> fresh;
+    renderMarkerizedPage(
+        pag, makeReader(prefix, caps.empty() ? 0 : caps.back().byteOffset, seed ^ static_cast<uint32_t>(step), 89),
+        buf, sizeof(buf), UINT16_MAX, {}, nullptr, resume, [&](const PageBoundarySnapshot& s) { fresh.push_back(s); },
+        [&](const uint8_t* id, uint16_t len, uint16_t page) {
+          anchors.emplace_back(std::string(reinterpret_cast<const char*>(id), len), page);
+        },
+        complete);
+    caps.insert(caps.end(), fresh.begin(), fresh.end());
+  }
+}
 
 RunResult runOne(const StreamingPaginatorConfig& cfg, const std::string& html, uint32_t seed, bool hyphen,
                  Category* cats, const char* cfgName) {
@@ -438,6 +495,28 @@ RunResult runOne(const StreamingPaginatorConfig& cfg, const std::string& html, u
         ++c.printed;
         std::fprintf(stderr, "[B] %s seed=%u\n", cfgName, seed);
         describeDiff("B", ref.toks, flatB, hyphen);
+      }
+    }
+  }
+
+  // ---- Path D: progressive idx over growing prefixes == continuous walk. ----
+  {
+    std::vector<PageBoundarySnapshot> refCaps, gotCaps;
+    AnchorList refAnchors, gotAnchors;
+    continuousWalk(cfg, m, seed ^ 0xF6u, refCaps, refAnchors);
+    progressiveWalk(cfg, m, seed ^ 0x17u, gotCaps, gotAnchors);
+    bool same = refCaps.size() == gotCaps.size() && refAnchors == gotAnchors;
+    size_t firstBad = 0;
+    while (same && firstBad < refCaps.size() && sameSnap(refCaps[firstBad], gotCaps[firstBad])) ++firstBad;
+    if (same && firstBad < refCaps.size()) same = false;
+    if (!same) {
+      res.okD = false;
+      Category& c = cats[4];
+      if (++c.failures, c.printed < 4 || g_verbose) {
+        ++c.printed;
+        std::fprintf(stderr, "[D] %s seed=%u boundaries ref=%zu got=%zu anchors ref=%zu got=%zu firstBad=%zu\n",
+                     cfgName, seed, refCaps.size(), gotCaps.size(), refAnchors.size(), gotAnchors.size(),
+                     firstBad);
       }
     }
   }
@@ -600,8 +679,8 @@ int main(int argc, char** argv) {
 
   int total = 0, skipped = 0;
   for (const auto& sc : scenarios) {
-    Category cats[4] = {{"A device idx+resume"}, {"B sequential chain"}, {"C skip-to-target"},
-                        {"BND boundary agreement"}};
+    Category cats[5] = {{"A device idx+resume"}, {"B sequential chain"}, {"C skip-to-target"},
+                        {"BND boundary agreement"}, {"D progressive idx"}};
     int ran = 0;
     for (int i = 0; i < perConfig; ++i) {
       const uint32_t seed = 0x9E3779B9u * static_cast<uint32_t>(i + 1) + static_cast<uint32_t>(sc.cfg.pageWidth);
@@ -618,8 +697,8 @@ int main(int argc, char** argv) {
       }
       ++ran;
     }
-    std::fprintf(stderr, "== %-14s chapters=%d  A=%d  B=%d  C=%d  BND=%d failures\n", sc.name, ran,
-                 cats[0].failures, cats[1].failures, cats[2].failures, cats[3].failures);
+    std::fprintf(stderr, "== %-14s chapters=%d  A=%d  B=%d  C=%d  BND=%d  D=%d failures\n", sc.name, ran,
+                 cats[0].failures, cats[1].failures, cats[2].failures, cats[3].failures, cats[4].failures);
     for (const auto& c : cats) {
       runner.expectTrue(c.failures == 0, (std::string(sc.name) + ": " + c.name).c_str());
     }

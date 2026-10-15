@@ -2924,7 +2924,41 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           // MEASURE-only walk from scratch.
           if (streamOffsetCacheSpine_ != currentSpineIndex_) {
             // Persist outgoing spine's cache (R4.a save side).
+            // v3.11.13 — never replace a LONGER stored idx with this render's
+            // copy.  The copy was loaded on entering the spine; a progressive
+            // chapter's parser keeps extending the stored idx in the background,
+            // and overwriting it with the shorter copy truncated the chapter's
+            // page count on its next build.
+            bool storedIdxCoversCache = false;
             if (streamOffsetCacheSpine_ >= 0 && !streamOffsetCache_.empty() &&
+                !streamOffsetCacheBookPath_.empty() && streamOffsetCacheKey_ >= 0) {
+              // Same book (the usual case): reuse the render's directory snapshot.
+              std::unique_ptr<snapix::unifiedcache::UnifiedCache> otherBook;
+              snapix::unifiedcache::UnifiedCache* idxCache = &ucache;
+              if (streamOffsetCacheBookPath_ != bookCachePath) {
+                otherBook.reset(new snapix::unifiedcache::UnifiedCache(streamOffsetCacheBookPath_));
+                idxCache = otherBook.get();
+              }
+              File idxF;
+              size_t idxSize = 0;
+              if (idxCache->openSegmentReader(snapix::unifiedcache::Kind::Idx,
+                                              static_cast<uint16_t>(streamOffsetCacheKey_), idxF, &idxSize)) {
+                uint8_t h[snapix::smolport::kPageIndexHeaderBytes] = {};
+                if (idxSize >= sizeof(h) && idxF.read(h, sizeof(h)) == static_cast<int>(sizeof(h))) {
+                  const uint32_t magic = static_cast<uint32_t>(h[0]) | (static_cast<uint32_t>(h[1]) << 8) |
+                                         (static_cast<uint32_t>(h[2]) << 16) | (static_cast<uint32_t>(h[3]) << 24);
+                  const uint16_t ver = static_cast<uint16_t>(h[4] | (h[5] << 8));
+                  const uint16_t hash = static_cast<uint16_t>(h[6] | (h[7] << 8));
+                  const uint16_t count = static_cast<uint16_t>(h[8] | (h[9] << 8));
+                  storedIdxCoversCache = magic == snapix::smolport::kPageIndexMagic &&
+                                         ver == snapix::smolport::kPageIndexVersion &&
+                                         hash == streamOffsetCacheConfigHash_ &&
+                                         count >= streamOffsetCache_.size();
+                }
+                idxF.close();
+              }
+            }
+            if (!storedIdxCoversCache && streamOffsetCacheSpine_ >= 0 && !streamOffsetCache_.empty() &&
                 !streamOffsetCacheBookPath_.empty() && streamOffsetCacheKey_ >= 0) {
               const uint16_t prevHash = streamOffsetCacheConfigHash_;
               const size_t needed =

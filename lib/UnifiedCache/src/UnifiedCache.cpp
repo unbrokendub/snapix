@@ -258,8 +258,7 @@ bool UnifiedCache::loadDirectory() {
       needsHealAtCursor = true;
       break;
     }
-    if (kindByte < static_cast<uint8_t>(Kind::Markers) ||
-        kindByte > static_cast<uint8_t>(Kind::Metrics)) {
+    if (!isKnownKind(kindByte)) {
       // Defensive: unknown kind, skip.
       cursor += kFrameHeaderSize + size;
       continue;
