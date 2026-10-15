@@ -320,6 +320,34 @@ class StreamingPaginator : public MarkerObserver {
   // (for the "page filled by cursor advance, no carry word" case).
   uint16_t carryWordLen() const { return carryWordLen_; }
 
+  // v3.11.12 — true when a word is carried to the next page, whether it sits
+  // in the inline carry slot or (when longer than that slot) at the head of the
+  // spillover buffer.  The page-boundary snapshot must use
+  // carryStartByteOffset() whenever this is true.
+  bool hasCarry() const { return carryWordLen_ > 0 || carryInSpillover_; }
+
+  // v3.11.12 — an image that did not fit was stashed for the next page.  The
+  // page-boundary snapshot must point at the image marker, not past it, or a
+  // seek-resume render of the next page silently skips the image.
+  bool hasPendingImage() const { return pendingImagePathLen_ > 0; }
+
+  // v3.11.12 — the page ended at a marker whose content was DEFERRED to the
+  // next page (an image, or a scene-break ornament that didn't fit).  The
+  // boundary must point at that marker so a seek-resume render re-reads it.
+  bool hasDeferredMarker() const { return pendingImagePathLen_ > 0 || pendingThematic_; }
+
+  // v3.11.12 — FLUSH-THEN-ROLL hook.  Commits any buffered partial word under
+  // the CURRENT style/indent/paragraph state, exactly as every non-text event
+  // handler would do first.  PageCountingObserver calls this BEFORE dispatching
+  // a non-text marker so that, if committing the word fills the page, the page
+  // is rolled first and the marker is applied on the NEW page after the carried
+  // word — the same order a seek-resume render produces by re-reading the
+  // partial word and then the marker.  (Pre-fix the handler kept applying the
+  // marker to the full page: a paragraph break was silently deleted from the
+  // continuous idx walk, a style toggle leaked onto the carried word, … and the
+  // idx then disagreed with the rendered pages, dropping text at the seams.)
+  void flushPendingWordForEvent() { flushPartWord(); }
+
   // Accessor for the partial-word buffer size.  Used by external observers
   // (PageCountingObserver) to detect state transitions across event
   // boundaries.  Exposed publicly only for diagnostic / accounting use;
@@ -451,10 +479,22 @@ class StreamingPaginator : public MarkerObserver {
   // flush the line WITHOUT it and stash it here.  At the start of the
   // next line (next page if page-full), we re-emit it.  Empty when
   // textLen == 0.
-  uint8_t  carryWordText_[64];   // most words fit easily; oversized → presplit
+  uint8_t  carryWordText_[64];   // most words fit easily; longer → carryInSpillover_
   uint16_t carryWordLen_;
   uint16_t carryWordWidth_;
   uint8_t  carryWordStyle_;
+  // v3.11.12 — a carried word longer than carryWordText_ used to be DROPPED
+  // (lost text at that page boundary: long URLs, long compounds, nbsp-joined
+  // groups).  It now travels at the head of the heap-backed spillover buffer
+  // and is laid out by the spillover replay on the next page.
+  bool     carryInSpillover_ = false;
+  // v3.11.12 — the inline carry came from flushPartWord(setContinuation=true)
+  // (a partial word cut by an inline marker, e.g. хо|<b>ро</b>шо).  After the
+  // carry is re-emitted on the next page the following word must still glue to
+  // it, as it does when a seek-resume render re-reads the partial word.
+  bool     carryGlueNext_ = false;
+  // v3.11.12 — a scene break deferred to the next page (ornament didn't fit).
+  bool     pendingThematic_ = false;
 
   // v2.0.133 — partial word buffer for cross-call assembly.
   //
@@ -487,9 +527,25 @@ class StreamingPaginator : public MarkerObserver {
   //   hyphenated URLs.  On overflow we flush as-is (truncating a single
   //   pathologically long word) rather than discarding — caller's
   //   reader handles the rest as a new word on the next iteration.
+  //   v3.11.12 — a word longer than the inline buffer is no longer cut at
+  //   the 128-byte mark: the partial migrates to a geometrically growing heap
+  //   buffer (up to kPartWordMaxCapacity).  Pre-fix the cut position depended
+  //   on where the READ CHUNK started, so the idx walk and a seek-resume render
+  //   (different start offsets) segmented the same long token differently,
+  //   laid it out differently and broke pages differently.  Only pathological
+  //   tokens beyond the max still take the truncate-and-continue path.
   static constexpr size_t kPartWordCapacity = 128;
+  static constexpr size_t kPartWordMaxCapacity = 2048;
   uint8_t  partWordBuf_[kPartWordCapacity];
   uint16_t partWordLen_ = 0;
+  std::unique_ptr<uint8_t[]> partWordHeap_;
+  size_t   partWordHeapCap_ = 0;
+  bool     partWordOnHeap_ = false;
+  uint8_t* partWordData() { return partWordOnHeap_ ? partWordHeap_.get() : partWordBuf_; }
+  // Append up to `n` bytes to the partial word, growing onto the heap past the
+  // inline capacity.  Returns the number of bytes actually appended (less than
+  // `n` only at kPartWordMaxCapacity or on allocation failure).
+  size_t partWordAppend(const uint8_t* p, size_t n);
 
   // v2.0.135 — inline-style-toggle continuation flag.
   //
@@ -655,6 +711,18 @@ class StreamingPaginator : public MarkerObserver {
   // Default 0 keeps the function callable from sites that don't track
   // source offsets (unit tests using raw `feedText`).
   bool tryAddWord(const uint8_t* word, size_t len, uint32_t srcOffset = 0);
+
+  // v3.11.12 — stash `word` as the next page's first word.  Inline slot when it
+  // fits, otherwise the head of the spillover buffer (never dropped).
+  void captureCarry(const uint8_t* word, size_t len, uint16_t width, uint32_t srcOffset);
+
+  // Defer an image (with its resolved, already-scaled size) to the next page.
+  void stashPendingImage(const uint8_t* path, uint16_t len, uint16_t w, uint16_t h);
+
+  // v3.11.12 — largest UTF-8-codepoint-aligned prefix of `word` whose width is
+  // <= `avail` (and <= kLineTextCapacity bytes).  Returns at least one whole
+  // codepoint so an emergency break always makes progress.
+  size_t fitPrefixBytes(const uint8_t* word, size_t len, uint16_t avail);
 
   // v3.3.0 — try to hyphenate an overflowing word: draw "pre-" on the current
   // line and let the remainder flow onto the next line.  Returns true if the

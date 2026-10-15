@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 #include <string>
 
 namespace snapix::smolport {
@@ -33,8 +34,14 @@ void StreamingPaginator::resetForChapter() {
   carryWordLen_ = 0;
   carryWordWidth_ = 0;
   carryWordStyle_ = 0;
+  carryInSpillover_ = false;  // v3.11.12
+  carryGlueNext_ = false;     // v3.11.12
+  pendingThematic_ = false;   // v3.11.12
   // v2.0.133 — drop any partial-word buffer from a previous chapter.
   partWordLen_ = 0;
+  partWordOnHeap_ = false;  // v3.11.12 — release the long-word heap buffer
+  partWordHeap_.reset();
+  partWordHeapCap_ = 0;
   // v2.0.135 — clear inline-style-toggle continuation flag.
   partWordContinuation_ = false;
   // v2.0.137 — drop any spillover bytes from a previous chapter.
@@ -106,7 +113,35 @@ void StreamingPaginator::resetForNextPage() {
     pendingImageWidth_ = 0;
     pendingImageHeight_ = 0;
   }
+  // v3.11.12 — a scene break deferred because its ornament didn't fit at the
+  // previous page's bottom opens this page (same layout as a seek-resume render
+  // that starts at the <hr> marker).
+  if (pendingThematic_) {
+    pendingThematic_ = false;
+    (void)onThematicBreak();
+  }
+  // v3.11.12 — whatever filled this page so far, nothing more may be laid out
+  // on it: the carry and spillover stay pending and PageCountingObserver's
+  // cascade roll replays them on the next page, in source order.
+  if (pageFull_) return;
+  // A spillover-borne carry (word longer than the inline slot) is simply the
+  // head of the spillover replayed below; clear the flag BEFORE emitting so a
+  // re-carry made while placing this page's words can set it again.
+  carryInSpillover_ = false;
   emitCarryWord();
+  // v3.11.12 — if the carry was a partial word cut by an inline marker, the
+  // next word must glue to it (seek-resume re-reads the partial and the
+  // marker's flushPartWord(true) raises the same flag).  Only once the carry is
+  // actually placed; a re-carry keeps the pending glue.
+  if (carryWordLen_ == 0 && !carryInSpillover_) {
+    partWordContinuation_ = carryGlueNext_;
+    carryGlueNext_ = false;
+  }
+  // v3.11.12 — an over-long carried word can now fill a whole fresh page by
+  // itself (emergency line breaks) and re-carry its tail.  The spillover comes
+  // AFTER that tail in source, so it must not be replayed onto this full page
+  // (pre-fix the replay's own carry OVERWROTE the pending tail → lost text).
+  if (pageFull_) return;
   // v2.0.137 — process spillover bytes from previous page.  These are
   // bytes that came AFTER the carry word in the same onText call but
   // couldn't be delivered because we'd already returned Stop.  Run
@@ -177,7 +212,14 @@ ObserverStatus StreamingPaginator::processTextRun(const uint8_t* text, size_t le
   // normal word break between the previously-flushed partial (if any)
   // and the upcoming word.  Drop any inline-style continuation flag
   // raised earlier; the next word gets normal leading-space treatment.
-  if (isAsciiSpace(text[0])) {
+  // v3.11.12 — only when no partial word is pending.  A pending partial IS the
+  // word the continuation flag glues (хо|<b>ро</b>|шо␣: "шо" may be buffered at
+  // the end of one read and the space arrive at the start of the next); its
+  // submission below consumes the flag.  Pre-fix the reset ran first, so the
+  // glue depended on where the READ CHUNK boundary fell — the idx walk and a
+  // seek-resume render (different start offsets → different chunk boundaries)
+  // then laid the word out with different widths and broke pages differently.
+  if (partWordLen_ == 0 && isAsciiSpace(text[0])) {
     partWordContinuation_ = false;
   }
 
@@ -195,9 +237,12 @@ ObserverStatus StreamingPaginator::processTextRun(const uint8_t* text, size_t le
   // rendering as latin-1 fallback glyphs (ÿ°/ÿÿ etc.).
   size_t i = 0;
   if (partWordLen_ > 0) {
-    while (i < len && !isAsciiSpace(text[i]) && partWordLen_ < kPartWordCapacity) {
-      partWordBuf_[partWordLen_++] = text[i++];
-    }
+    // v3.11.12 — append the whole non-space run; the partial grows onto the
+    // heap past the inline capacity (see partWordAppend) so the word is never
+    // cut at a chunk-dependent position.
+    size_t runEnd = i;
+    while (runEnd < len && !isAsciiSpace(text[runEnd])) ++runEnd;
+    i += partWordAppend(text + i, runEnd - i);
     if (i < len && isAsciiSpace(text[i])) {
       // Partial assembled into a complete word.  Submit it; whitespace
       // at i will be consumed by the main loop below.
@@ -205,7 +250,7 @@ ObserverStatus StreamingPaginator::processTextRun(const uint8_t* text, size_t le
       // naturally separates from the next word, no continuation glue.
       // v2.0.140: pass partialStartByteOffset_ so a carry from this
       // partial gets the correct source position for `.idx`.
-      if (!tryAddWord(partWordBuf_, partWordLen_, partialStartByteOffset_)) {
+      if (!tryAddWord(partWordData(), partWordLen_, partialStartByteOffset_)) {
         partWordLen_ = 0;
         partialStartByteOffset_ = 0;
         // v2.0.137 — carry took the partial word; spillover gets bytes
@@ -230,9 +275,13 @@ ObserverStatus StreamingPaginator::processTextRun(const uint8_t* text, size_t le
       // v2.0.135: source has NO whitespace between the truncated half
       // and the upcoming bytes — set continuation so the next slot
       // glues without spaceWidth.
-      if (!tryAddWord(partWordBuf_, partWordLen_, partialStartByteOffset_)) {
+      if (!tryAddWord(partWordData(), partWordLen_, partialStartByteOffset_)) {
         partWordLen_ = 0;
         partialStartByteOffset_ = 0;
+        // v3.11.12 — the bytes at `i` continue the same word (no whitespace):
+        // an inline carry must glue to them on the next page.  (A spillover
+        // carry is already contiguous with them, so it glues naturally.)
+        if (carryWordLen_ > 0) carryGlueNext_ = true;
         // v2.0.141 — source position of text[i] = currentSourceOffset_ + i.
         saveSpillover(text + i, len - i, currentSourceOffset_ + i);
         return ObserverStatus::Stop;
@@ -267,9 +316,7 @@ ObserverStatus StreamingPaginator::processTextRun(const uint8_t* text, size_t le
     if (i >= len) {
       // Word extends to the end of this text run — it may be incomplete
       // (continued in the next onText call).  Buffer instead of submit.
-      if (wordLen <= kPartWordCapacity) {
-        std::memcpy(partWordBuf_, text + wordStart, wordLen);
-        partWordLen_ = static_cast<uint16_t>(wordLen);
+      if (partWordAppend(text + wordStart, wordLen) == wordLen) {
         // v2.0.140 — record absolute source position of this partial's
         // first byte; will be used as carryStartByteOffset_ if the
         // partial later gets carried via flushPartWord from a
@@ -277,8 +324,9 @@ ObserverStatus StreamingPaginator::processTextRun(const uint8_t* text, size_t le
         partialStartByteOffset_ = currentSourceOffset_ + wordStart;
         return ObserverStatus::Continue;
       }
-      // Oversized: submit as-is.  Buffer would truncate so prefer the
-      // renderer's clipping over data loss.  Very rare in real text.
+      // Oversized (beyond kPartWordMaxCapacity, or the heap grow failed):
+      // submit as-is rather than lose bytes.  Pathological in real text.
+      partWordLen_ = 0;
       if (!tryAddWord(text + wordStart, wordLen, currentSourceOffset_ + wordStart)) {
         // v2.0.137 — carry took this word; no bytes left after it
         // (i >= len), so spillover stays empty.
@@ -360,6 +408,7 @@ ObserverStatus StreamingPaginator::onPageBreak() {
 ObserverStatus StreamingPaginator::onThematicBreak() {
   if (pageFull_) return ObserverStatus::Stop;
   flushPartWord();  // v2.0.133
+  const bool freshPage = cursorY_ == cfg_.marginTop && !lineHasContent_ && lineWordCount_ == 0;
   flushLine();
 
   // v3.2.0 — draw a centered scene-break ornament ("* * *") on its own line
@@ -371,6 +420,17 @@ ObserverStatus StreamingPaginator::onThematicBreak() {
   // drawWord is gated on drawSuppressed_ — so .idx page boundaries match
   // what the render pass produces.
   const uint16_t bottom = static_cast<uint16_t>(cfg_.pageHeight - cfg_.marginBottom);
+  // v3.11.12 — the ornament is what keeps a scene break visible exactly where
+  // a blank line would vanish: at a page boundary.  Pre-fix, an ornament that
+  // didn't fit at the bottom was silently SKIPPED, so scene changes falling on
+  // a page turn became invisible.  Defer the whole break to the top of the
+  // next page instead (resetForNextPage re-runs it there; the page boundary
+  // points AT the <hr> marker so a seek-resume render does the same).
+  if (!freshPage && cursorY_ + cfg_.paragraphSpacing + cfg_.bodyLineHeight > bottom) {
+    pendingThematic_ = true;
+    pageFull_ = true;
+    return ObserverStatus::Stop;
+  }
   cursorY_ = static_cast<uint16_t>(cursorY_ + cfg_.paragraphSpacing);  // air above
   if (cursorY_ + cfg_.bodyLineHeight <= bottom) {
     if (!drawSuppressed_) {
@@ -555,47 +615,53 @@ ObserverStatus StreamingPaginator::onImageRef(const uint8_t* path, uint16_t len)
 
   // Flush any in-progress text so the image draws on a fresh line.
   flushPartWord();
-  if (lineWordCount_ > 0 || lineHasContent_) {
-    flushLine(/*justify=*/false);
-    if (pageFull_) {
-      // Line break filled the page → stash image for next page.
-      const uint16_t toCopy = (len < kImagePathCapacity - 1)
-                                  ? len
-                                  : static_cast<uint16_t>(kImagePathCapacity - 1);
-      std::memcpy(pendingImagePath_, path, toCopy);
-      pendingImagePathLen_ = toCopy;
-      pendingImagePath_[toCopy] = '\0';
-      return ObserverStatus::Stop;
-    }
-  }
 
   // Resolve image dimensions via the renderer.  Default no-op renderer
   // returns false → image is silently skipped (preserves pre-v145
   // behaviour for renderers that don't know about images).
+  // v3.11.12 — resolve BEFORE the line flush so an image deferred because the
+  // flush filled the page still carries its size.  Pre-fix that branch stashed
+  // only the path (height 0) and resetForNextPage then silently DROPPED it.
   uint16_t imgW = 0, imgH = 0;
-  const bool resolved = renderer_.resolveImageSize(path, len, &imgW, &imgH);
-  if (!resolved || imgW == 0 || imgH == 0) {
-    return ObserverStatus::Continue;
+  const bool resolved =
+      renderer_.resolveImageSize(path, len, &imgW, &imgH) && imgW > 0 && imgH > 0;
+  if (resolved) {
+    // v3.11.12 — an image taller than an EMPTY page's content area could never
+    // be placed: it was deferred once and then silently DROPPED.  Scale it
+    // (aspect-preserving) to the full content height so it always fits a
+    // fresh page; the device drawBitmap scales-to-fit within the box.
+    const uint16_t contentH =
+        static_cast<uint16_t>(cfg_.pageHeight - cfg_.marginBottom - cfg_.marginTop);
+    if (contentH > 0 && imgH > contentH) {
+      const uint32_t w = static_cast<uint32_t>(imgW) * contentH / imgH;
+      imgW = static_cast<uint16_t>(w > 0 ? w : 1);
+      imgH = contentH;
+    }
+    // Clamp width to the working area (renderer should already scale,
+    // but defense in depth — clip if oversized).
+    const uint16_t maxW = static_cast<uint16_t>(cfg_.pageWidth -
+                                                  cfg_.marginLeft -
+                                                  cfg_.marginRight);
+    if (imgW > maxW) imgW = maxW;
   }
 
-  // Clamp width to the working area (renderer should already scale,
-  // but defense in depth — clip if oversized).
-  const uint16_t maxW = static_cast<uint16_t>(cfg_.pageWidth -
-                                                cfg_.marginLeft -
-                                                cfg_.marginRight);
-  if (imgW > maxW) imgW = maxW;
+  if (lineWordCount_ > 0 || lineHasContent_) {
+    flushLine(/*justify=*/false);
+    if (pageFull_) {
+      // Line break filled the page → stash image (with its size) for next page.
+      if (resolved) stashPendingImage(path, len, imgW, imgH);
+      return ObserverStatus::Stop;
+    }
+  }
+
+  if (!resolved) {
+    return ObserverStatus::Continue;
+  }
 
   const uint16_t verticalAvail = verticalRemaining();
   if (imgH > verticalAvail) {
     // Image doesn't fit on this page → stash for next page and stop.
-    const uint16_t toCopy = (len < kImagePathCapacity - 1)
-                                ? len
-                                : static_cast<uint16_t>(kImagePathCapacity - 1);
-    std::memcpy(pendingImagePath_, path, toCopy);
-    pendingImagePathLen_ = toCopy;
-    pendingImagePath_[toCopy] = '\0';
-    pendingImageWidth_ = imgW;
-    pendingImageHeight_ = imgH;
+    stashPendingImage(path, len, imgW, imgH);
     pageFull_ = true;
     return ObserverStatus::Stop;
   }
@@ -618,6 +684,17 @@ ObserverStatus StreamingPaginator::onImageRef(const uint8_t* path, uint16_t len)
     pageFull_ = true;
   }
   return pageFull_ ? ObserverStatus::Stop : ObserverStatus::Continue;
+}
+
+void StreamingPaginator::stashPendingImage(const uint8_t* path, uint16_t len, uint16_t w,
+                                           uint16_t h) {
+  const uint16_t toCopy =
+      (len < kImagePathCapacity - 1) ? len : static_cast<uint16_t>(kImagePathCapacity - 1);
+  std::memcpy(pendingImagePath_, path, toCopy);
+  pendingImagePathLen_ = toCopy;
+  pendingImagePath_[toCopy] = '\0';
+  pendingImageWidth_ = w;
+  pendingImageHeight_ = h;
 }
 
 ObserverStatus StreamingPaginator::onStreamEnd() {
@@ -790,21 +867,9 @@ bool StreamingPaginator::tryAddWord(const uint8_t* word, size_t len, uint32_t sr
     flushLine(/*justify=*/true);
     if (pageFull_) {
       // Page filled by the flush — stash the word for the next page.
-      if (len <= sizeof(carryWordText_)) {
-        std::memcpy(carryWordText_, word, len);
-        carryWordLen_ = static_cast<uint16_t>(len);
-        carryWordWidth_ = wordWidth;
-        carryWordStyle_ = styleBits_;
-        // v2.0.140 — record where the carry word begins in source.
-        // PageCountingObserver reads this for the `.idx` byteOffset.
-        carryStartByteOffset_ = srcOffset;
-      } else {
-        // Too big to carry — drop.  R3 hyphenation will handle this case
-        // by splitting the word; until then, words >64 bytes are rare in
-        // typical text and dropping them is preferable to OOM.
-        carryWordLen_ = 0;
-        carryStartByteOffset_ = 0;
-      }
+      // v3.11.12 — captureCarry never drops: a word longer than the inline
+      // slot rides the spillover buffer (pre-fix it was silently DROPPED).
+      captureCarry(word, len, wordWidth, srcOffset);
       return false;
     }
     // Recurse once: now we have an empty fresh line, try to add the word.
@@ -816,26 +881,165 @@ bool StreamingPaginator::tryAddWord(const uint8_t* word, size_t len, uint32_t sr
     return tryAddWord(word, len, srcOffset);
   }
 
-  // Case C: word doesn't fit even on an empty line (oversized for column).
-  // Just accept it; renderer clips.  Real hyphenation comes in R3.
-  if (lineTextLen_ + len <= kLineTextCapacity && lineWordCount_ < kLineWordCapacity) {
-    const uint16_t off = lineTextLen_;
-    std::memcpy(lineText_ + off, word, len);
-    lineTextLen_ = static_cast<uint16_t>(off + len);
+  // Case C: on an EMPTY line and the word is wider than the whole line.
+  // v3.11.12 — emergency break at UTF-8 codepoint boundaries, filling each line
+  // exactly.  Pre-fix the word was accepted as ONE slot and the renderer clipped
+  // everything past the right margin (the tail of a long URL/token was simply
+  // never visible), and a word longer than the 256-byte line buffer was DROPPED
+  // outright.  Only words that cannot fit an empty line reach this point, so
+  // ordinary text lays out exactly as before.  Iterative (no recursion) so a
+  // pathological multi-KB token cannot exhaust the task stack.
+  size_t off = 0;
+  for (;;) {
+    const size_t remLen = len - off;
+    const uint16_t avail =
+        (pageRightEdge > cursorX_) ? static_cast<uint16_t>(pageRightEdge - cursorX_) : 0;
+    size_t take = remLen;
+    uint16_t takeW = (off == 0) ? wordWidth : renderer_.measureWidth(word + off, remLen, styleBits_);
+    if (takeW > avail || remLen > kLineTextCapacity - lineTextLen_) {
+      take = fitPrefixBytes(word + off, remLen, avail);
+      takeW = renderer_.measureWidth(word + off, take, styleBits_);
+    }
+    // Place `take` bytes as the only slot of this (empty) line.
+    const uint16_t toff = lineTextLen_;
+    std::memcpy(lineText_ + toff, word + off, take);
+    lineTextLen_ = static_cast<uint16_t>(toff + take);
     WordSlot& slot = lineWords_[lineWordCount_++];
-    slot.textOffset = off;
-    slot.textLen = static_cast<uint16_t>(len);
-    slot.pixelWidth = wordWidth;
+    slot.textOffset = toff;
+    slot.textLen = static_cast<uint16_t>(take);
+    slot.pixelWidth = takeW;
     slot.styleBits = styleBits_;
-    slot.noLeadingSpace = !addLeadingSpace;
-    cursorX_ = static_cast<uint16_t>(cursorX_ + wordWidth);
+    slot.noLeadingSpace = true;
+    cursorX_ = static_cast<uint16_t>(cursorX_ + takeW);
     lineHasContent_ = true;
-    return true;
-  }
+    off += take;
+    if (off >= len) return true;  // the tail fits; following words may share the line
 
-  // Buffer overflow on a single oversized word — flush as-is.
-  flushLine();
-  return !pageFull_;
+    // More of the word remains: this line is complete.
+    flushLine(/*justify=*/false);
+    if (pageFull_) {
+      captureCarry(word + off, len - off, renderer_.measureWidth(word + off, len - off, styleBits_),
+                   srcOffset + static_cast<uint32_t>(off));
+      return false;
+    }
+    // Fresh line at the block's left edge (the first-line indent, if any, was
+    // consumed by the word's first piece).
+    cursorX_ = static_cast<uint16_t>(cfg_.marginLeft + indentDepth_ * kIndentStep);
+  }
+}
+
+void StreamingPaginator::captureCarry(const uint8_t* word, size_t len, uint16_t width,
+                                      uint32_t srcOffset) {
+  // v2.0.140 — record where the carry word begins in source; PageCountingObserver
+  // reads this for the `.idx` byteOffset.
+  carryStartByteOffset_ = srcOffset;
+  if (len <= sizeof(carryWordText_)) {
+    std::memcpy(carryWordText_, word, len);
+    carryWordLen_ = static_cast<uint16_t>(len);
+    carryWordWidth_ = width;
+    carryWordStyle_ = styleBits_;
+    carryInSpillover_ = false;
+    return;
+  }
+  // v3.11.12 — longer than the inline slot: carry it as the HEAD of the
+  // spillover buffer (heap, growable) instead of dropping it.  At a carry the
+  // spillover is normally empty (it is only written right after a carry and is
+  // cleared before every replay), so the word becomes its head and the rest of
+  // the current text run, saved by the caller next, follows contiguously —
+  // exactly the source order a seek-resume render reads.
+  carryWordLen_ = 0;
+  carryWordWidth_ = 0;
+  carryInSpillover_ = true;
+  if (spilloverLen_ == 0) {
+    saveSpillover(word, len, srcOffset);
+    return;
+  }
+  // Defensive: keep source order if something was already spilled.
+  const uint16_t oldLen = spilloverLen_;
+  std::unique_ptr<uint8_t[]> old(new (std::nothrow) uint8_t[oldLen]);
+  if (!old || !spilloverBuf_) {
+    saveSpillover(word, len, srcOffset);  // degrade: append (order best-effort)
+    return;
+  }
+  std::memcpy(old.get(), spilloverBuf_.get(), oldLen);
+  spilloverLen_ = 0;
+  saveSpillover(word, len, srcOffset);
+  saveSpillover(old.get(), oldLen, srcOffset + static_cast<uint32_t>(len));
+}
+
+size_t StreamingPaginator::partWordAppend(const uint8_t* p, size_t n) {
+  if (n == 0) return 0;
+  if (partWordLen_ == 0) partWordOnHeap_ = false;  // a fresh partial starts inline
+  size_t want = static_cast<size_t>(partWordLen_) + n;
+  if (want > kPartWordMaxCapacity) want = kPartWordMaxCapacity;
+  if (want <= partWordLen_) return 0;
+  if (!partWordOnHeap_ && want <= kPartWordCapacity) {
+    const size_t add = want - partWordLen_;
+    std::memcpy(partWordBuf_ + partWordLen_, p, add);
+    partWordLen_ = static_cast<uint16_t>(want);
+    return add;
+  }
+  // Past the inline capacity: (re)grow the heap buffer geometrically.
+  if (want > partWordHeapCap_) {
+    size_t cap = partWordHeapCap_ ? partWordHeapCap_ : 2 * kPartWordCapacity;
+    while (cap < want) cap *= 2;
+    if (cap > kPartWordMaxCapacity) cap = kPartWordMaxCapacity;
+    std::unique_ptr<uint8_t[]> grown(new (std::nothrow) uint8_t[cap]);
+    if (!grown) {
+      // Degrade: fill what the current storage holds; the caller then takes
+      // the legacy truncate-and-continue path for the remainder.
+      const size_t curCap = partWordOnHeap_ ? partWordHeapCap_ : kPartWordCapacity;
+      const size_t add = (curCap > partWordLen_) ? std::min(n, curCap - partWordLen_) : 0;
+      std::memcpy(partWordData() + partWordLen_, p, add);
+      partWordLen_ = static_cast<uint16_t>(partWordLen_ + add);
+      return add;
+    }
+    std::memcpy(grown.get(), partWordData(), partWordLen_);
+    partWordHeap_ = std::move(grown);
+    partWordHeapCap_ = cap;
+  } else if (!partWordOnHeap_) {
+    std::memcpy(partWordHeap_.get(), partWordBuf_, partWordLen_);  // migrate inline → heap
+  }
+  partWordOnHeap_ = true;
+  const size_t add = want - partWordLen_;
+  std::memcpy(partWordHeap_.get() + partWordLen_, p, add);
+  partWordLen_ = static_cast<uint16_t>(want);
+  return add;
+}
+
+size_t StreamingPaginator::fitPrefixBytes(const uint8_t* word, size_t len, uint16_t avail) {
+  if (len == 0) return 0;
+  auto isCont = [&](size_t i) { return i < len && (word[i] & 0xC0) == 0x80; };
+  auto nextBoundary = [&](size_t i) {
+    size_t j = i + 1;
+    while (isCont(j)) ++j;
+    return j;
+  };
+  // Upper bound: line-buffer capacity, snapped down to a codepoint boundary.
+  size_t cap = std::min(len, kLineTextCapacity - static_cast<size_t>(lineTextLen_));
+  while (cap > 0 && isCont(cap)) --cap;
+  // Progress guarantee: always at least one whole codepoint.
+  const size_t first = std::min(nextBoundary(0), len);
+  if (cap < first) return first;
+  if (renderer_.measureWidth(word, first, styleBits_) > avail) return first;
+  if (renderer_.measureWidth(word, cap, styleBits_) <= avail) return cap;
+  // Invariant: prefix `lo` is acceptable, prefix `hi` is too wide.
+  size_t lo = first;
+  size_t hi = cap;
+  for (;;) {
+    size_t m = lo + (hi - lo) / 2;
+    while (m > lo && isCont(m)) --m;
+    if (m <= lo) {
+      m = nextBoundary(lo);
+      if (m >= hi) break;
+    }
+    if (renderer_.measureWidth(word, m, styleBits_) <= avail) {
+      lo = m;
+    } else {
+      hi = m;
+    }
+  }
+  return lo;
 }
 
 void StreamingPaginator::flushLine(bool justify) {
@@ -1037,13 +1241,21 @@ void StreamingPaginator::flushPartWord(bool setContinuation) {
   // dropped-bytes bug the partial-then-event-triggered-carry case
   // exhibited prior to v2.0.140).
   const uint32_t partialOffset = partialStartByteOffset_;
+  // v3.11.12 — pointer captured before the clear (the partial may live on the
+  // heap; partWordAppend only switches back to the inline buffer on the NEXT
+  // fresh partial, so `data` stays valid through tryAddWord).
+  const uint8_t* data = partWordData();
   partWordLen_ = 0;  // clear FIRST so any re-entrancy is safe
   partialStartByteOffset_ = 0;
-  (void)tryAddWord(partWordBuf_, len, partialOffset);
+  const bool hadCarry = hasCarry();
+  (void)tryAddWord(data, len, partialOffset);
   // tryAddWord consumed any prior continuation flag (one-shot).  Raise
   // it now so the NEXT tryAddWord call glues its slot to this one.
   if (setContinuation) {
     partWordContinuation_ = true;
+    // v3.11.12 — the flag is wiped by the page roll; if this flush is what
+    // carried the word to the next page, re-raise it after the carry lands.
+    if (!hadCarry && carryWordLen_ > 0) carryGlueNext_ = true;
   }
 }
 

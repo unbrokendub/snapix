@@ -65,40 +65,43 @@ class PageCountingObserver : public MarkerObserver {
     return checkAdvance(inner_.onText(t, l));
   }
   // Inline + block toggles + structural breaks are all 2 bytes
-  // ([0x01, tag]).
-  ObserverStatus onLineBreak() override        { bytesSeen_ += 2; return checkAdvance(inner_.onLineBreak()); }
-  ObserverStatus onParagraphBreak() override   { bytesSeen_ += 2; return checkAdvance(inner_.onParagraphBreak()); }
-  ObserverStatus onPageBreak() override        { bytesSeen_ += 2; return checkAdvance(inner_.onPageBreak()); }
-  ObserverStatus onThematicBreak() override    { bytesSeen_ += 2; return checkAdvance(inner_.onThematicBreak()); }
+  // ([0x01, tag]).  v3.11.12 — every one goes through marker(): flush-then-roll.
+  ObserverStatus onLineBreak() override      { return marker(2, [&] { return inner_.onLineBreak(); }); }
+  ObserverStatus onParagraphBreak() override { return marker(2, [&] { return inner_.onParagraphBreak(); }); }
+  ObserverStatus onPageBreak() override      { return marker(2, [&] { return inner_.onPageBreak(); }); }
+  ObserverStatus onThematicBreak() override  { return marker(2, [&] { return inner_.onThematicBreak(); }); }
   ObserverStatus onHeadingStart(uint8_t level) override {
     // [0x01, 'H', level_digit] — 3 bytes.
-    bytesSeen_ += 3;
-    return checkAdvance(inner_.onHeadingStart(level));
+    return marker(3, [&] { return inner_.onHeadingStart(level); });
   }
-  ObserverStatus onHeadingEnd() override   { bytesSeen_ += 2; return checkAdvance(inner_.onHeadingEnd()); }
-  ObserverStatus onBoldStart() override    { bytesSeen_ += 2; return checkAdvance(inner_.onBoldStart()); }
-  ObserverStatus onBoldEnd() override      { bytesSeen_ += 2; return checkAdvance(inner_.onBoldEnd()); }
-  ObserverStatus onItalicStart() override  { bytesSeen_ += 2; return checkAdvance(inner_.onItalicStart()); }
-  ObserverStatus onItalicEnd() override    { bytesSeen_ += 2; return checkAdvance(inner_.onItalicEnd()); }
+  ObserverStatus onHeadingEnd() override  { return marker(2, [&] { return inner_.onHeadingEnd(); }); }
+  ObserverStatus onBoldStart() override   { return marker(2, [&] { return inner_.onBoldStart(); }); }
+  ObserverStatus onBoldEnd() override     { return marker(2, [&] { return inner_.onBoldEnd(); }); }
+  ObserverStatus onItalicStart() override { return marker(2, [&] { return inner_.onItalicStart(); }); }
+  ObserverStatus onItalicEnd() override   { return marker(2, [&] { return inner_.onItalicEnd(); }); }
   // v3.6.0 — super/subscript markers are 2 bytes ([0x01, tag]).
-  ObserverStatus onSuperStart() override   { bytesSeen_ += 2; return checkAdvance(inner_.onSuperStart()); }
-  ObserverStatus onSuperEnd() override     { bytesSeen_ += 2; return checkAdvance(inner_.onSuperEnd()); }
-  ObserverStatus onSubStart() override     { bytesSeen_ += 2; return checkAdvance(inner_.onSubStart()); }
-  ObserverStatus onSubEnd() override       { bytesSeen_ += 2; return checkAdvance(inner_.onSubEnd()); }
-  ObserverStatus onQuoteStart() override   { bytesSeen_ += 2; return checkAdvance(inner_.onQuoteStart()); }
-  ObserverStatus onQuoteEnd() override     { bytesSeen_ += 2; return checkAdvance(inner_.onQuoteEnd()); }
+  ObserverStatus onSuperStart() override  { return marker(2, [&] { return inner_.onSuperStart(); }); }
+  ObserverStatus onSuperEnd() override    { return marker(2, [&] { return inner_.onSuperEnd(); }); }
+  ObserverStatus onSubStart() override    { return marker(2, [&] { return inner_.onSubStart(); }); }
+  ObserverStatus onSubEnd() override      { return marker(2, [&] { return inner_.onSubEnd(); }); }
+  ObserverStatus onQuoteStart() override  { return marker(2, [&] { return inner_.onQuoteStart(); }); }
+  ObserverStatus onQuoteEnd() override    { return marker(2, [&] { return inner_.onQuoteEnd(); }); }
   // v2.0.145 — Indent / Center markers.  Each is a 2-byte [01, tag].
-  ObserverStatus onIndentStart() override  { bytesSeen_ += 2; return checkAdvance(inner_.onIndentStart()); }
-  ObserverStatus onIndentEnd() override    { bytesSeen_ += 2; return checkAdvance(inner_.onIndentEnd()); }
-  ObserverStatus onCenterStart() override  { bytesSeen_ += 2; return checkAdvance(inner_.onCenterStart()); }
-  ObserverStatus onCenterEnd() override    { bytesSeen_ += 2; return checkAdvance(inner_.onCenterEnd()); }
+  ObserverStatus onIndentStart() override { return marker(2, [&] { return inner_.onIndentStart(); }); }
+  ObserverStatus onIndentEnd() override   { return marker(2, [&] { return inner_.onIndentEnd(); }); }
+  ObserverStatus onCenterStart() override { return marker(2, [&] { return inner_.onCenterStart(); }); }
+  ObserverStatus onCenterEnd() override   { return marker(2, [&] { return inner_.onCenterEnd(); }); }
   ObserverStatus onImageRef(const uint8_t* path, uint16_t len) override {
     // [0x01, 'M', len_lo, len_hi, ...path bytes].
+    if (prerollForMarker() == ObserverStatus::Stop) return ObserverStatus::Stop;
+    markerStart_ = bytesSeen_;  // v3.11.12 — boundary target if deferred
     bytesSeen_ += static_cast<uint32_t>(4 + len);
     return checkAdvance(inner_.onImageRef(path, len));
   }
   ObserverStatus onAnchorAt(const uint8_t* id, uint16_t len,
                             uint32_t /*sourceOffset*/) override {
+    // Anchors are transparent to words (`что<a id/>написать` stays ONE word),
+    // so they deliberately do NOT flush the partial word.
     if (onAnchorPage_) {
       onAnchorPage_(id, len, currentPage_);
     }
@@ -106,10 +109,61 @@ class PageCountingObserver : public MarkerObserver {
     return checkAdvance(inner_.onAnchor(id, len));
   }
   ObserverStatus onStreamEnd() override {
-    // Forward end-of-stream to paginator (flushes last partial line).
+    // finish() fires this even after we stopped at the target page; the
+    // paginator must not be touched then.
+    if (stopped_) return ObserverStatus::Stop;
+    // v3.11.12 — a chapter whose last word has no trailing whitespace ends
+    // with that word still buffered.  If committing it fills the page it is
+    // carried — pre-fix no boundary was fired for it, so the chapter's final
+    // word (or more) was never shown.  Roll the page for it.
+    if (prerollForMarker() == ObserverStatus::Stop) return ObserverStatus::Stop;
+    // Forward end-of-stream to paginator (flushes last partial line).  No
+    // checkAdvance afterwards: a last line that exactly fills the page must
+    // not create an empty trailing page.
     inner_.onStreamEnd();
     return ObserverStatus::Continue;
   }
+
+ private:
+  // v3.11.12 — FLUSH-THEN-ROLL.  Commit the buffered partial word under the
+  // CURRENT state; if that fills the page, roll first so the marker is applied
+  // on the NEW page after the carried word — the order a seek-resume render
+  // produces (it re-reads the partial word, then the marker).  Pre-fix each
+  // handler kept applying its marker to the already-full page: a paragraph
+  // break vanished from the continuous idx walk, a style toggle leaked onto the
+  // carried word, an indent change landed before text that precedes it in
+  // source…  The idx then disagreed with the rendered pages and the text
+  // between the two page ends was never shown.
+  ObserverStatus prerollForMarker() {
+    for (;;) {
+      if (stopped_) return ObserverStatus::Stop;
+      inner_.flushPendingWordForEvent();
+      if (!inner_.isPageFull()) return ObserverStatus::Continue;
+      if (rollPages() == ObserverStatus::Stop) return ObserverStatus::Stop;
+      // The roll's spillover replay can re-buffer a PARTIAL word (the tail of
+      // an over-long carried word with no trailing whitespace).  It too must
+      // be committed under the pre-marker state before the marker applies —
+      // otherwise the marker's own handler flushes it, fills the page and
+      // applies its style change before the boundary fires (wrong snapshot
+      // style for the next page).  Loop until nothing is pending.
+    }
+  }
+
+  template <typename Apply>
+  ObserverStatus marker(uint32_t markerBytes, Apply&& apply) {
+    if (prerollForMarker() == ObserverStatus::Stop) return ObserverStatus::Stop;
+    markerStart_ = bytesSeen_;  // v3.11.12 — boundary target if this marker defers
+    bytesSeen_ += markerBytes;
+    return checkAdvance(apply());
+  }
+
+  bool stopped_ = false;
+  // v3.11.12 — source offset of the marker being dispatched.  A deferral
+  // (image / scene break) is created only by the current marker and the page
+  // rolls immediately, so this is the deferred marker's start.
+  uint32_t markerStart_ = 0;
+
+ public:
 
  private:
   StreamingPaginator& inner_;
@@ -172,15 +226,79 @@ class PageCountingObserver : public MarkerObserver {
     // it captures a carry; for partial-then-event carries the value
     // was set when the partial was first buffered (in an earlier
     // onText call) and preserved through subsequent event handlers.
+    return rollPages();
+  }
+
+  // v3.11.12 — roll to the next page, and KEEP rolling while the new page is
+  // already full.  resetForNextPage() replays the carried word, a deferred
+  // image and the spillover; a large spillover can fill the fresh page (and the
+  // next...) by itself.  Pre-fix we returned Continue on a full page, so the
+  // NEXT marker (paragraph break, </blockquote>, image, …) was dispatched to a
+  // full page whose handler early-returns — the marker was silently DROPPED in
+  // the continuous idx walk while a seek-resume render (which re-reads it)
+  // applied it.  The idx then disagreed with the rendered pages and text was
+  // lost or duplicated at the seams.  Draining the cascade here guarantees no
+  // event is ever dispatched to a full page.
+  ObserverStatus rollPages() {
+    for (;;) {
+      fireBoundary();
+      if (currentPage_ == targetPage_) {
+        // We just finished the TARGET page.  Stop the stream — the
+        // framebuffer now holds the rendered target-page pixels.
+        // (Note: we do NOT increment currentPage_ here, so
+        // `pagesAdvancedThrough()` still reports the target index for
+        // log diagnostics — semantics preserved from v2.0.121.)
+        stopped_ = true;
+        return ObserverStatus::Stop;
+      }
+      // We're skipping pages — advance to the next one and continue.
+      ++currentPage_;
+      // v3.10.5 — update draw-suppression for the NEW page BEFORE resetForNextPage.
+      // resetForNextPage() lays out (and draws, when not suppressed) the new page's
+      // leading content: the carried word, any pending image, and the spillover
+      // replay.  When rolling INTO the target page this content belongs to the
+      // target and must be DRAWN — but pre-fix setDrawSuppressed ran AFTER reset,
+      // so it was laid out while still suppressed (the previous page's state) and
+      // never drawn.  For a page whose entire content is spillover from the prior
+      // page (e.g. a long <blockquote> paragraph straddling the boundary), the
+      // whole page rendered BLANK on a cold skip-to-target.  Set suppression first.
+      inner_.setDrawSuppressed(currentPage_ != targetPage_);
+      const uint32_t carryBefore = inner_.carryStartByteOffset();
+      const uint16_t pendingBefore = inner_.pendingBytes();
+      const bool deferredBefore = inner_.hasDeferredMarker();
+      inner_.resetForNextPage();
+      if (!inner_.isPageFull()) return ObserverStatus::Continue;
+      // Cascade.  Progress is guaranteed (a deferred image/scene break is
+      // placed, the carried word always lands on a fresh page, the replay
+      // consumes bytes); bail out defensively only if a roll changed nothing,
+      // so a pathological geometry cannot spin forever.
+      if (!deferredBefore && !inner_.hasDeferredMarker() &&
+          inner_.carryStartByteOffset() == carryBefore && inner_.pendingBytes() == pendingBefore) {
+        return ObserverStatus::Continue;
+      }
+    }
+  }
+
+  void fireBoundary() {
     if (onBoundary_) {
       PageBoundarySnapshot snap;
       snap.pageIndex = static_cast<uint16_t>(currentPage_ + 1);
-      if (inner_.carryWordLen() > 0) {
+      if (inner_.hasDeferredMarker()) {
+        // v3.11.12 — the page ended at a marker deferred to the next page (an
+        // image that didn't fit, or a scene-break ornament).  Point the
+        // boundary AT that marker: a seek-resume render of the next page
+        // re-reads it and places it first, exactly like the continuous walk's
+        // resetForNextPage.  Pre-fix the offset pointed PAST the marker, so
+        // every image pushed to a new page vanished on resume.
+        snap.byteOffset = markerStart_;
+      } else if (inner_.hasCarry()) {
         // Carry exists — use its recorded source position.  This is
         // accurate regardless of where in the event sequence the
         // carry was captured.  Spillover bytes (if any) come from
         // the source AFTER the carry word, so seeking to this
         // offset and reading forward re-encounters them naturally.
+        // (v3.11.12: also when an over-long carried word rides the
+        // spillover instead of the inline carry slot.)
         snap.byteOffset = inner_.carryStartByteOffset();
       } else {
         // No carry — pageFull fired from a cursor-only advance (e.g.
@@ -206,30 +324,6 @@ class PageCountingObserver : public MarkerObserver {
       snap.centered = inner_.centered();
       onBoundary_(snap);
     }
-
-    if (currentPage_ == targetPage_) {
-      // We just finished the TARGET page.  Stop the stream — the
-      // framebuffer now holds the rendered target-page pixels.
-      // (Note: we do NOT increment currentPage_ here, so
-      // `pagesAdvancedThrough()` still reports the target index for
-      // log diagnostics — semantics preserved from v2.0.121.)
-      return ObserverStatus::Stop;
-    }
-
-    // We're skipping pages — advance to the next one and continue.
-    ++currentPage_;
-    // v3.10.5 — update draw-suppression for the NEW page BEFORE resetForNextPage.
-    // resetForNextPage() lays out (and draws, when not suppressed) the new page's
-    // leading content: the carried word, any pending image, and the spillover
-    // replay.  When rolling INTO the target page this content belongs to the
-    // target and must be DRAWN — but pre-fix setDrawSuppressed ran AFTER reset,
-    // so it was laid out while still suppressed (the previous page's state) and
-    // never drawn.  For a page whose entire content is spillover from the prior
-    // page (e.g. a long <blockquote> paragraph straddling the boundary), the
-    // whole page rendered BLANK on a cold skip-to-target.  Set suppression first.
-    inner_.setDrawSuppressed(currentPage_ != targetPage_);
-    inner_.resetForNextPage();
-    return ObserverStatus::Continue;
   }
 };
 

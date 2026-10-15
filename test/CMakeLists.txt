@@ -19,7 +19,12 @@ if(APPLE AND NOT CMAKE_OSX_SYSROOT)
   endif()
 endif()
 
-if(APPLE AND NOT CMAKE_CXX_COMPILER MATCHES "/opt/homebrew")
+# Only force the CommandLineTools libc++ headers when the active SDK is the CLT
+# one.  With `xcode-select` pointing at Xcode.app the sysroot is Xcode's SDK, and
+# mixing CLT libc++ into it breaks every target (`sys/resource.h`: unknown type
+# name 'uint8_t'); Apple clang already finds the matching libc++ on its own.
+if(APPLE AND NOT CMAKE_CXX_COMPILER MATCHES "/opt/homebrew" AND
+   CMAKE_OSX_SYSROOT MATCHES "^/Library/Developer/CommandLineTools")
   set(CLANG_STDLIB_PATH "/Library/Developer/CommandLineTools/usr/include/c++/v1")
   if(EXISTS "${CLANG_STDLIB_PATH}")
     include_directories(SYSTEM "${CLANG_STDLIB_PATH}")
@@ -421,6 +426,25 @@ foreach(TEST_SRC ${TEST_SOURCES})
     )
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/lib/SmolPort/src
+    )
+  elseif(TEST_NAME STREQUAL "PaginationCompletenessFuzzTest")
+    # Property-based proof that pagination never drops or duplicates content:
+    # random chapters, device-shaped idx-walk + seek-resume renders, compared
+    # against a single infinitely-tall-page oracle.
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizedPageRender.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/StreamingChapterRenderer.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/StreamingPaginator.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerStream.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp
+      ${PROJECT_ROOT}/lib/SmolPort/src/HtmlStripper.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/unit/smolport/mock_hyphenation.cpp
+      ${TEST_HELPERS}
+    )
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/SmolPort/src
+      ${PROJECT_ROOT}/lib/Hyphenation/src
     )
   elseif(TEST_NAME STREQUAL "MarkerizedPageRenderTest")
     # v2.0.121 Phase R3.4 — page-targeted streaming render.  Composes
