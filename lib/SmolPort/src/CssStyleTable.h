@@ -2,7 +2,7 @@
 
 // =============================================================================
 // SmolPort CSS styles — the small slice of an EPUB's CSS the marker pipeline
-// honours (v3.11.13).
+// honours (v3.11.12).
 //
 // InDesign / Calibre / Sigil EPUBs mark emphasis with classes and inline styles
 // instead of <i>/<b>/<center>:

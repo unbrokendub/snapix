@@ -69,9 +69,12 @@ namespace snapix::unifiedcache {
 // v6: v3.11.12 — big EPUB chapters (>64 KB source) markerize progressively
 // into chunk frames; wipe so already-cached big chapters move to that path
 // (a whole Markers frame would keep the slow one-shot path forever).
-// v7: v3.11.13 — EPUB markers honour the book's CSS (class / inline-style
-// italic, bold, center, indent, display:none) and nested italic/bold/center
+// v7: v3.11.12 — (a) EPUB markers honour the book's CSS (class / inline-style
+// italic, bold, center, indent, display:none); nested italic/bold/center
 // sources are counted; the compiled table is cached as Kind::StyleTable.
+// (b) TXT and Markdown text goes through the HtmlStripper code-point gate
+// (TextHygiene.h): BOM / soft hyphen / ZWSP / bidi / C0 controls dropped, C1
+// read as windows-1252.
 constexpr uint16_t kFormatVersion = 7;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kFrameHeaderSize = 8;
@@ -94,7 +97,7 @@ enum class Kind : uint8_t {
   // v3.11.12 — written once a chunked section's last marker chunk is stored
   // (see markerChunkKind); its presence means the chunk set is complete.
   MarkerChunksDone = 4,
-  // v3.11.13 — the book's compiled CSS table (snapix::smolport::CssStyleTable
+  // v3.11.12 — the book's compiled CSS table (snapix::smolport::CssStyleTable
   // blob, key = kGlobalKey).  Every EPUB chapter markerizes against it.
   StyleTable = 5,
 };

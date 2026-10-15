@@ -17,7 +17,7 @@
 #include <UnifiedCache.h>  // v2.0.167 — Phase 5 unified streaming cache
 #include <ZipFile.h>  // v2.0.159 — ZipItemReader for streaming markerize-from-ZIP
 #include <core/CrashDebug.h>
-#include <CssStyleTable.h>  // v3.11.13 — book CSS → stripper
+#include <CssStyleTable.h>  // v3.11.12 — book CSS → stripper
 #include <esp_heap_caps.h>
 
 // v2.0.116 Phase R2 — markerize side-channel.  Active only when v3_alpha
@@ -159,7 +159,7 @@ EpubChapterParser::EpubChapterParser(std::shared_ptr<Epub> epub, int spineIndex,
 
 EpubChapterParser::~EpubChapterParser() = default;
 
-// v3.11.13 — load the book's compiled CSS table, compiling + caching it when
+// v3.11.12 — load the book's compiled CSS table, compiling + caching it when
 // the first chapter of the book markerizes.  True when styleTable_ holds the
 // CACHED table (possibly empty), so every chapter and every chunk of a
 // progressive chapter resolves against identical rules.  Run it before this
@@ -379,7 +379,7 @@ bool EpubChapterParser::tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& 
     LOG_ERR(TAG, "[CONTENT][EPUB] markerize no href spine=%d", spineIndex_);
     return false;
   }
-  // v3.11.13 — the book's CSS table, normally loaded by parsePages before the
+  // v3.11.12 — the book's CSS table, normally loaded by parsePages before the
   // size decision opened the chapter stream.  If it is unavailable the chapter
   // still markerizes, honouring inline styles only.
   if (!styleTableReady_ && !pendingStream_) (void)ensureStyleTable(cache);
@@ -562,7 +562,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   } pendingStreamGuard{pendingStream_};
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
-  // v3.11.13 — a chapter that still has to markerize needs the book's CSS
+  // v3.11.12 — a chapter that still has to markerize needs the book's CSS
   // table first (compiled once per book), before the size decision below opens
   // the chapter stream.
   if (!styleTableReady_) {
@@ -1125,7 +1125,7 @@ int EpubChapterParser::markerizeProgressiveChunks(snapix::unifiedcache::UnifiedC
                                                   const AbortCallback& shouldAbort) {
   if (progSourceDone_) return 0;
   const auto key = static_cast<uint16_t>(spineIndex_);
-  // v3.11.13 — every chunk must see the same CSS table (the live / replayed
+  // v3.11.12 — every chunk must see the same CSS table (the live / replayed
   // stripper points at it): never markerize a chunk without the cached one.
   // Compiling it inflates stylesheets — drop the size-decision stream first.
   if (!styleTableReady_) {

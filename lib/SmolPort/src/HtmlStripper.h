@@ -43,7 +43,7 @@
 // suppression for <script>/<style> are all implemented.  Integration
 // into the EPUB chapter parser is Phase 3e.
 //
-// CSS (v3.11.13, Html mode with a CssStyleTable — the EPUB path): each
+// CSS (v3.11.12, Html mode with a CssStyleTable — the EPUB path): each
 // element's `class` list + inline `style` are resolved against the book's
 // stylesheets (CssStyleTable.h) for italic / bold / text-align:center /
 // left-margin indent / display:none, emitting the markers above.  A bounded
@@ -150,7 +150,7 @@ class HtmlStripper {
     RawBodyAfter,     // confirmed raw-body close, scan to '>'
   };
 
-  // v3.11.13 — CSS display:none drops output here.  With CSS on, sink_ is
+  // v3.11.12 — CSS display:none drops output here.  With CSS on, sink_ is
   // this gate (wrapping the caller's sink); otherwise sink_ is the caller's.
   class GateSink final : public HtmlStripperSink {
    public:
@@ -238,7 +238,7 @@ class HtmlStripper {
   uint8_t rawBodyTagBufLen_;
 
   // ---------------------------------------------------------------------------
-  // v3.11.13 — CSS state (all idle when css_ == nullptr).  ~330 bytes.
+  // v3.11.12 — CSS state (all idle when css_ == nullptr).  ~330 bytes.
   // ---------------------------------------------------------------------------
   const CssStyleTable* css_;
   // Open elements: lower-cased tag-name hash + the CSS effects the element
@@ -294,7 +294,7 @@ class HtmlStripper {
   bool isRawBodyTag() const; // current tag name opens a suppressed body
   void beginAttrValue();     // decide whether the value is captured
 
-  // v3.11.13 — CSS helpers.
+  // v3.11.12 — CSS helpers.
   void emitStyle(uint8_t tag);       // counted italic/bold/centre marker
   void cssTag();                     // onTagComplete's dispatch with CSS on
   void cssAttrByte(uint8_t b);       // class / style attribute value byte

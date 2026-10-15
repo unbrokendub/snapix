@@ -27,7 +27,7 @@
 // attributes, entities, comments, <script>/<style>/<title> bodies, UTF-8
 // sequences), any read granularity, and any mix of skip / replay calls.
 //
-// v3.11.13 — the same holds with the book's CSS table on (element stack,
+// v3.11.12 — the same holds with the book's CSS table on (element stack,
 // display:none subtrees and counted styles live in the stripper and are
 // rebuilt by replay).
 // =============================================================================
@@ -280,7 +280,7 @@ int main() {
     }
   }
 
-  // v3.11.13 — the whole matrix runs twice: CSS off, then with a book table.
+  // v3.11.12 — the whole matrix runs twice: CSS off, then with a book table.
   CssStyleTable css;
   {
     const std::string sheet =

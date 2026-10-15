@@ -22,6 +22,11 @@
 // fences are treated as a TOGGLE (so the closing ``` is detected), and open
 // bold/italic are auto-closed at paragraph boundaries (no style bleed).
 //
+// Input first goes through Utf8TextFilter (TextHygiene.h), the gate
+// HtmlStripper applies: invisible format characters (BOM, soft hyphen, ZWSP,
+// …) and C0 controls are dropped before md_parser sees the line — so a BOM
+// can't hide a leading "# Heading" — and C1 controls are read as windows-1252.
+//
 // Same shape as HtmlStripper (sink + feed/finish/reset) so it drives the shared
 // runMarkerizeLoop() in MarkerizeStream.h.
 // =============================================================================
@@ -30,6 +35,7 @@
 #include <cstdint>
 
 #include <HtmlStripper.h>  // snapix::smolport::HtmlStripperSink
+#include <TextHygiene.h>   // snapix::smolport::Utf8TextFilter
 
 #include "md_parser.h"
 
@@ -58,6 +64,7 @@ class MarkdownStripper {
   void onToken(const md_token_t* token);
 
   // Line processing.
+  void appendInput(const uint8_t* p, size_t n);  // one filtered unit → line buffer
   void processLine(const char* line, int len);
   static bool lineIsBlank(const char* line, int len);
   static bool lineIsFence(const char* line, int len);  // ``` (ignoring indent)
@@ -72,6 +79,7 @@ class MarkdownStripper {
   void closeCode();         // close an open code block
 
   snapix::smolport::HtmlStripperSink& sink_;
+  snapix::smolport::Utf8TextFilter filter_;
   md_parser_t parser_;
 
   // Line buffer (chunk-boundary safe).

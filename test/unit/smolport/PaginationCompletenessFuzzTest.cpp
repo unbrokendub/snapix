@@ -117,7 +117,7 @@ ChapterReadFn makeReader(const std::vector<uint8_t>& data, size_t start, uint32_
   };
 }
 
-// v3.11.13 — the "css" scenario markerizes with a book CSS table (EPUB path).
+// v3.11.12 — the "css" scenario markerizes with a book CSS table (EPUB path).
 const snapix::smolport::CssStyleTable* g_css = nullptr;
 
 std::vector<uint8_t> markerize(const std::string& html) {
@@ -677,7 +677,7 @@ int main(int argc, char** argv) {
     scenarios.push_back({"hyphenate", makeCfg(140, 110, 0, true), o, true});
   }
   {
-    // v3.11.13 — EPUB CSS: classes / inline styles add centre, indent,
+    // v3.11.12 — EPUB CSS: classes / inline styles add centre, indent,
     // suspend/resume and display:none marker patterns at page seams.
     GenOptions o;
     o.allowCss = true;

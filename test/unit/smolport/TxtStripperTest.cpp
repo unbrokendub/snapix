@@ -244,6 +244,128 @@ int main() {
     runner.expectEqual(feedAll(src), feedChunkedNonReflow(chunks), "R13_nonreflow_mixed");
   }
 
+  // -- text hygiene (TextHygiene.h, same gate as HtmlStripper) --
+
+  // H1: a UTF-8 BOM at the start of the file is dropped.
+  runner.expectEqual("Hello", feedAll("\xEF\xBB\xBFHello"), "H1_bom_at_start");
+
+  // H2: a BOM is not content — the blank lines after it stay suppressed.
+  runner.expectEqual("Hello", feedAll("\xEF\xBB\xBF\n\nHello"), "H2_bom_then_blank_lines");
+  runner.expectEqual("Hello", feedReflow("\xEF\xBB\xBF\n\nHello"), "H2_bom_then_blank_lines_reflow");
+
+  // H3: soft hyphen / ZWSP / word joiner / LRM inside words disappear.
+  runner.expectEqual("\xD0\xBF\xD0\xBE\xD1\x81\xD0\xBB\xD0\xB5\xD0\xB4",
+                     feedAll("\xD0\xBF\xD0\xBE\xC2\xAD\xD1\x81\xD0\xBB\xD0\xB5\xD0\xB4"),
+                     "H3_soft_hyphen_in_word");
+  runner.expectEqual("foobar", feedAll("foo\xE2\x80\x8B" "bar"), "H3_zwsp_in_word");
+  runner.expectEqual("foobar", feedAll("foo\xE2\x81\xA0" "bar"), "H3_word_joiner");
+  runner.expectEqual("ab", feedAll("a\xE2\x80\x8E" "b"), "H3_lrm");
+  runner.expectEqual("ab", feedAll("a\xEF\xB8\x8F" "b"), "H3_variation_selector");
+  runner.expectEqual("ab", feedAll("a\xF3\xA0\x80\x81" "b"), "H3_tag_character");
+
+  // H4: C1 controls are windows-1252 (U+0097 → em dash, U+0085 → ellipsis);
+  // undefined slots (U+0081) are dropped.
+  runner.expectEqual("a\xE2\x80\x94" "b\xE2\x80\xA6", feedAll("a\xC2\x97" "b\xC2\x85"), "H4_c1_cp1252");
+  runner.expectEqual("ab", feedAll("a\xC2\x81" "b"), "H4_c1_undefined_dropped");
+
+  // H5: characters that share a lead byte with a dropped one are kept intact:
+  // © « — … » € NBSP, Cyrillic, a 4-byte emoji.
+  {
+    const std::string keep =
+        "\xC2\xA9 \xC2\xAB\xE2\x80\x94\xE2\x80\xA6\xC2\xBB \xE2\x82\xAC\xC2\xA0"
+        "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82 \xF0\x9F\x98\x80";
+    runner.expectEqual(keep, feedAll(keep), "H5_same_lead_bytes_kept");
+  }
+
+  // H6: C0 controls and DEL dropped; VT / FF become a space; tab kept.
+  runner.expectEqual("abc", feedAll(std::string("a\x00" "b\x07" "c\x7F", 6)), "H6_c0_dropped");
+  runner.expectEqual("a b c\td", feedAll("a\x0B" "b\x0C" "c\td"), "H6_vt_ff_space");
+
+  // H7: LINE / PARAGRAPH SEPARATOR → space.
+  runner.expectEqual("a b c", feedAll("a\xE2\x80\xA8" "b\xE2\x80\xA9" "c"), "H7_line_separator");
+
+  // H8: malformed UTF-8 passes through verbatim — truncated before a newline,
+  // a lone continuation byte, an invalid lead, a truncated tail at EOF.
+  runner.expectEqual("a\xD0" + PB + "b", feedAll("a\xD0\nb"), "H8_truncated_before_newline");
+  runner.expectEqual("a\x80" "b\xFF" "c\xC0", feedAll("a\x80" "b\xFF" "c\xC0"), "H8_invalid_bytes");
+  runner.expectEqual("x\xE2\x80", feedAll("x\xE2\x80"), "H8_truncated_at_eof");
+  runner.expectEqual("x\xE2" "yz", feedAll("x\xE2" "yz"), "H8_truncated_by_ascii");
+
+  // H9: 0x01 escape still doubled next to a dropped character.
+  {
+    std::string in = "\x01\xC2\xAD" "x";
+    std::string expect = std::string(2, static_cast<char>(kMarker)) + "x";
+    runner.expectEqual(expect, feedAll(in), "H9_escape_next_to_dropped");
+  }
+
+  // H10: a dropped character between newlines does not split the run —
+  // a line holding only a soft hyphen is blank.
+  runner.expectEqual("a" + PB + "b", feedAll("a\n\xC2\xAD\nb"), "H10_invisible_only_line_nonreflow");
+  runner.expectEqual("a" + PB + "b", feedReflow("a\n\xE2\x80\x8B\nb"), "H10_invisible_only_line_reflow");
+
+  // H11: every UTF-8 sequence split at every feed() boundary — output equals
+  // one pass (the filter holds the partial sequence across calls).
+  {
+    const std::string src =
+        "\xEF\xBB\xBF\xD0\x9F\xD0\xBE\xC2\xAD\xD1\x81\xD0\xBB\xD0\xB5 \xC2\xA9\xC2\xAB\xE2\x80\x94"
+        "\xE2\x80\x8B\xC2\x97\xE2\x80\xA6\xC2\xBB\n\n\xE2\x82\xAC\xF0\x9F\x98\x80\xF3\xA0\x80\x81"
+        "\xE2\x80\xA8z\xD0\nq\xE2\x80";
+    for (int reflow = 0; reflow < 2; ++reflow) {
+      const std::string whole = reflow ? feedReflow(src) : feedAll(src);
+      bool allSplitsOk = true;
+      for (size_t cut = 0; cut <= src.size(); ++cut) {
+        CollectSink sink;
+        TxtStripper s(sink, reflow != 0);
+        s.feed(reinterpret_cast<const uint8_t*>(src.data()), cut);
+        s.feed(reinterpret_cast<const uint8_t*>(src.data()) + cut, src.size() - cut);
+        s.finish();
+        if (toStr(sink.data) != whole) allSplitsOk = false;
+      }
+      CollectSink sink;
+      TxtStripper s(sink, reflow != 0);
+      for (size_t i = 0; i < src.size(); ++i) s.feed(reinterpret_cast<const uint8_t*>(src.data()) + i, 1);
+      s.finish();
+      runner.expectTrue(allSplitsOk, reflow ? "H11_every_split_reflow" : "H11_every_split");
+      runner.expectEqual(whole, toStr(sink.data), reflow ? "H11_bytewise_reflow" : "H11_bytewise");
+    }
+    // And the one-pass result itself is right (BOM, SHY, ZWSP, tag char gone,
+    // U+0097 → —, U+2028 → space, truncated bytes verbatim).
+    runner.expectEqual(
+        "\xD0\x9F\xD0\xBE\xD1\x81\xD0\xBB\xD0\xB5 \xC2\xA9\xC2\xAB\xE2\x80\x94\xE2\x80\x94\xE2\x80\xA6\xC2\xBB" +
+            PB + "\xE2\x82\xAC\xF0\x9F\x98\x80 z\xD0" + PB + "q\xE2\x80",
+        feedAll(src), "H11_one_pass_exact");
+  }
+
+  // H12: chunked (lazy) markerize equivalence with dropped characters at the
+  // chunk edges — paragraph-aligned chunks still concatenate byte-identically.
+  {
+    const std::string src = "one\xC2\xAD two\n\n\xEF\xBB\xBFthree\xE2\x80\x8B four\n\n\xC2\x97 five";
+    const std::vector<std::string> chunks = {"one\xC2\xAD two\n\n", "\xEF\xBB\xBFthree\xE2\x80\x8B four\n\n",
+                                             "\xC2\x97 five"};
+    runner.expectEqual(feedReflow(src), feedChunkedReflow(chunks), "H12_chunk_equiv_reflow");
+    runner.expectEqual("one two" + PB + "three four" + PB + "\xE2\x80\x94 five", feedChunkedReflow(chunks),
+                       "H12_exact");
+  }
+  {
+    // A chunk holding nothing but a dropped character: emits nothing, and
+    // the next chunk still gets exactly one break.
+    const std::string src = "alpha\n\xC2\xAD\nbeta";
+    const std::vector<std::string> chunks = {"alpha\n", "\xC2\xAD\n", "beta"};
+    runner.expectEqual(feedAll(src), feedChunkedNonReflow(chunks), "H12_invisible_chunk_nonreflow");
+    runner.expectEqual("alpha" + PB + "beta", feedChunkedNonReflow(chunks), "H12_invisible_chunk_exact");
+  }
+
+  // H13: reset() discards a partial sequence held by the filter.
+  {
+    CollectSink sink;
+    TxtStripper s(sink);
+    s.feed(reinterpret_cast<const uint8_t*>("\xE2\x80"), 2);
+    s.reset();
+    s.feed(reinterpret_cast<const uint8_t*>("x"), 1);
+    s.finish();
+    runner.expectEqual("x", toStr(sink.data), "H13_reset_drops_partial");
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }

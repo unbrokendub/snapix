@@ -109,6 +109,9 @@ constexpr uint32_t kChunkBytes = 32768;
 //                 space/tab is text and does NOT make a blank line, matching the
 //                 stripper) → cut just after the second '\n'.
 // Cutting at a real paragraph boundary is what makes startPendingBreak correct.
+// (TxtStripper also treats a line of only dropped characters — a lone soft
+// hyphen or ZWSP — as blank; never cutting there is still correct, since every
+// cut here is a break in the stripper too.)
 // `file` is repositioned by this call.  Returns an absolute offset in
 // (start, fileSize].
 uint32_t findChunkEnd(AnyFile& file, bool reflow, uint32_t start, uint32_t fileSize) {

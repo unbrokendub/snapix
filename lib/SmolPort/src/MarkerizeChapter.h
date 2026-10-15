@@ -90,7 +90,7 @@ struct MarkerizeStats {
 // by the caller; the stripper's internal state is in-class.  Watchdog-
 // safe — call shouldAbort() between chunks.
 //
-// `styles` (v3.11.13, EPUB): the book's CSS table — turns on per-element
+// `styles` (v3.11.12, EPUB): the book's CSS table — turns on per-element
 // class / inline-style resolution (see HtmlStripper.h).  nullptr = off.
 MarkerizeStatus markerizeChapter(HtmlStripper::Mode mode, MarkerizeReadFn readChunk,
                                   MarkerizeWriteFn writeChunk, uint8_t* chunkBuf, size_t chunkBufSize,

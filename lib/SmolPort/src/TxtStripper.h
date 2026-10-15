@@ -17,10 +17,16 @@
 //                     the lines reflow into real paragraphs instead of each
 //                     wrapped line becoming its own one-line paragraph.
 //
-// All other bytes pass through unchanged (UTF-8 safe).  Inter-word whitespace
-// (space, tab) passes through as text — StreamingPaginator::isAsciiSpace treats
-// space/tab/\n/\r as word separators, so the paginator handles word breaking.
-// Literal 0x01 bytes (the marker escape) are self-doubled per the protocol.
+// All other text goes through Utf8TextFilter (TextHygiene.h), the same gate
+// HtmlStripper applies: invisible format characters (BOM, soft hyphen, ZWSP,
+// bidi controls, …) and C0 controls are dropped, C1 controls are read as
+// windows-1252, U+2028/2029 and VT/FF become a space; everything else passes
+// through unchanged.  A dropped character is not text — it neither resolves a
+// pending newline run nor counts as content (a BOM before leading blank lines
+// leaves them suppressed).  Inter-word whitespace (space, tab) passes through
+// as text — StreamingPaginator::isAsciiSpace treats space/tab/\n/\r as word
+// separators, so the paginator handles word breaking.  Literal 0x01 bytes (the
+// marker escape) are self-doubled per the protocol.
 //
 // Same shape as HtmlStripper (sink + feed/finish/reset) so it can drive the
 // shared markerizeStream() loop without any HtmlStripper dependency.
@@ -30,6 +36,7 @@
 #include <cstdint>
 
 #include "HtmlStripper.h"  // HtmlStripperSink
+#include "TextHygiene.h"   // Utf8TextFilter
 
 namespace snapix::smolport {
 
@@ -45,24 +52,30 @@ class TxtStripper {
       : sink_(sink), reflow_(reflow), seenContent_(startPendingBreak), forceBreak_(startPendingBreak) {}
 
   // Feed an arbitrary chunk of bytes.  Safe to call repeatedly; the
-  // paragraph-collapse state survives chunk boundaries.  Returns the number
-  // of bytes consumed (== len unless the sink's shouldStop() latched, for
-  // cooperative early-exit — mirrors HtmlStripper::feed).
+  // paragraph-collapse state and a UTF-8 sequence split across calls survive
+  // chunk boundaries.  Returns the number of bytes consumed (== len unless the
+  // sink's shouldStop() latched, for cooperative early-exit — mirrors
+  // HtmlStripper::feed).
   size_t feed(const uint8_t* data, size_t len);
 
-  // End of input.  Trailing newlines need no trailing paragraph break, so
-  // this is a no-op (kept for API parity with HtmlStripper).
-  void finish() {}
+  // End of input.  Trailing newlines need no trailing paragraph break; only a
+  // truncated UTF-8 sequence still held by the filter is passed through.
+  void finish();
 
   // Reset for a fresh document.
   void reset() {
+    filter_.reset();
     seenContent_ = false;
     newlinesPending_ = 0;
     forceBreak_ = false;
   }
 
  private:
+  // One filtered unit from Utf8TextFilter: a newline, a CR, or text.
+  void put(const uint8_t* p, size_t n);
+
   HtmlStripperSink& sink_;
+  Utf8TextFilter filter_;
   bool reflow_ = false;          // single '\n' → space (true) vs paragraph break (false)
   bool seenContent_ = false;     // emitted any text yet? (suppresses a leading break)
   uint16_t newlinesPending_ = 0; // newlines seen since the last text byte (capped)

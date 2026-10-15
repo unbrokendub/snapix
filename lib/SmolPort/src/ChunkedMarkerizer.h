@@ -23,7 +23,7 @@
 // offset() before markerizeChunk(): skipSource() for a live instance,
 // replayTo() for a fresh one.
 //
-// v3.11.13 — the book's CSS table (if any) must be the SAME for every instance
+// v3.11.12 — the book's CSS table (if any) must be the SAME for every instance
 // that markerizes one document: the stripper's element stack / open styles are
 // rebuilt by replay only when the table is identical.
 // =============================================================================

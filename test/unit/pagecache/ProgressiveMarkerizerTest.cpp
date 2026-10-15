@@ -80,6 +80,24 @@ int main() {
         "markdown_sink_switch_is_byte_identical");
   }
 
+  {
+    // Source chunks cut inside UTF-8 sequences (BOM, soft hyphen, em dash,
+    // ZWSP, a 4-byte emoji): the filter state rides in the one stripper, so
+    // the chunks still concatenate to the one-pass output.
+    const std::string source =
+        "\xEF\xBB\xBF# T\xC2\xAD" "it\xE2\x80\x94le\n\nBo\xE2\x80\x8B" "dy \xF0\x9F\x98\x80 end.";
+    const std::vector<size_t> cuts = {1, 2, 7, 11, 12, 20, 21, 26, 28, 31};
+    const std::string expected = onePass<snapix::markdown::MarkdownStripper>(source);
+    runner.expectEqual(expected,
+                       progressive<snapix::markdown::MarkdownStripper>(source, cuts, "/progressive/md-utf8-"),
+                       "markdown_utf8_split_is_byte_identical");
+    runner.expectTrue(expected.find("\xEF\xBB\xBF") == std::string::npos &&
+                          expected.find("\xC2\xAD") == std::string::npos &&
+                          expected.find("\xE2\x80\x8B") == std::string::npos &&
+                          expected.find("T" "it\xE2\x80\x94le") != std::string::npos,
+                      "markdown_utf8_invisibles_dropped");
+  }
+
   runner.printSummary();
   return runner.allPassed() ? 0 : 1;
 }

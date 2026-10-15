@@ -163,7 +163,7 @@ class EpubChapterParser : public ContentParser {
   // markerizes in the same parsePages call, and never kept past it.
   std::unique_ptr<ZipItemReader> pendingStream_;
 
-  // ---- v3.11.13 — the book's CSS (class / inline-style emphasis) -----------
+  // ---- v3.11.12 — the book's CSS (class / inline-style emphasis) -----------
   // Compiled once per book from its stylesheets into UnifiedCache
   // Kind::StyleTable and loaded before a chapter markerizes; the stripper
   // resolves every element against it.  Kept while progMarkerizer_ lives (its

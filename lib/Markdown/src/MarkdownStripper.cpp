@@ -24,6 +24,7 @@ MarkdownStripper::MarkdownStripper(snapix::smolport::HtmlStripperSink& sink) : s
 }
 
 void MarkdownStripper::reset() {
+  filter_.reset();
   md_parser_init(&parser_, &MarkdownStripper::tokenTrampoline, this);
   lineLen_ = 0;
   everEmitted_ = false;
@@ -320,27 +321,31 @@ void MarkdownStripper::processLine(const char* line, int len) {
 
 size_t MarkdownStripper::feed(const uint8_t* data, size_t len) {
   for (size_t i = 0; i < len; ++i) {
-    const char c = static_cast<char>(data[i]);
-    if (c == '\n') {
-      processLine(line_, lineLen_);
-      lineLen_ = 0;
-      continue;
-    }
-    if (lineLen_ < kLineCap - 1) {
-      line_[lineLen_++] = c;
-    } else {
-      // Pathological line longer than the buffer — flush what we have as a
-      // line and keep going (matches legacy fgets truncation behaviour).
-      line_[lineLen_] = '\0';
-      processLine(line_, lineLen_);
-      lineLen_ = 0;
-      line_[lineLen_++] = c;
-    }
+    filter_.push(data[i], [this](const uint8_t* p, const size_t n) { appendInput(p, n); });
   }
   return len;
 }
 
+void MarkdownStripper::appendInput(const uint8_t* p, const size_t n) {
+  if (n == 1 && p[0] == '\n') {
+    processLine(line_, lineLen_);
+    lineLen_ = 0;
+    return;
+  }
+  if (lineLen_ + static_cast<int>(n) > kLineCap - 1) {
+    // Pathological line longer than the buffer — flush what we have as a
+    // line and keep going (matches legacy fgets truncation behaviour).  A
+    // multi-byte character is never split between the two pieces.
+    line_[lineLen_] = '\0';
+    processLine(line_, lineLen_);
+    lineLen_ = 0;
+  }
+  memcpy(line_ + lineLen_, p, n);
+  lineLen_ += static_cast<int>(n);
+}
+
 void MarkdownStripper::finish() {
+  filter_.flush([this](const uint8_t* p, const size_t n) { appendInput(p, n); });
   if (lineLen_ > 0) {
     processLine(line_, lineLen_);
     lineLen_ = 0;

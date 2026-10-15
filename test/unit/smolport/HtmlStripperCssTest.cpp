@@ -13,7 +13,7 @@
 #include <vector>
 
 // =============================================================================
-// HtmlStripperCssTest — v3.11.13 EPUB CSS: class / inline-style italic, bold,
+// HtmlStripperCssTest — v3.11.12 EPUB CSS: class / inline-style italic, bold,
 // text-align:center, left-margin indent and display:none, resolved per element
 // by HtmlStripper against a compiled CssStyleTable.
 //

@@ -113,7 +113,7 @@ class Epub {
     std::unique_ptr<Impl> impl_;
   };
   std::unique_ptr<ImageProbeSession> openImageProbeSession() const;
-  // v3.11.13 — compile every stylesheet in the archive into one
+  // v3.11.12 — compile every stylesheet in the archive into one
   // snapix::smolport::CssStyleTable blob (class / tag selectors → italic, bold,
   // center, indent, display:none) that chapter markerize resolves elements
   // against.  Best effort: a sheet that cannot be read is skipped.  False only

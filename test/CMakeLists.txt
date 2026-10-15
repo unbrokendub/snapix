@@ -397,7 +397,7 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/lib/SmolPort/src
     )
   elseif(TEST_NAME STREQUAL "HtmlStripperCssTest")
-    # v3.11.13 — EPUB CSS: class / inline-style italic, bold, center, indent and
+    # v3.11.12 — EPUB CSS: class / inline-style italic, bold, center, indent and
     # display:none resolved per element; only hidden text may disappear.
     add_executable(${TEST_NAME}
       ${TEST_SRC}
@@ -455,7 +455,7 @@ foreach(TEST_SRC ${TEST_SOURCES})
   elseif(TEST_NAME STREQUAL "EpubChunkEquivTest")
     # v3.11.12 — big EPUB chapters are markerized in source chunks with one
     # stripper kept alive (skip / replay per call); the chunks must concatenate
-    # byte-identically to one continuous pass (v3.11.13: also with CSS on).
+    # byte-identically to one continuous pass (v3.11.12: also with CSS on).
     add_executable(${TEST_NAME}
       ${TEST_SRC}
       ${PROJECT_ROOT}/lib/SmolPort/src/MarkerizeChapter.cpp

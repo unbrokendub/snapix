@@ -1,6 +1,7 @@
 #include "HtmlStripper.h"
 
 #include "Markers.h"
+#include "TextHygiene.h"
 
 #include <cstring>
 
@@ -120,29 +121,6 @@ inline bool nameEq(const char* name, const uint8_t* buf, const uint8_t len) {
     if (name[i] != static_cast<char>(buf[i])) return false;
   }
   return name[len] == '\0';
-}
-
-// windows-1252 meaning of 0x80..0x9F (0 = undefined → dropped).  Browsers
-// apply this to &#128;..&#159; — old converted books use &#151; for an em dash.
-constexpr uint16_t kCp1252C1[32] = {
-    0x20AC, 0,      0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
-    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0,      0x017D, 0,
-    0,      0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
-    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
-};
-
-// Zero-width / invisible format characters.  No glyph in the reader fonts —
-// they rendered as '?' (or split words visibly).  Soft hyphen included: the
-// paginator does its own hyphenation.
-inline bool isInvisibleCodepoint(const uint32_t cp) {
-  return cp == 0x00AD || cp == 0x061C || cp == 0x180E ||
-         (cp >= 0x200B && cp <= 0x200F) ||   // ZWSP ZWNJ ZWJ LRM RLM
-         (cp >= 0x202A && cp <= 0x202E) ||   // bidi embeddings / overrides
-         (cp >= 0x2060 && cp <= 0x2064) ||   // word joiner, invisible math
-         (cp >= 0x2066 && cp <= 0x206F) ||   // bidi isolates, deprecated
-         (cp >= 0xFE00 && cp <= 0xFE0F) ||   // variation selectors
-         cp == 0xFEFF ||                     // BOM / ZWNBSP
-         (cp >= 0xE0000 && cp <= 0xE007F);   // tag characters
 }
 
 // Entity-name byte: alnum, plus '#' as the first byte of a numeric reference.
@@ -288,19 +266,12 @@ void HtmlStripper::emitChar(const uint8_t b) {
 
 // Final per-code-point gate for multi-byte text (raw UTF-8 or an entity).
 void HtmlStripper::emitCodepoint(const uint32_t cp, const uint8_t* bytes, const uint8_t n) {
-  if (isInvisibleCodepoint(cp)) return;
-  if (cp >= 0x80u && cp <= 0x9Fu) {
-    // C1 control — almost always windows-1252 text mis-decoded as Latin-1.
-    const uint16_t mapped = kCp1252C1[cp - 0x80u];
-    if (mapped != 0) emitUtf8(mapped);
-    return;
+  const uint32_t mapped = mapTextCodepoint(cp);  // TextHygiene.h
+  if (mapped == cp) {
+    sink_.emit(bytes, n);
+  } else if (mapped != 0) {
+    emitUtf8(mapped);
   }
-  if (cp == 0x2028u || cp == 0x2029u) {  // LINE / PARAGRAPH SEPARATOR
-    const uint8_t sp = ' ';
-    sink_.emit(&sp, 1);
-    return;
-  }
-  sink_.emit(bytes, n);
 }
 
 void HtmlStripper::flushUtf8() {
@@ -734,7 +705,7 @@ bool HtmlStripper::dispatchEntity(const bool terminated) {
 void HtmlStripper::onAttrValueComplete() {
   if (captureCurrent_ && payloadLen_ > 0) {
     if (captureKind_ == AttrKind::Id) {
-      // v3.11.13 — an anchor survives display:none: page-list and footnote
+      // v3.11.12 — an anchor survives display:none: page-list and footnote
       // targets are often hidden page-number spans.  It has no glyphs.
       const bool closed = gate_.closed;
       flushUtf8();  // a held-back partial sequence belongs to the hidden text
@@ -789,7 +760,7 @@ void HtmlStripper::beginAttrValue() {
   }
   captureCurrent_ = (captureKind_ != AttrKind::None);
   payloadLen_ = 0;
-  // v3.11.13 — `class` / `style` are resolved byte by byte (never buffered).
+  // v3.11.12 — `class` / `style` are resolved byte by byte (never buffered).
   cssAttr_ = CssAttr::None;
   if (css_ != nullptr && !isEndTag_ && !captureCurrent_) {
     if (eqIc(attrName_, attrNameLen_, "class", 5)) {
@@ -804,7 +775,7 @@ void HtmlStripper::beginAttrValue() {
 }
 
 // ===========================================================================
-// v3.11.13 — CSS resolution (Html mode with a style table).
+// v3.11.12 — CSS resolution (Html mode with a style table).
 // ===========================================================================
 // Italic / bold / centre can have several nested sources (tags and CSS).  With
 // CSS on, the marker goes out when the first source opens and the last one
