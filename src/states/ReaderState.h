@@ -243,9 +243,11 @@ class ReaderState : public State {
 
   // Display helpers
   void displayWithRefresh(Core& core);
-  void renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride = 0,
+  // v3.11.12 — returns false (nothing drawn) while a background inflate is
+  // using the framebuffer as its dictionary; callers retry on a later tick.
+  bool renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride = 0,
                                    const char* detail = nullptr);
-  void renderLoadingStatusMessage(Core& core);
+  bool renderLoadingStatusMessage(Core& core);
 
   // v2.0.205 — the loading/indexing overlay is a single STATIC banner drawn
   // by renderCenteredStatusMessage over the existing screen content.  The

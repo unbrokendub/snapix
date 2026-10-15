@@ -182,7 +182,8 @@ bool EpubChapterParser::rebuildAnchorMapFromCachedIndex() {
       streamingViewportMarginBottom_, streamingViewportMarginLeft_,
       streamingViewportMarginRight_, epub_->getLanguage());
   const uint16_t configHash = snapix::smolport::computePageIndexConfigHash(
-      cfg, config_.fontId, config_.fakeBold);
+      cfg, config_.fontId, config_.fakeBold,
+      imageCachePath_.empty() ? snapix::smolport::kLayoutFlagNoImages : 0);
 
   std::vector<snapix::smolport::PageBoundarySnapshot> boundaries;
   if (!snapix::smolport::deserializePageIndex(
@@ -464,7 +465,8 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
       streamingViewportMarginRight_, epub_->getLanguage());
   const uint16_t streamingConfigHash =
       snapix::smolport::computePageIndexConfigHash(
-          streamingCfg, config_.fontId, config_.fakeBold);
+          streamingCfg, config_.fontId, config_.fakeBold,
+          imageCachePath_.empty() ? snapix::smolport::kLayoutFlagNoImages : 0);
 
   auto hasCurrentIndex = [&]() -> bool {
     File idxProbe;
@@ -620,6 +622,22 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
                                                             true, resolveImage,
                                                             config_.fakeBold,
                                                             config_.superSubFontId);  // v3.6.0
+    // v3.11.12 — EPUB BMPs are decoded only after a page is first SHOWN, i.e.
+    // after this walk.  Size images from their ZIP header instead, so the
+    // index lays them out exactly as the later render will (the adapter pins
+    // the size in a "<bmp>.dim" sidecar the render reads back).
+    if (!imageCacheDir.empty()) {
+      const std::shared_ptr<Epub> epub = epub_;
+      const uint16_t boxW = config_.viewportWidth;
+      const uint16_t boxH = config_.viewportHeight;
+      adapter.setImageSizeProbe([epub, chapterBase, boxW, boxH](const uint8_t* p, size_t l, uint16_t& w,
+                                                                uint16_t& h) -> int {
+        if (!epub || p == nullptr || l == 0) return -1;
+        const std::string src(reinterpret_cast<const char*>(p), l);
+        const std::string href = chapterBase.empty() ? src : FsHelpers::normalisePath(chapterBase + src);
+        return epub->probeImageLayoutSize(href, boxW, boxH, w, h);
+      });
+    }
     snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
     // v3.10.2 — HEAP the streaming buffer (was a 4 KB stack array).  This R4.c

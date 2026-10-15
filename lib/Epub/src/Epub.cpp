@@ -7,6 +7,7 @@
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <ImageConverter.h>
+#include <ImageHeaderSniffer.h>
 #include <Logging.h>
 #include <SDCardManager.h>
 #include <ZipFile.h>
@@ -1020,6 +1021,39 @@ std::unique_ptr<ZipItemReader> Epub::openItemStream(const std::string& itemHref,
   // ZipFile is a transient — the returned reader holds its own file handle
   // and outlives the ZipFile instance.
   return ZipFile(filepath).openItemStream(path.c_str(), chunkSize, dictBuffer);
+}
+
+int Epub::probeImageLayoutSize(const std::string& itemHref, const uint16_t maxW, const uint16_t maxH,
+                               uint16_t& outW, uint16_t& outH, const bool allowFramebufferDict) const {
+  outW = 0;
+  outH = 0;
+  if (!ImageConverterFactory::isSupported(itemHref)) return 0;
+  std::unique_ptr<ZipItemReader> reader;
+  if (allowFramebufferDict) {
+    reader = openItemStream(itemHref, 1024, /*dictBuffer=*/nullptr);  // heap → arbitrated framebuffer
+  } else {
+    const std::string path = FsHelpers::normalisePath(
+        FsHelpers::percentDecode(FsHelpers::stripQueryAndFragment(itemHref)));
+    reader = ZipFile(filepath).openItemStream(path.c_str(), 1024, /*dictBuffer=*/nullptr);  // heap only
+  }
+  if (!reader) return -1;
+  // Headers sit in the first few hundred bytes (PNG/BMP) or after the APPn
+  // segments (JPEG: EXIF/ICC can push SOF out to ~64 KB).  Bound the inflate.
+  constexpr uint32_t kMaxProbeBytes = 128 * 1024;
+  snapix::image::ImageHeaderSniffer sniffer;
+  uint8_t buf[512];
+  uint32_t total = 0;
+  while (sniffer.result() == snapix::image::ImageHeaderSniffer::Result::NeedMore) {
+    if (total >= kMaxProbeBytes) return -1;
+    const int n = reader->read(buf, sizeof(buf));
+    if (n < 0) return -1;
+    if (n == 0) return 0;  // EOF before any size — corrupt / truncated
+    total += static_cast<uint32_t>(n);
+    sniffer.feed(buf, static_cast<size_t>(n));
+  }
+  if (sniffer.result() != snapix::image::ImageHeaderSniffer::Result::Found) return 0;
+  snapix::image::fitImageBox(sniffer.width(), sniffer.height(), maxW, maxH, outW, outH);
+  return (outW > 0 && outH > 0) ? 1 : 0;
 }
 
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {

@@ -1,7 +1,13 @@
 #include "InflateReader.h"
 
+#include <atomic>
 #include <cstring>
 #include <type_traits>
+
+#if defined(ARDUINO)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
 
 namespace {
 constexpr size_t INFLATE_DICT_SIZE = 32768;
@@ -39,7 +45,68 @@ constexpr size_t INFLATE_DICT_SIZE = 32768;
 // EPUB + cached JPEG instance + image-bearing FB2 + cold extend) BEFORE
 // trusting the budget.  The headroom we have on simple workloads
 // vanishes on heavy ones.
+
+// v3.11.12 — external-buffer (framebuffer) ownership.  See InflateReader.h.
+enum : uint8_t { kOwnerNone = 0, kOwnerInflate = 1, kOwnerDisplay = 2 };
+std::atomic<uint8_t> gExternalOwner{kOwnerNone};
+std::atomic<void*> gDisplayTask{nullptr};
+std::atomic<void*> gInflateTask{nullptr};
+std::atomic<bool> gExternalClobbered{false};
+
+void* currentTask() {
+#if defined(ARDUINO)
+  return static_cast<void*>(xTaskGetCurrentTaskHandle());
+#else
+  return nullptr;
+#endif
 }
+
+// 0 = denied, 1 = exclusive claim, 2 = the calling task is itself mid-frame
+// (sequential use on one task — e.g. a cover extracted inside the render path
+// before it draws — exactly the pre-v3.11.12 behaviour).
+uint8_t claimExternalForInflate() {
+  void* const self = currentTask();
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    uint8_t expected = kOwnerNone;
+    if (gExternalOwner.compare_exchange_strong(expected, kOwnerInflate)) {
+      gInflateTask.store(self);
+      return 1;
+    }
+    if (expected == kOwnerDisplay && self != nullptr && gDisplayTask.load() == self) return 2;
+    // This task already inflates into the buffer: a second window on the same
+    // bytes would corrupt both — fail now instead of waiting on ourselves.
+    if (expected == kOwnerInflate && self != nullptr && gInflateTask.load() == self) return 0;
+#if defined(ARDUINO)
+    // A UI frame (draw + e-ink upload, ≤ ~1.5 s) or another inflate holds it.
+    vTaskDelay(pdMS_TO_TICKS(10));
+#else
+    return 0;
+#endif
+  }
+  return 0;
+}
+}
+
+uint8_t InflateReader::beginDisplayFrame() {
+  void* const self = currentTask();
+  uint8_t expected = kOwnerNone;
+  if (gExternalOwner.compare_exchange_strong(expected, kOwnerDisplay)) {
+    gDisplayTask.store(self);
+    return 1;
+  }
+  if (expected == kOwnerDisplay && gDisplayTask.load() == self) return 2;
+  return 0;
+}
+
+void InflateReader::endDisplayFrame(const uint8_t token) {
+  if (token != 1) return;
+  gDisplayTask.store(nullptr);
+  gExternalOwner.store(kOwnerNone);
+}
+
+bool InflateReader::externalDictInUse() { return gExternalOwner.load() == kOwnerInflate; }
+
+bool InflateReader::consumeExternalDictClobbered() { return gExternalClobbered.exchange(false); }
 
 // Guarantee the cast pattern in the header comment is valid.
 static_assert(std::is_standard_layout<InflateReader>::value,
@@ -62,10 +129,12 @@ bool InflateReader::init(const bool streaming, uint8_t* externalBuffer) {
     if (ringBuffer) {
       ownsRingBuffer = true;
     } else if (externalBuffer) {
-      // Heap fragmented — accept the framebuffer-corruption glitch risk
-      // (right-half panel garbage during chapter parse, fires only when
-      // the e-paper driver's deferred RED-RAM upload reads the buffer
-      // mid-inflate).  Better than failing the chapter parse entirely.
+      // Heap fragmented — borrow the framebuffer, but only while no UI frame
+      // is using it (v3.11.12 arbitration; pre-fix the borrow was blind and
+      // raced the banner / warm-page renders).  Denied → fail like a failed
+      // malloc; callers already treat that as a transient extract failure.
+      externalClaim = claimExternalForInflate();
+      if (externalClaim == 0) return false;
       ringBuffer = externalBuffer;
       ownsRingBuffer = false;
     } else {
@@ -84,6 +153,14 @@ void InflateReader::deinit() {
   //   * External buffer (not owned): nothing to do; caller owns lifetime.
   if (ringBuffer && ownsRingBuffer) {
     free(ringBuffer);
+  }
+  if (externalClaim != 0) {
+    gExternalClobbered.store(true);
+    if (externalClaim == 1) {
+      gInflateTask.store(nullptr);
+      gExternalOwner.store(kOwnerNone);
+    }
+    externalClaim = 0;
   }
   ringBuffer = nullptr;
   ownsRingBuffer = false;

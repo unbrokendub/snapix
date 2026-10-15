@@ -82,16 +82,20 @@ struct ChunkedIdxState {
 // `resolveImage` (optional) lets the MEASURE walk account for inline-image
 // heights so page boundaries match the render path — FB2 passes its
 // cacheImage-backed resolver; TXT/MD (no inline images) leave it empty.
+// `probeImage` (optional, v3.11.12) supplies the source-header layout size so
+// it does not depend on whether the BMP is decoded yet.
 uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCachePath,
                                  bool sourceExhausted, GfxRenderer& renderer,
                                  const RenderConfig& config, int marginTop, int marginBottom,
                                  int marginLeft, int marginRight, const char* hyphenLang,
-                                 std::function<std::string(const uint8_t*, size_t)> resolveImage = {});
+                                 std::function<std::string(const uint8_t*, size_t)> resolveImage = {},
+                                 std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)> probeImage = {});
 uint16_t extendChunkedSectionIdx(
     ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache, bool sourceExhausted,
     GfxRenderer& renderer, const RenderConfig& config, int marginTop, int marginBottom,
     int marginLeft, int marginRight, const char* hyphenLang,
-    std::function<std::string(const uint8_t*, size_t)> resolveImage = {});
+    std::function<std::string(const uint8_t*, size_t)> resolveImage = {},
+    std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)> probeImage = {});
 
 // Load the CURRENT (version + configHash matching) idx into `st` so a cold
 // (post-reboot) parser skips re-measuring chunks it already indexed.  Returns

@@ -384,6 +384,13 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/lib/SmolPort/src
       ${PROJECT_ROOT}/lib/Hyphenation/src
     )
+  elseif(TEST_NAME STREQUAL "ImageHeaderSnifferTest")
+    # v3.11.12 — header-only JPEG/PNG/BMP size sniffer used to lay out EPUB
+    # images before their BMP is decoded.
+    add_executable(${TEST_NAME} ${TEST_SRC} ${TEST_HELPERS})
+    target_include_directories(${TEST_NAME} PRIVATE
+      ${PROJECT_ROOT}/lib/ImageConverter/src
+    )
   elseif(TEST_NAME STREQUAL "HtmlStripperIntegrityTest")
     # v3.11.12 — stripper must neither drop nor invent text (bare '&', stray
     # '<', <head><title>, invisible format chars, SVG <image> refs).

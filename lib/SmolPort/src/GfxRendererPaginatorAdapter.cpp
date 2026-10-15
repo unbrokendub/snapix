@@ -170,6 +170,68 @@ void GfxRendererPaginatorAdapter::drawWord(uint16_t x, uint16_t y, const uint8_t
 // here without doing any decode work of its own.
 // ===========================================================================
 
+namespace {
+
+// v3.11.12 — "<bmp>.dim" sidecar: the image's LAYOUT size, recorded once and
+// authoritative from then on.  8 bytes: 'D','1', w LE16, h LE16, 2 spare.
+// w == h == 0 records "image unusable — lay out as absent".
+bool readDimSidecar(const std::string& dimPath, uint16_t& w, uint16_t& h) {
+  if (!LittleFS.exists(dimPath.c_str())) return false;
+  File f = LittleFS.open(dimPath.c_str(), "r");
+  if (!f) return false;
+  uint8_t b[8];
+  const size_t got = f.read(b, sizeof(b));
+  f.close();
+  if (got != sizeof(b) || b[0] != 'D' || b[1] != '1') return false;
+  w = static_cast<uint16_t>(b[2] | (b[3] << 8));
+  h = static_cast<uint16_t>(b[4] | (b[5] << 8));
+  return true;
+}
+
+void writeDimSidecar(const std::string& dimPath, uint16_t w, uint16_t h) {
+  // Atomic: a torn 8-byte write must not leave a sidecar that parses.
+  const std::string tmp = dimPath + ".tmp";
+  File f = LittleFS.open(tmp.c_str(), "w");
+  if (!f) {
+    // Image cache dir not created yet (nothing decoded for this book so far).
+    const size_t slash = dimPath.rfind('/');
+    if (slash == std::string::npos || slash == 0) return;
+    LittleFS.mkdir(dimPath.substr(0, slash).c_str());
+    f = LittleFS.open(tmp.c_str(), "w");
+    if (!f) return;
+  }
+  const uint8_t b[8] = {'D', '1', static_cast<uint8_t>(w & 0xFF), static_cast<uint8_t>(w >> 8),
+                        static_cast<uint8_t>(h & 0xFF), static_cast<uint8_t>(h >> 8), 0, 0};
+  const bool ok = f.write(b, sizeof(b)) == sizeof(b);
+  f.close();
+  if (!ok || !LittleFS.rename(tmp.c_str(), dimPath.c_str())) LittleFS.remove(tmp.c_str());
+}
+
+bool readBmpSize(const std::string& bmpPath, uint16_t& w, uint16_t& h) {
+  if (!LittleFS.exists(bmpPath.c_str())) return false;
+  File bmpFile = LittleFS.open(bmpPath.c_str(), "r");
+  if (!bmpFile) return false;
+  Bitmap bm(bmpFile, /*dithering=*/false);
+  const bool ok = bm.parseHeaders() == BmpReaderError::Ok && bm.getWidth() > 0 && bm.getHeight() > 0;
+  if (ok) {
+    w = static_cast<uint16_t>(bm.getWidth());
+    h = static_cast<uint16_t>(bm.getHeight());
+  }
+  bmpFile.close();
+  return ok;
+}
+
+}  // namespace
+
+// v3.11.12 — the layout size of an image must be the SAME for the MEASURE walk
+// that builds the page index and for every later render.  Pre-fix it was the
+// cached BMP's header size, but the BMP is decoded asynchronously AFTER the
+// index walk (EPUB: only once the page is first shown; FB2: BG queue), so the
+// walk laid the image out as absent while the render placed it at full height
+// → the page overflowed and the text after the image was never shown (and the
+// stale index was persisted).  Now: the "<bmp>.dim" sidecar decides; when it
+// is missing the size comes from the source header (probe), falling back to
+// the BMP header, and is recorded so every later walk/render agrees.
 bool GfxRendererPaginatorAdapter::resolveImageSize(const uint8_t* path, size_t len,
                                                      uint16_t* outWidth, uint16_t* outHeight) {
   if (!resolveImagePath_ || path == nullptr || len == 0 ||
@@ -178,18 +240,22 @@ bool GfxRendererPaginatorAdapter::resolveImageSize(const uint8_t* path, size_t l
   }
   const std::string bmpPath = resolveImagePath_(path, len);
   if (bmpPath.empty()) return false;
-  if (!LittleFS.exists(bmpPath.c_str())) return false;
-  File bmpFile = LittleFS.open(bmpPath.c_str(), "r");
-  if (!bmpFile) return false;
-  Bitmap bm(bmpFile, /*dithering=*/false);
-  const BmpReaderError err = bm.parseHeaders();
-  if (err != BmpReaderError::Ok) {
-    bmpFile.close();
-    return false;
+  const std::string dimPath = bmpPath + ".dim";
+
+  uint16_t w = 0, h = 0;
+  if (!readDimSidecar(dimPath, w, h)) {
+    int probed = -1;
+    if (probeImageSize_) probed = probeImageSize_(path, len, w, h);
+    if (probed < 0) {
+      if (!readBmpSize(bmpPath, w, h)) return false;  // unknown yet — nothing recorded
+    } else if (probed == 0) {
+      w = h = 0;
+    }
+    writeDimSidecar(dimPath, w, h);
   }
-  *outWidth = static_cast<uint16_t>(bm.getWidth());
-  *outHeight = static_cast<uint16_t>(bm.getHeight());
-  bmpFile.close();
+  if (w == 0 || h == 0) return false;
+  *outWidth = w;
+  *outHeight = h;
   return true;
 }
 

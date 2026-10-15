@@ -100,11 +100,19 @@ class PageCountingObserver : public MarkerObserver {
   }
   ObserverStatus onAnchorAt(const uint8_t* id, uint16_t len,
                             uint32_t /*sourceOffset*/) override {
-    // Anchors are transparent to words (`что<a id/>написать` stays ONE word),
-    // so they deliberately do NOT flush the partial word.
+    // v3.11.12 — an anchor INSIDE a word (`что<a id/>написать`,
+    // `word<span id=…>part`) now commits the pending partial word with
+    // continuation glue first — still rendered as one word (no space), exactly
+    // like a mid-word style toggle.  Pre-fix the anchor was skipped inside the
+    // partial, so the word's bytes were no longer contiguous in the source and
+    // every "word start + byte index" offset past the anchor (emergency split,
+    // hyphenation remainder carried to the next page) pointed 4+len bytes too
+    // early → the next page repeated the tail of the word (fuzz-found).
+    if (prerollForMarker() == ObserverStatus::Stop) return ObserverStatus::Stop;
     if (onAnchorPage_) {
       onAnchorPage_(id, len, currentPage_);
     }
+    markerStart_ = bytesSeen_;
     bytesSeen_ += static_cast<uint32_t>(4 + len);
     return checkAdvance(inner_.onAnchor(id, len));
   }
@@ -462,7 +470,7 @@ inline uint32_t read_u32_le(const uint8_t* p) {
 }  // namespace
 
 uint16_t computePageIndexConfigHash(const StreamingPaginatorConfig& cfg, int fontId,
-                                     uint8_t fakeBold) {
+                                     uint8_t fakeBold, uint8_t layoutFlags) {
   // Pack the inputs into a fixed-layout struct on the stack, then hash
   // the bytes.  Using a struct (rather than a stream of writes) ensures
   // consistent byte representation across builds.
@@ -481,7 +489,8 @@ uint16_t computePageIndexConfigHash(const StreamingPaginatorConfig& cfg, int fon
     uint8_t  fakeBold;          // v2.0.146 — width-affecting setting
     uint8_t  hyphenate;         // v3.3.0 — word hyphenation on/off (layout-affecting)
     char     hyphenLang[8];     // v3.3.0 — dictionary selects break points
-    uint8_t  reserved[2];        // pad to keep struct alignment stable
+    uint8_t  layoutFlags;       // v3.11.12 — kLayoutFlagNoImages, …
+    uint8_t  reserved[1];        // pad to keep struct alignment stable
   } pc{};
   pc.fontId = fontId;
   pc.pageWidth = cfg.pageWidth;
@@ -497,6 +506,7 @@ uint16_t computePageIndexConfigHash(const StreamingPaginatorConfig& cfg, int fon
   pc.fakeBold = fakeBold;
   pc.hyphenate = cfg.hyphenate ? 1 : 0;
   std::memcpy(pc.hyphenLang, cfg.hyphenLang, sizeof(pc.hyphenLang));
+  pc.layoutFlags = layoutFlags;
   const uint32_t h32 = fnv1a32(reinterpret_cast<const uint8_t*>(&pc), sizeof(pc));
   // Fold 32→16 by XOR high half with low half.  Reduces hash collisions
   // for sequential changes (font-size +/-1 etc.) compared to taking

@@ -362,8 +362,15 @@ constexpr size_t   kPageIndexEntryBytes = 8;
 // hashed only cfg+fontId; their layout assumed fakeBold=0.  After
 // the version bump (6 → 7 → 8) ALL old indices invalidate and
 // rebuild with the correct fakeBold-aware widths.
+//
+// v3.11.12 — `layoutFlags` folds content-level layout switches that live
+// outside the paginator config: bit0 = inline images disabled (EPUB
+// showImages off).  Pre-fix toggling showImages reused an index built with
+// the other setting — images appeared/disappeared at render while the page
+// boundaries stayed put, duplicating or dropping the text around them.
+constexpr uint8_t kLayoutFlagNoImages = 0x01;
 uint16_t computePageIndexConfigHash(const StreamingPaginatorConfig& cfg, int fontId,
-                                     uint8_t fakeBold = 0);
+                                     uint8_t fakeBold = 0, uint8_t layoutFlags = 0);
 
 // Serialize a vector of PageBoundarySnapshot into a byte buffer.
 // `outBuf` must have capacity for at least

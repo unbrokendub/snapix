@@ -237,8 +237,15 @@ struct Gen {
       return asciiWord(rnd(1, 4)) + "<b>" + asciiWord(rnd(1, 4)) + "</b>" + asciiWord(rnd(1, 4));
     }
     if (opt.allowAnchors && r <= 13) return "<a id=\"a" + std::to_string(rnd(1, 999)) + "\"></a>" + word();
-    if (opt.allowNbsp && r <= 17) return word() + "&nbsp;" + word() + "&nbsp;" + word();
-    if (opt.allowBr && r <= 18) return word() + "<br/>" + word();
+    // v3.11.12 — anchor INSIDE a word (что<a id/>написать, word<span id>part):
+    // the glued halves must keep exact source offsets when a long word is
+    // split / carried across a page boundary.
+    if (opt.allowAnchors && r <= 15) {
+      return word() + "<a id=\"m" + std::to_string(rnd(1, 999)) + "\"></a>" + word() +
+             (chance(30) ? "<span id=\"s" + std::to_string(rnd(1, 999)) + "\">" + word() + "</span>" : "");
+    }
+    if (opt.allowNbsp && r <= 19) return word() + "&nbsp;" + word() + "&nbsp;" + word();
+    if (opt.allowBr && r <= 20) return word() + "<br/>" + word();
     return word();
   }
 

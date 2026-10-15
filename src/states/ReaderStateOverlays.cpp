@@ -796,8 +796,9 @@ void ReaderState::processPendingEpubPageLoad(Core& core) {
   if (!pendingEpubPageLoadMessageShown_ && pendingEpubPageLoadStartedMs_ != 0 &&
       (nowMs - pendingEpubPageLoadStartedMs_) >= reader::kPendingPageLoadOverlayDelayMs) {
     // v2.0.199 — unified "Loading..." (was conditional Indexing/Loading).
-    renderLoadingStatusMessage(core);
-    pendingEpubPageLoadMessageShown_ = true;
+    // v3.11.12 — only counts as shown if it was drawn (not deferred while a
+    // background inflate held the framebuffer).
+    if (renderLoadingStatusMessage(core)) pendingEpubPageLoadMessageShown_ = true;
   }
 
   if (pendingEpubPageLoadLastDiagMs_ == 0 || nowMs - pendingEpubPageLoadLastDiagMs_ >= 1000) {

@@ -637,12 +637,17 @@ ObserverStatus StreamingPaginator::onImageRef(const uint8_t* path, uint16_t len)
       imgW = static_cast<uint16_t>(w > 0 ? w : 1);
       imgH = contentH;
     }
-    // Clamp width to the working area (renderer should already scale,
-    // but defense in depth — clip if oversized).
+    // Fit the width to the working area.  v3.11.12 — aspect-preserving (was a
+    // plain width clamp that kept the full height: drawBitmap fits the bitmap
+    // inside the box, so the page reserved a taller box than was drawn).
     const uint16_t maxW = static_cast<uint16_t>(cfg_.pageWidth -
                                                   cfg_.marginLeft -
                                                   cfg_.marginRight);
-    if (imgW > maxW) imgW = maxW;
+    if (maxW > 0 && imgW > maxW) {
+      const uint32_t h = static_cast<uint32_t>(imgH) * maxW / imgW;
+      imgH = static_cast<uint16_t>(h > 0 ? h : 1);
+      imgW = maxW;
+    }
   }
 
   if (lineWordCount_ > 0 || lineHasContent_) {

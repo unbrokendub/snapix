@@ -190,17 +190,19 @@ uint16_t extendChunkedSectionIdx(ChunkedIdxState& st, const std::string& bookCac
                                  bool sourceExhausted, GfxRenderer& renderer,
                                  const RenderConfig& config, int mT, int mB, int mL, int mR,
                                  const char* hyphenLang,
-                                 std::function<std::string(const uint8_t*, size_t)> resolveImage) {
+                                 std::function<std::string(const uint8_t*, size_t)> resolveImage,
+                                 std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)> probeImage) {
   auto cache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
   return extendChunkedSectionIdx(st, cache, sourceExhausted, renderer, config, mT, mB, mL,
-                                 mR, hyphenLang, std::move(resolveImage));
+                                 mR, hyphenLang, std::move(resolveImage), std::move(probeImage));
 }
 
 uint16_t extendChunkedSectionIdx(
     ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache, bool sourceExhausted,
     GfxRenderer& renderer, const RenderConfig& config, int mT, int mB, int mL, int mR,
     const char* hyphenLang,
-    std::function<std::string(const uint8_t*, size_t)> resolveImage) {
+    std::function<std::string(const uint8_t*, size_t)> resolveImage,
+    std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)> probeImage) {
   const snapix::smolport::StreamingPaginatorConfig cfg =
       makeSectionConfig(renderer, config, mT, mB, mL, mR, hyphenLang);
   st.configHash = snapix::smolport::computePageIndexConfigHash(cfg, config.fontId, config.fakeBold);
@@ -247,6 +249,7 @@ uint16_t extendChunkedSectionIdx(
   snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer, config.fontId, config.fontId,
                                                         /*black=*/true, resolveFn, config.fakeBold,
                                                         config.superSubFontId);
+  adapter.setImageSizeProbe(std::move(probeImage));
   snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
   // HEAP-allocate the streaming buffer — NOT a 4 KB stack array.  This MEASURE

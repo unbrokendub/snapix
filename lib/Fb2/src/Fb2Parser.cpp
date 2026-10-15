@@ -323,26 +323,22 @@ bool Fb2Parser::parsePages(const std::function<void(std::unique_ptr<Page>)>& onP
               static_cast<unsigned>(cfg.marginLeft), static_cast<unsigned>(cfg.marginRight),
               static_cast<unsigned>(cfg.bodyLineHeight));
 
-      // Image resolver for FB2 — lazy decode-on-demand so MEASURE-walk page
+      // Image hooks for FB2 — lazy decode-on-demand so MEASURE-walk page
       // boundaries account for image heights (cacheImage is idempotent).
-      const Fb2* fb2Ptr = fb2_;
+      // v3.11.12 — layout size comes from the source header via the probe and
+      // is pinned in a sidecar, so it no longer depends on whether the BG
+      // worker has decoded the BMP yet (see GfxRendererPaginatorAdapter).
       const uint16_t imgMaxW =
           static_cast<uint16_t>(cfg.pageWidth - cfg.marginLeft - cfg.marginRight);
       const uint16_t imgMaxH =
           static_cast<uint16_t>(cfg.pageHeight - cfg.marginTop - cfg.marginBottom);
-      auto resolveImage = [fb2Ptr, imgMaxW, imgMaxH](const uint8_t* p, size_t l) -> std::string {
-        if (fb2Ptr == nullptr || p == nullptr || l == 0) return {};
-        std::string src(reinterpret_cast<const char*>(p), l);
-        if (!src.empty() && src[0] == '#') src.erase(0, 1);
-        std::string outPath;
-        uint16_t w = 0, h = 0;
-        const bool ok = fb2Ptr->cacheImage(src, outPath, w, h, imgMaxW, imgMaxH,
-                                            /*fastMode=*/true, /*shouldAbort=*/{});
-        return ok ? outPath : std::string();
-      };
+      snapix::smolport::ResolveImagePathFn resolveImage;
+      snapix::smolport::ProbeImageSizeFn probeImage;
+      if (fb2_ != nullptr) fb2_->makeStreamingImageHooks(imgMaxW, imgMaxH, resolveImage, probeImage);
       snapix::smolport::GfxRendererPaginatorAdapter adapter(renderer_, config_.fontId, config_.fontId,
                                                             true, resolveImage, config_.fakeBold,
                                                             config_.superSubFontId);
+      adapter.setImageSizeProbe(probeImage);
       snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
       // HEAP-allocate the streaming buffer — NOT a 4 KB stack array.  This R4.c
@@ -630,26 +626,19 @@ bool Fb2Parser::parsePagesProgressive(
   // Image resolver for the MEASURE walk so inline-image heights shift page
   // boundaries to match the render path (mirrors the section-scoped R4.c
   // resolver).  cacheImage is idempotent + fast-mode (header peek only).
-  const Fb2* fb2Ptr = fb2_;
   const int mT = streamingViewportMarginTop_, mB = streamingViewportMarginBottom_;
   const int mL = streamingViewportMarginLeft_, mR = streamingViewportMarginRight_;
   const uint16_t imgMaxW = static_cast<uint16_t>(renderer_.getScreenWidth() - mL - mR);
   const uint16_t imgMaxH = static_cast<uint16_t>(renderer_.getScreenHeight() - mT - mB);
-  auto resolveImage = [fb2Ptr, imgMaxW, imgMaxH](const uint8_t* p, size_t l) -> std::string {
-    if (fb2Ptr == nullptr || p == nullptr || l == 0) return {};
-    std::string src(reinterpret_cast<const char*>(p), l);
-    if (!src.empty() && src[0] == '#') src.erase(0, 1);
-    std::string outPath;
-    uint16_t w = 0, h = 0;
-    const bool ok = fb2Ptr->cacheImage(src, outPath, w, h, imgMaxW, imgMaxH,
-                                       /*fastMode=*/true, /*shouldAbort=*/{});
-    return ok ? outPath : std::string();
-  };
+  // v3.11.12 — resolver + source-header size probe (see makeStreamingImageHooks).
+  snapix::smolport::ResolveImagePathFn resolveImage;
+  snapix::smolport::ProbeImageSizeFn probeImage;
+  if (fb2_ != nullptr) fb2_->makeStreamingImageHooks(imgMaxW, imgMaxH, resolveImage, probeImage);
 
   if (chunkIdx_ > 0 && !progIdx_.configHashValid) {
     progPagesAvailable_ = snapix::pagecache::extendChunkedSectionIdx(
         progIdx_, cache, sourceExhausted_, renderer_, config_, mT, mB, mL, mR,
-        /*hyphenLang=*/"ru", resolveImage);
+        /*hyphenLang=*/"ru", resolveImage, probeImage);
   }
 
   // Make pages available: when the emit cursor catches up and source remains,
@@ -659,7 +648,7 @@ bool Fb2Parser::parsePagesProgressive(
     if (!markerizeNextChunk(cache)) break;
     const uint16_t avail = snapix::pagecache::extendChunkedSectionIdx(
         progIdx_, cache, sourceExhausted_, renderer_, config_, mT, mB, mL, mR,
-        /*hyphenLang=*/"ru", resolveImage);
+        /*hyphenLang=*/"ru", resolveImage, probeImage);
     if (avail == 0) {
       if (!sourceExhausted_ && ++guard <= 8192) continue;
       LOG_ERR(TAG, "[CONTENT][FB2] [STREAM] idx extend produced 0 pages (chunk %d)", chunkIdx_ - 1);

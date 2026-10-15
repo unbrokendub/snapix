@@ -57,6 +57,14 @@ namespace snapix::smolport {
 using ResolveImagePathFn =
     std::function<std::string(const uint8_t* path, size_t len)>;
 
+// v3.11.12 — layout-size probe from the SOURCE image (JPEG/PNG header in the
+// EPUB ZIP, FB2 <binary> header), used when no size sidecar exists yet.
+// Returns 1 = size found (outW/outH = layout box), 0 = image definitively
+// unusable (missing / unsupported / corrupt header → laid out as absent),
+// -1 = transient failure (I/O, OOM) → nothing is recorded, retried later.
+using ProbeImageSizeFn =
+    std::function<int(const uint8_t* path, size_t len, uint16_t& outW, uint16_t& outH)>;
+
 class GfxRendererPaginatorAdapter : public PaginatorRenderer {
  public:
   // `bodyFontId` and `headingFontId` come from the caller's font setup
@@ -82,6 +90,10 @@ class GfxRendererPaginatorAdapter : public PaginatorRenderer {
                               uint8_t fakeBoldMode = 0,
                               int superSubFontId = 0);  // v3.6.0 — 0 = no shrink
 
+  // v3.11.12 — see ProbeImageSizeFn.  Set by every caller whose MEASURE walk
+  // (page index) or render may run before the image's BMP exists.
+  void setImageSizeProbe(ProbeImageSizeFn probe) { probeImageSize_ = std::move(probe); }
+
   // PaginatorRenderer overrides
   uint16_t measureWidth(const uint8_t* text, size_t len, uint8_t styleBits) override;
   uint16_t getSpaceWidth(uint8_t styleBits) override;
@@ -99,6 +111,7 @@ class GfxRendererPaginatorAdapter : public PaginatorRenderer {
   int superSubFontId_ = 0;  // v3.6.0 — smaller font for <sup>/<sub> (0 = body)
   bool pixelState_;
   ResolveImagePathFn resolveImagePath_;
+  ProbeImageSizeFn probeImageSize_;  // v3.11.12
   uint8_t fakeBoldMode_ = 0;  // v2.0.146 — 0=off, 1=bold, 2=extrabold
 
   // v2.0.146 — apply fake-bold substitution to `*style`: BOLD →

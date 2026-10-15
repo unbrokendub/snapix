@@ -1304,6 +1304,46 @@ bool Fb2::cacheImage(const std::string& binaryId, std::string& outBmpPath, uint1
   return false;
 }
 
+void Fb2::makeStreamingImageHooks(
+    const uint16_t maxBoxWidth, const uint16_t maxBoxHeight,
+    std::function<std::string(const uint8_t*, size_t)>& outResolve,
+    std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)>& outProbe) const {
+  struct Memo {
+    std::string id;
+    bool ok = false;
+    uint16_t w = 0;
+    uint16_t h = 0;
+  };
+  auto memo = std::make_shared<Memo>();
+  const Fb2* self = this;
+  auto idOf = [](const uint8_t* p, size_t l) {
+    std::string id(reinterpret_cast<const char*>(p), l);
+    if (!id.empty() && id[0] == '#') id.erase(0, 1);  // <image l:href="#id">
+    return id;
+  };
+  outResolve = [self, memo, idOf, maxBoxWidth, maxBoxHeight](const uint8_t* p, size_t l) -> std::string {
+    if (p == nullptr || l == 0) return {};
+    const std::string id = idOf(p, l);
+    if (id.empty() || self->binaryIndexFind(id) == nullptr) return {};
+    std::string outPath;
+    uint16_t w = 0, h = 0;
+    const bool ok = self->cacheImage(id, outPath, w, h, maxBoxWidth, maxBoxHeight,
+                                     /*fastMode=*/true, /*shouldAbort=*/{});
+    memo->id = id;
+    memo->ok = ok && w > 0 && h > 0;
+    memo->w = w;
+    memo->h = h;
+    return flashImageCacheDir(self->cachePath) + "/" + id + ".bmp";
+  };
+  outProbe = [memo, idOf](const uint8_t* p, size_t l, uint16_t& w, uint16_t& h) -> int {
+    if (p == nullptr || l == 0 || memo->id != idOf(p, l)) return -1;
+    if (!memo->ok) return 0;
+    w = memo->w;
+    h = memo->h;
+    return 1;
+  };
+}
+
 bool Fb2::hasPendingImages() const {
   // v2.0.50: queued JPEGs (no pending file on SD) AND legacy pending dir
   // (PNGs + leftover JPEGs from older versions) both count as "has work".

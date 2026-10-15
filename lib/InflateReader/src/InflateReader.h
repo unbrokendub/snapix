@@ -90,10 +90,36 @@ class InflateReader {
   // Returns a pointer to the underlying TINF_DATA.
   uzlib_uncomp* raw() { return &decomp; }
 
+  // ---------------------------------------------------------------------------
+  // v3.11.12 — external-dictionary arbitration.  The external buffer is, in
+  // practice, the display FRAMEBUFFER (Epub's sharedZipDictBuffer()), used as
+  // uzlib's 32 KB window when the heap is too fragmented.  A background inflate
+  // and a UI frame must never use it at the same time:
+  //   * UI drawing into a live dictionary corrupts every later back-reference
+  //     → mojibake / garbage bytes in the chapter text that the markerizer
+  //     caches permanently (the v2.0.155 "хпÿÿите" symptom);
+  //   * inflate writing into a frame being drawn / uploaded → garbage on the
+  //     panel (the "noise behind the Loading… banner" glitch).
+  // init() claims the buffer before using it (waits ≤ 2 s for a UI frame to
+  // finish, else fails like a failed malloc); deinit() releases it and marks
+  // the framebuffer as clobbered.  The UI brackets each frame with
+  // beginDisplayFrame()/endDisplayFrame().
+  // ---------------------------------------------------------------------------
+  // 0 = an inflate holds the framebuffer (do not draw), 1 = acquired,
+  // 2 = already held by this task (nested frame — do not release).
+  static uint8_t beginDisplayFrame();
+  static void endDisplayFrame(uint8_t token);
+  // True while a background inflate is using the framebuffer as its window.
+  static bool externalDictInUse();
+  // True once after an inflate used the framebuffer: its pixels are garbage,
+  // so a frame that draws OVER existing content must clear the screen first.
+  static bool consumeExternalDictClobbered();
+
  private:
   uzlib_uncomp decomp = {};
   uint8_t* ringBuffer = nullptr;
   bool ownsRingBuffer = false;
+  uint8_t externalClaim = 0;  // v3.11.12 — 0 none, 1 exclusive, 2 nested in own UI frame
   // v2.0.178 — removed v2.0.177's `usingBssScratch` flag and the
   // associated BSS scratch buffer; reverted to v2.0.176's heap-first/
   // externalBuffer-fallback strategy.  See InflateReader.cpp top comment.

@@ -87,6 +87,16 @@ class Epub {
   std::unique_ptr<ZipItemReader> openItemStream(const std::string& itemHref, size_t chunkSize = 8192,
                                                 uint8_t* dictBuffer = nullptr) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
+  // v3.11.12 — page-layout size of an inline image, sniffed from the first
+  // bytes of the ZIP entry (JPEG SOF / PNG IHDR / BMP header) and fitted into
+  // maxW × maxH like the BMP converter does.  Lets the page-index walk lay an
+  // image out BEFORE its BMP is decoded.  Returns 1 = found, 0 = unusable
+  // (unsupported format / corrupt header), -1 = transient (not found, OOM, I/O).
+  // `allowFramebufferDict` = false for UI-task callers (the render path): the
+  // inflate window then comes from the heap only, never the framebuffer that
+  // is being drawn.
+  int probeImageLayoutSize(const std::string& itemHref, uint16_t maxW, uint16_t maxH, uint16_t& outW,
+                           uint16_t& outH, bool allowFramebufferDict = true) const;
   // Resolve every spine entry's uncompressed size with one ZIP central-
   // directory scan.  This is substantially faster than getItemSize() in a
   // loop because the latter reopens and rescans the archive for every href.

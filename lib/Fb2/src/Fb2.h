@@ -310,6 +310,19 @@ class Fb2 {
                   const std::function<bool()>& shouldAbort = nullptr) const;
 
   /**
+   * v3.11.12 — streaming-paginator image hooks shared by the page-index walk
+   * (Fb2Parser) and the render (ReaderState).  `resolve` registers the image
+   * (fast mode → BG decode queue) and ALWAYS returns its deterministic BMP path
+   * for a known binary id, even when registration failed — so a later decode
+   * failure cannot make the render skip an image the index laid out.  `probe`
+   * returns the layout size found by the preceding `resolve` (1), or 0 when
+   * the image is unusable.  See GfxRendererPaginatorAdapter::resolveImageSize.
+   */
+  void makeStreamingImageHooks(uint16_t maxBoxWidth, uint16_t maxBoxHeight,
+                               std::function<std::string(const uint8_t*, size_t)>& outResolve,
+                               std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)>& outProbe) const;
+
+  /**
    * BG worker entry point: scan the `<cachePath>/images/pending/` directory and
    * decode each pending JPEG / PNG into the matching `<id>.bmp` next to it.
    * Idempotent and abort-able — call repeatedly from a low-priority task.

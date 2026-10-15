@@ -11,6 +11,7 @@
 #include <Fb2Parser.h>
 #include <FsHelpers.h>  // v2.0.145 — normalisePath for streaming image-resolver
 #include <GfxRenderer.h>
+#include <InflateReader.h>  // v3.11.12 — framebuffer/inflate-dictionary arbitration
 #include <JpegToBmpConverter.h>  // v2.0.101: releaseAllPersistent() after cover-gen
 #include <LittleFS.h>  // v2.0.153 — metrics.bin sidecar load/save (used in every env)
 #include <UnifiedCache.h>  // v2.0.166 — Phase 5 unified streaming cache
@@ -1558,18 +1559,40 @@ void ReaderState::render(Core& core) {
     return;
   }
 
+  // v3.11.12 — framebuffer arbitration (see InflateReader.h).  While a
+  // background inflate uses the framebuffer as its 32 KB window (heap too
+  // fragmented), drawing a frame would corrupt the chapter text it is
+  // decompressing and put dictionary bytes on the panel.  A banner-only frame
+  // just waits (needsRender_ stays set → retried next loop); a real page or
+  // overlay frame cancels the worker, which releases the buffer on exit.
+  if (InflateReader::externalDictInUse()) {
+    const bool bannerOnly =
+        (pendingTocJumpActive_ && !pendingTocJumpDeferredDisplay_) || pendingEpubPageLoadActive_;
+    if (bannerOnly) return;
+    if (isWorkerRunning()) {
+      stopBackgroundCaching();
+      resumeBackgroundCachingAfterRender_ = true;
+    }
+  }
   const bool overlayRender = menuMode_ || bookmarkMode_ || tocMode_;
   if (overlayRender && isWorkerRunning()) {
     stopBackgroundCaching();
   }
+  // Claim the framebuffer only AFTER any worker stop: a worker waiting in
+  // InflateReader::init for this frame to end would otherwise stall the stop.
+  const uint8_t frame = InflateReader::beginDisplayFrame();
+  if (frame == 0) return;  // an inflate claimed it just now — retry next loop
+  struct FrameEnd {
+    uint8_t token;
+    ~FrameEnd() { InflateReader::endDisplayFrame(token); }
+  } frameEnd{frame};
 
   if (pendingTocJumpActive_ && !pendingTocJumpDeferredDisplay_) {
     if (!pendingTocJumpIndexingShown_) {
       // v2.0.199 — unified status banner uses "Loading..." for every
       // wait state.  Previously this branch showed "Indexing..." for the
       // TOC-jump path; user preferred a single label.
-      renderLoadingStatusMessage(core);
-      pendingTocJumpIndexingShown_ = true;
+      if (renderLoadingStatusMessage(core)) pendingTocJumpIndexingShown_ = true;
     }
   } else if (pendingTocJumpActive_ && pendingTocJumpDeferredDisplay_) {
     // v2.0.84: optimistic TOC navigation — render the target spine's page
@@ -1586,8 +1609,7 @@ void ReaderState::render(Core& core) {
   } else if (pendingEpubPageLoadActive_) {
     if (!pendingEpubPageLoadMessageShown_) {
       // v2.0.199 — unified "Loading..." (was conditional Indexing/Loading).
-      renderLoadingStatusMessage(core);
-      pendingEpubPageLoadMessageShown_ = true;
+      if (renderLoadingStatusMessage(core)) pendingEpubPageLoadMessageShown_ = true;
     }
   } else if (menuMode_) {
     const Theme& theme = THEME_MANAGER.current();
@@ -1602,6 +1624,8 @@ void ReaderState::render(Core& core) {
     if (!pendingEpubPageLoadActive_) {
       lastRenderedSpineIndex_ = currentSpineIndex_;
       lastRenderedSectionPage_ = currentSectionPage_;
+      // A full page was drawn: the framebuffer holds real pixels again.
+      (void)InflateReader::consumeExternalDictClobbered();
     }
     if (resumeBackgroundCachingAfterRender_) {
       resumeBackgroundCachingAfterRender_ = false;
@@ -2709,7 +2733,12 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           // the path can't be resolved.
           std::string imageCacheDir;
           std::string chapterBase;
-          if (contentType == ContentType::Epub) {
+          // v3.11.12 — honour showImages for EPUB exactly like the page-index
+          // walk does (EpubChapterParser gets an empty image dir when images
+          // are off).  Pre-fix the render placed images the index had laid
+          // out as absent → the page overflowed and the text after the image
+          // was never shown.
+          if (contentType == ContentType::Epub && core.settings.showImages) {
             auto* epubProv = core.content.asEpub();
             if (epubProv && epubProv->getEpub() && currentSpineIndex_ >= 0) {
               imageCacheDir = epubProv->getEpub()->getCachePath() + "/images";
@@ -2812,56 +2841,58 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
                 renderer_, rcfg, chapterBase, imageCacheDir, readItemFn,
                 /*quickImageDecode=*/true);
           }
-          auto resolvedImages =
-              std::make_shared<std::vector<std::pair<std::string, std::string>>>();
-          auto resolveImage = [imageCacheDir, chapterBase, contentType,
-                                fb2ForImages, epubImageCacheParser, imgMaxW,
-                                imgMaxH, resolvedImages](const uint8_t* p,
-                                                        size_t l) -> std::string {
-            if (p == nullptr || l == 0) return {};
-            std::string src(reinterpret_cast<const char*>(p), l);
-            const std::string cacheKey = src;
-            for (const auto& cached : *resolvedImages) {
-              if (cached.first == cacheKey) return cached.second;
-            }
-            if (contentType == ContentType::Fb2 && fb2ForImages != nullptr) {
-              // FB2: strip leading `#` from `<image l:href="#id">`.
-              if (!src.empty() && src[0] == '#') src.erase(0, 1);
-              std::string outPath;
-              uint16_t w = 0, h = 0;
-              const bool ok = fb2ForImages->cacheImage(
-                  src, outPath, w, h, imgMaxW, imgMaxH,
-                  /*fastMode=*/true, /*shouldAbort=*/{});
-              resolvedImages->emplace_back(cacheKey,
-                                           ok ? outPath : std::string());
-              return ok ? outPath : std::string();
-            }
-            if (contentType == ContentType::Epub && epubImageCacheParser) {
-              // If an earlier pass already queued this image, prioritise it
-              // without decoding synchronously inside the UI render.  The old
-              // drainTarget() call blocked the visible page for 3-10 seconds.
-              const std::string resolved =
-                  FsHelpers::normalisePath(chapterBase + src);
+          // v3.11.12 — the resolver returns the image's DETERMINISTIC BMP path
+          // (same formula as the page-index walk) whether or not the BMP exists
+          // or its decode was queued/failed; decode is only a side effect.  The
+          // layout size comes from the adapter's "<bmp>.dim" sidecar (written
+          // by the index walk from the source header), so a page lays out the
+          // same before and after its images are decoded.
+          snapix::smolport::ResolveImagePathFn resolveImage;
+          snapix::smolport::ProbeImageSizeFn probeImage;
+          if (contentType == ContentType::Fb2 && fb2ForImages != nullptr) {
+            fb2ForImages->makeStreamingImageHooks(imgMaxW, imgMaxH, resolveImage, probeImage);
+          } else if (contentType == ContentType::Epub && epubImageCacheParser) {
+            auto requested = std::make_shared<std::vector<std::string>>();
+            resolveImage = [imageCacheDir, chapterBase, epubImageCacheParser,
+                            requested](const uint8_t* p, size_t l) -> std::string {
+              if (p == nullptr || l == 0) return {};
+              const std::string src(reinterpret_cast<const char*>(p), l);
+              const std::string resolved = FsHelpers::normalisePath(chapterBase + src);
               const std::string expectedPath =
                   imageCacheDir + "/" +
                   std::to_string(std::hash<std::string>{}(resolved)) + ".bmp";
-              if (snapix::pendingImage::isPendingOrActive(expectedPath)) {
-                (void)snapix::pendingImage::promote(expectedPath);
-                resolvedImages->emplace_back(cacheKey, expectedPath);
-                return expectedPath;
+              // Queue the decode once per render.  If an earlier pass already
+              // queued it, just prioritise it — never decode synchronously
+              // inside the UI render (the old drainTarget() blocked 3-10 s).
+              if (std::find(requested->begin(), requested->end(), src) == requested->end()) {
+                requested->push_back(src);
+                if (snapix::pendingImage::isPendingOrActive(expectedPath)) {
+                  (void)snapix::pendingImage::promote(expectedPath);
+                } else {
+                  std::string outPath;
+                  uint16_t w = 0, h = 0;
+                  (void)epubImageCacheParser->cacheImageForStreaming(src, outPath, w, h);
+                }
               }
-
-              std::string outPath;
-              uint16_t w = 0, h = 0;
-              const bool ok = epubImageCacheParser->cacheImageForStreaming(
-                  src, outPath, w, h);
-              resolvedImages->emplace_back(cacheKey,
-                                           ok ? outPath : std::string());
-              return ok ? outPath : std::string();
-            }
-            // No resolver available — return empty so paginator skips.
-            return {};
-          };
+              return expectedPath;
+            };
+            // Only reached when the sidecar is missing (index built before
+            // v3.11.12 sidecars, or image cache cleared): same ZIP-header probe
+            // as the index walk.
+            // Box = RenderConfig viewport, as EpubChapterParser uses.
+            const auto vpBox = getReaderViewport(core.settings.statusBar != 0);
+            const std::shared_ptr<Epub> epubProbe = epubForImages;
+            const uint16_t boxW = static_cast<uint16_t>(vpBox.width);
+            const uint16_t boxH = static_cast<uint16_t>(vpBox.height);
+            probeImage = [epubProbe, chapterBase, boxW, boxH](const uint8_t* p, size_t l, uint16_t& w,
+                                                              uint16_t& h) -> int {
+              if (!epubProbe || p == nullptr || l == 0) return -1;
+              const std::string src(reinterpret_cast<const char*>(p), l);
+              // UI task, mid-frame: heap-only inflate window, never the framebuffer.
+              return epubProbe->probeImageLayoutSize(FsHelpers::normalisePath(chapterBase + src), boxW, boxH, w,
+                                                     h, /*allowFramebufferDict=*/false);
+            };
+          }
 
           // v2.0.146 — propagate user's fakeBold setting so the
           // streaming render path matches the legacy Page-tree's
@@ -2874,6 +2905,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
                                                                   resolveImage,
                                                                   core.settings.fakeBold,
                                                                   core.settings.getSuperSubFontId(theme));  // v3.6.0
+          adapter.setImageSizeProbe(probeImage);
           snapix::smolport::StreamingPaginator paginator(cfg, adapter);
 
           // Streaming chunk buffer on stack — same 4 KB sizing as the
@@ -2921,9 +2953,14 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
             streamOffsetCacheSpine_ = currentSpineIndex_;
 
             // Try to load incoming spine's .idx (R4.a load side).
+            // v3.11.12 — EPUB with images off hashes differently (matches
+            // EpubChapterParser), so toggling showImages rebuilds the index.
             const uint16_t cfgHash =
-                snapix::smolport::computePageIndexConfigHash(cfg, fontId,
-                                                              core.settings.fakeBold);
+                snapix::smolport::computePageIndexConfigHash(
+                    cfg, fontId, core.settings.fakeBold,
+                    (contentType == ContentType::Epub && !core.settings.showImages)
+                        ? snapix::smolport::kLayoutFlagNoImages
+                        : 0);
             streamOffsetCacheConfigHash_ = cfgHash;
             streamOffsetCacheBookPath_ = bookCachePath;
             streamOffsetCacheKey_ = markersKey;
@@ -3156,18 +3193,28 @@ void ReaderState::displayWithRefresh(Core& core) {
   }
 }
 
-void ReaderState::renderLoadingStatusMessage(Core& core) {
+bool ReaderState::renderLoadingStatusMessage(Core& core) {
   if (contentLoaded_ && core.content.metadata().type == ContentType::Fb2 && core.content.tocCount() == 0) {
-    renderCenteredStatusMessage(core, "No chapter list found", THEME_MANAGER.current().uiFontId,
-                                "Loading may take a few minutes");
-    return;
+    return renderCenteredStatusMessage(core, "No chapter list found", THEME_MANAGER.current().uiFontId,
+                                       "Loading may take a few minutes");
   }
-  renderCenteredStatusMessage(core, "Loading...");
+  return renderCenteredStatusMessage(core, "Loading...");
 }
 
-void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride,
+bool ReaderState::renderCenteredStatusMessage(Core& core, const char* message, int fontIdOverride,
                                               const char* detail) {
+  // v3.11.12 — the banner draws OVER the current framebuffer.  Never while a
+  // background inflate uses it as its dictionary (garbage on the panel AND
+  // corrupted chapter text); and if one used it since, its pixels are
+  // dictionary bytes, not the previous page — clear first.
+  const uint8_t frame = InflateReader::beginDisplayFrame();
+  if (frame == 0) return false;
+  struct FrameEnd {
+    uint8_t token;
+    ~FrameEnd() { InflateReader::endDisplayFrame(token); }
+  } frameEnd{frame};
   const Theme& theme = THEME_MANAGER.current();
+  if (InflateReader::consumeExternalDictClobbered()) renderer_.clearScreen(theme.backgroundColor);
   const bool turnOffScreen = core.settings.sunlightFadingFix != 0;
   const int fontId = fontIdOverride ? fontIdOverride : core.settings.getReaderFontId(theme);
 
@@ -3230,6 +3277,7 @@ void ReaderState::renderCenteredStatusMessage(Core& core, const char* message, i
   // content).  Keep the flag so that transition also uses drive-all for a
   // crisp first page without ghosting from the banner.
   forceCleanRefreshOnNext_ = true;
+  return true;
 }
 
 ReaderState::Viewport ReaderState::getReaderViewport(bool showStatusBar) const {
