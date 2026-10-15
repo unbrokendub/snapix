@@ -1046,6 +1046,13 @@ void ReaderState::exit(Core& core) {
   asyncJobs_.clearPendingTocJump();
   asyncJobs_.clearPendingPageLoad();
   asyncJobs_.pendingRefresh().clear();
+  // v3.11.12 — drop this book's queued image decodes.  Each entry's deferred
+  // extract callback holds a shared_ptr to the book's Epub, so leftovers (an
+  // image queued on the last page turn before exit) kept the closed book alive
+  // in the middle of the heap — the next 2-bit XTC book could no longer get
+  // its 48 KB planes ("Memory error").  purgePrefix was documented as called
+  // on book close but had no caller.
+  (void)snapix::pendingImage::purgePrefix("");
 
 #if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
   // v2.0.128 R4.a — persist the current spine's page-offset cache to

@@ -34,6 +34,10 @@ class XtcPageRenderer {
   // Uses 4-pass rendering for e-ink grayscale display
   // Takes two separate plane buffers to handle heap fragmentation
   void render2BitGrayscale(const uint8_t* plane1, const uint8_t* plane2, uint16_t width, uint16_t height);
+  // v3.11.12 — black & white rendering of a 2-bit page straight from the file
+  // stream, no plane buffers (used when the heap cannot give 2 × 48 KB).
+  RenderResult renderStreaming2BitAsBw(xtc::XtcParser& parser, uint32_t pageNum, uint16_t width,
+                                       uint16_t height, size_t planeSize, const std::function<void()>& refreshCallback);
 };
 
 }  // namespace snapix

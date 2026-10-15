@@ -44,18 +44,16 @@ XtcPageRenderer::RenderResult XtcPageRenderer::render(xtc::XtcParser& parser, ui
     // Split allocation: allocate two separate buffers to handle heap fragmentation
     // Two 48KB blocks are easier to find than one 96KB contiguous block
     plane1Buffer = static_cast<uint8_t*>(malloc(planeSize));
-    if (!plane1Buffer) {
-      LOG_ERR(TAG, "Failed to allocate plane1 buffer (%zu bytes, free heap: %lu)", planeSize,
-              static_cast<unsigned long>(ESP.getFreeHeap()));
-      return RenderResult::AllocationFailed;
-    }
-
-    plane2Buffer = static_cast<uint8_t*>(malloc(planeSize));
-    if (!plane2Buffer) {
-      LOG_ERR(TAG, "Failed to allocate plane2 buffer (%zu bytes, free heap: %lu)", planeSize,
-              static_cast<unsigned long>(ESP.getFreeHeap()));
+    if (plane1Buffer) plane2Buffer = static_cast<uint8_t*>(malloc(planeSize));
+    if (!plane1Buffer || !plane2Buffer) {
+      // v3.11.12 — grayscale needs 2 × 48 KB; after a heavy book the heap may
+      // not have them.  Show the page in black & white instead of "Memory
+      // error" (pre-fix the book could not be read at all until a reboot).
+      LOG_INF(TAG, "Grayscale planes unavailable (%zu B each, free=%lu largest=%lu) — rendering B/W",
+              planeSize, static_cast<unsigned long>(ESP.getFreeHeap()),
+              static_cast<unsigned long>(ESP.getMaxAllocHeap()));
       free(plane1Buffer);
-      return RenderResult::AllocationFailed;
+      return renderStreaming2BitAsBw(parser, pageNum, pageWidth, pageHeight, planeSize, refreshCallback);
     }
 
     bufferSize = planeSize * 2;
@@ -222,6 +220,47 @@ void XtcPageRenderer::render1Bit(const uint8_t* buffer, uint16_t width, uint16_t
       }
     }
   }
+}
+
+XtcPageRenderer::RenderResult XtcPageRenderer::renderStreaming2BitAsBw(xtc::XtcParser& parser, uint32_t pageNum,
+                                                                      const uint16_t width, const uint16_t height,
+                                                                      const size_t planeSize,
+                                                                      const std::function<void()>& refreshCallback) {
+  // Same image the grayscale path shows as its B/W base (pass 1 and the final
+  // restore): a pixel is black when it is non-white in EITHER plane, so each
+  // plane's bytes can be drawn as they stream in — plane 2 lands on the same
+  // pixels as plane 1.  Column-major, columns right to left, MSB = topmost.
+  const size_t colBytes = (height + 7) / 8;
+  renderer_.clearScreen();
+  const xtc::XtcError err = parser.loadPageStreaming(
+      pageNum,
+      [&](const uint8_t* data, size_t size, size_t offset) {
+        for (size_t i = 0; i < size; ++i) {
+          const uint8_t byte = data[i];
+          if (byte == 0) continue;  // all 8 pixels white in this plane
+          size_t o = offset + i;
+          if (o >= planeSize) o -= planeSize;
+          if (o >= planeSize) continue;
+          const size_t colIndex = o / colBytes;
+          if (colIndex >= width) continue;
+          const uint16_t x = static_cast<uint16_t>(width - 1 - colIndex);
+          const size_t yBase = (o % colBytes) * 8;
+          for (int b = 0; b < 8; ++b) {
+            const size_t y = yBase + static_cast<size_t>(b);
+            if (y >= height) break;
+            if ((byte >> (7 - b)) & 1) renderer_.drawPixel(x, static_cast<uint16_t>(y), true);
+          }
+        }
+        esp_task_wdt_reset();
+      },
+      4096);
+  if (err != xtc::XtcError::OK) {
+    LOG_ERR(TAG, "Failed to load page %u (streaming B/W)", pageNum);
+    return RenderResult::PageLoadFailed;
+  }
+  refreshCallback();
+  LOG_DBG(TAG, "Rendered page %u/%u (2-bit as B/W, low memory)", pageNum + 1, parser.getPageCount());
+  return RenderResult::Success;
 }
 
 void XtcPageRenderer::render2BitGrayscale(const uint8_t* plane1, const uint8_t* plane2, uint16_t width,
