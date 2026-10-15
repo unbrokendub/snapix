@@ -12,7 +12,8 @@ namespace snapix::smolport {
 
 MarkerizeStatus markerizeChapter(HtmlStripper::Mode mode, MarkerizeReadFn readChunk,
                                   MarkerizeWriteFn writeChunk, uint8_t* chunkBuf, size_t chunkBufSize,
-                                  const MarkerizeAbortFn& shouldAbort, MarkerizeStats* outStats) {
+                                  const MarkerizeAbortFn& shouldAbort, MarkerizeStats* outStats,
+                                  const CssStyleTable* styles) {
   if (!readChunk || !writeChunk || chunkBuf == nullptr || chunkBufSize == 0) {
     if (outStats) {
       outStats->inputBytes = 0;
@@ -27,7 +28,7 @@ MarkerizeStatus markerizeChapter(HtmlStripper::Mode mode, MarkerizeReadFn readCh
   uint16_t chunkCount = 0;
 
   CallbackSink sink(writeChunk, shouldAbort, outBytes);
-  HtmlStripper stripper(sink, mode);
+  HtmlStripper stripper(sink, mode, styles);
 
   const MarkerizeStatus result = runMarkerizeLoop(stripper, sink, readChunk, chunkBuf, chunkBufSize,
                                                   shouldAbort, inBytes, chunkCount);

@@ -26,7 +26,7 @@
 //
 // NO HEAP ALLOCATIONS:
 //   The chunk buffer is on the caller's stack (passed by ref).  The
-//   HtmlStripper internal state is ~600 bytes (member buffers in the
+//   HtmlStripper internal state is ~950 bytes (member buffers in the
 //   class instance).  Total transient: ~1 KB during the markerize pass.
 //   Zero heap activity — the whole point of the v3 architecture.
 // =============================================================================
@@ -89,9 +89,13 @@ struct MarkerizeStats {
 // THIS FUNCTION DOES NOT ALLOCATE HEAP.  All I/O buffers are passed in
 // by the caller; the stripper's internal state is in-class.  Watchdog-
 // safe — call shouldAbort() between chunks.
+//
+// `styles` (v3.11.13, EPUB): the book's CSS table — turns on per-element
+// class / inline-style resolution (see HtmlStripper.h).  nullptr = off.
 MarkerizeStatus markerizeChapter(HtmlStripper::Mode mode, MarkerizeReadFn readChunk,
                                   MarkerizeWriteFn writeChunk, uint8_t* chunkBuf, size_t chunkBufSize,
                                   const MarkerizeAbortFn& shouldAbort = {},
-                                  MarkerizeStats* outStats = nullptr);
+                                  MarkerizeStats* outStats = nullptr,
+                                  const CssStyleTable* styles = nullptr);
 
 }  // namespace snapix::smolport

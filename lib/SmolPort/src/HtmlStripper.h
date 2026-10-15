@@ -42,10 +42,25 @@
 // entity decoding, attribute extraction for <img>/<a>, and raw-body
 // suppression for <script>/<style> are all implemented.  Integration
 // into the EPUB chapter parser is Phase 3e.
+//
+// CSS (v3.11.13, Html mode with a CssStyleTable — the EPUB path): each
+// element's `class` list + inline `style` are resolved against the book's
+// stylesheets (CssStyleTable.h) for italic / bold / text-align:center /
+// left-margin indent / display:none, emitting the markers above.  A bounded
+// element stack (kMaxElemDepth) matches every close tag to its element, so a
+// display:none subtree ends exactly at its own close tag; deeper elements are
+// untracked and get no CSS (their text is always shown).  Italic / bold /
+// centre then count their open sources (tags + CSS): a marker is emitted when
+// the first opens and the last closes, so `<p class="italic">a <em>b</em> c`
+// keeps "c" italic; an element whose own CSS turns one off (font-style:normal,
+// text-align:left) suspends it until its close, like a browser.  Without a
+// table (FB2, standalone HTML) nothing changes.
 // =============================================================================
 
 #include <cstddef>
 #include <cstdint>
+
+#include "CssStyleTable.h"
 
 namespace snapix::smolport {
 
@@ -85,7 +100,12 @@ class HtmlStripper {
   // and raw-body suppression set differ.  Phase 7 added Fb2 mode.
   enum class Mode : uint8_t { Html, Fb2 };
 
-  explicit HtmlStripper(HtmlStripperSink& sink, Mode mode = Mode::Html);
+  // `styles` (Html mode only) turns CSS resolution on; an empty table still
+  // honours inline `style` attributes.  The table must outlive the stripper.
+  explicit HtmlStripper(HtmlStripperSink& sink, Mode mode = Mode::Html,
+                        const CssStyleTable* styles = nullptr);
+  HtmlStripper(const HtmlStripper&) = delete;  // sink_ may point at gate_
+  HtmlStripper& operator=(const HtmlStripper&) = delete;
 
   // Feed an arbitrary chunk of bytes.  Safe to call repeatedly;
   // internal state machine survives chunk boundaries.
@@ -129,6 +149,22 @@ class HtmlStripper {
     RawBodyTagName,   // collecting raw-body inner-tag name
     RawBodyAfter,     // confirmed raw-body close, scan to '>'
   };
+
+  // v3.11.13 — CSS display:none drops output here.  With CSS on, sink_ is
+  // this gate (wrapping the caller's sink); otherwise sink_ is the caller's.
+  class GateSink final : public HtmlStripperSink {
+   public:
+    explicit GateSink(HtmlStripperSink& out) : out_(out) {}
+    void emit(const uint8_t* data, size_t len) override {
+      if (!closed) out_.emit(data, len);
+    }
+    bool shouldStop() const override { return out_.shouldStop(); }
+    bool closed = false;
+
+   private:
+    HtmlStripperSink& out_;
+  };
+  GateSink gate_;  // declared before sink_, which may refer to it
 
   HtmlStripperSink& sink_;
   State state_;
@@ -202,6 +238,41 @@ class HtmlStripper {
   uint8_t rawBodyTagBufLen_;
 
   // ---------------------------------------------------------------------------
+  // v3.11.13 — CSS state (all idle when css_ == nullptr).  ~330 bytes.
+  // ---------------------------------------------------------------------------
+  const CssStyleTable* css_;
+  // Open elements: lower-cased tag-name hash + the CSS effects the element
+  // switched on (undone at its close).  Void / self-closing / raw-body tags
+  // are never pushed.
+  static constexpr uint8_t kMaxElemDepth = 32;
+  uint32_t elemHash_[kMaxElemDepth];
+  uint8_t  elemFx_[kMaxElemDepth];
+  // An element whose own CSS switches a style OFF inside an ancestor that has
+  // it on (`<span class="roman">` in an italic paragraph, a `text-align:left`
+  // <p> in a centred <div>) saves that style's open count here (5 bits each:
+  // italic, bold, centre) and restores it at its close.
+  uint16_t elemSaved_[kMaxElemDepth];
+  uint8_t  elemDepth_;
+  uint16_t untracked_;    // open elements nested deeper than kMaxElemDepth
+  uint8_t  hiddenDepth_;  // 1-based stack depth of the display:none element, 0 = visible
+  // Open sources (tags + CSS) of each counted style.
+  uint8_t  italicOpen_;
+  uint8_t  boldOpen_;
+  uint8_t  centerOpen_;
+  uint8_t  cssIndentOpen_;
+  // Attribute being resolved and the current tag's accumulated cascade.
+  enum class CssAttr : uint8_t { None, Class, Style };
+  CssAttr  cssAttr_;
+  bool     classInToken_;
+  uint32_t tagDotHash_;    // hash of "tag." — prefix of tag.class keys
+  uint32_t classHash_;     // ".token" so far
+  uint32_t tagClassHash_;  // "tag.token" so far
+  CssEffects classFx_;
+  CssEffects tagClassFx_;
+  CssEffects inlineFx_;
+  CssDeclParser inlineDecl_;
+
+  // ---------------------------------------------------------------------------
   // Emit helpers.
   // ---------------------------------------------------------------------------
   void emitChar(uint8_t b);                 // text byte, escaping 0x01
@@ -222,6 +293,17 @@ class HtmlStripper {
   void onTagComplete();      // emits style markers, transitions out of tag
   bool isRawBodyTag() const; // current tag name opens a suppressed body
   void beginAttrValue();     // decide whether the value is captured
+
+  // v3.11.13 — CSS helpers.
+  void emitStyle(uint8_t tag);       // counted italic/bold/centre marker
+  void cssTag();                     // onTagComplete's dispatch with CSS on
+  void cssAttrByte(uint8_t b);       // class / style attribute value byte
+  void endClassToken();
+  bool isVoidTag() const;
+  bool isCssBlockTag() const;        // may take text-align / margin from CSS
+  bool popElements(uint8_t depth);   // close frames above `depth`
+  void pushElement(uint32_t hash, uint8_t fx, uint16_t saved = 0);
+  void setHidden(bool hidden);
 };
 
 }  // namespace snapix::smolport

@@ -11,6 +11,7 @@
 #include <Logging.h>
 #include <SDCardManager.h>
 #include <ZipFile.h>
+#include <CssStyleTable.h>
 
 #define TAG "EPUB"
 
@@ -1047,6 +1048,11 @@ int sniffImageLayoutSize(ZipItemReader& reader, const uint16_t maxW, const uint1
 }
 
 bool isImageEntryName(const char* name, size_t /*len*/) { return FsHelpers::isImageFile(name); }
+
+bool isCssEntryName(const char* name, const size_t len) {
+  return len > 4 && name[len - 4] == '.' && (name[len - 3] | 0x20) == 'c' && (name[len - 2] | 0x20) == 's' &&
+         (name[len - 1] | 0x20) == 's';
+}
 }  // namespace
 
 struct Epub::ImageProbeSession::Impl {
@@ -1105,6 +1111,50 @@ int Epub::ImageProbeSession::probe(const std::string& itemHref, const uint16_t m
 
 std::unique_ptr<Epub::ImageProbeSession> Epub::openImageProbeSession() const {
   return std::unique_ptr<ImageProbeSession>(new ImageProbeSession(filepath));
+}
+
+// Every .css entry of the archive, in central-directory hash order (stable for
+// a given file).  Real books link the same one or two sheets from every
+// chapter, so one book-wide table matches what a per-chapter <link> scan
+// would give without re-reading stylesheets per chapter.
+bool Epub::buildCssStyleTable(std::vector<uint8_t>& out) const {
+  out.clear();
+  const uint32_t t0 = millis();
+  ZipFile zip(filepath);
+  std::vector<ZipFile::IndexedEntry> sheets;
+  if (!zip.open() || !zip.indexEntries(sheets, isCssEntryName)) {
+    zip.close();
+    LOG_ERR(TAG, "[CSS] style table: cannot index archive");
+    return false;
+  }
+  snapix::smolport::CssStyleSheetCompiler compiler;
+  constexpr size_t kReadBytes = 512;
+  uint8_t buf[kReadBytes];
+  uint32_t bytes = 0;
+  unsigned skipped = 0;
+  for (const auto& sheet : sheets) {
+    // Background worker: heap window first, arbitrated framebuffer fallback.
+    auto reader = zip.openItemStream(sheet.stat, 1024, sharedZipDictBuffer(), "css");
+    if (!reader) {
+      ++skipped;
+      continue;
+    }
+    int n;
+    while ((n = reader->read(buf, kReadBytes)) > 0) {
+      compiler.feed(buf, static_cast<size_t>(n));
+      bytes += static_cast<uint32_t>(n);
+    }
+    if (n < 0) ++skipped;  // keep what was read; the rest of this sheet is lost
+    compiler.endSheet();
+  }
+  zip.close();
+  compiler.serialize(out);
+  LOG_INF(TAG, "[CSS] style table: sheets=%u skipped=%u bytes=%u rules=%u entries=%u dropped=%u blob=%u %u ms",
+          static_cast<unsigned>(sheets.size()), skipped, static_cast<unsigned>(bytes),
+          static_cast<unsigned>(compiler.rulesSeen()), static_cast<unsigned>(compiler.entryCount()),
+          static_cast<unsigned>(compiler.droppedSelectors()), static_cast<unsigned>(out.size()),
+          static_cast<unsigned>(millis() - t0));
+  return true;
 }
 
 int Epub::probeImageLayoutSize(const std::string& itemHref, const uint16_t maxW, const uint16_t maxH,

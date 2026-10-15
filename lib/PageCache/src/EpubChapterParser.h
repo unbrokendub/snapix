@@ -18,6 +18,7 @@ class UnifiedCache;
 }
 namespace snapix::smolport {
 class ChunkedMarkerizer;
+class CssStyleTable;
 }
 
 /**
@@ -161,6 +162,15 @@ class EpubChapterParser : public ContentParser {
   // Opened by the size decision; consumed (from byte 0) by whichever path
   // markerizes in the same parsePages call, and never kept past it.
   std::unique_ptr<ZipItemReader> pendingStream_;
+
+  // ---- v3.11.13 — the book's CSS (class / inline-style emphasis) -----------
+  // Compiled once per book from its stylesheets into UnifiedCache
+  // Kind::StyleTable and loaded before a chapter markerizes; the stripper
+  // resolves every element against it.  Kept while progMarkerizer_ lives (its
+  // stripper points at it) so every chunk of a chapter sees identical rules.
+  std::unique_ptr<snapix::smolport::CssStyleTable> styleTable_;
+  bool styleTableReady_ = false;  // styleTable_ holds the cached table
+  bool ensureStyleTable(snapix::unifiedcache::UnifiedCache& cache);
 
   bool useProgressiveMarkers(snapix::unifiedcache::UnifiedCache& cache);
   bool ensureProgressiveInit(snapix::unifiedcache::UnifiedCache& cache);

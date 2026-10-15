@@ -162,8 +162,9 @@ inline bool isHrefAttr(const uint8_t* name, const uint8_t len) {
 // ===========================================================================
 // Construction / lifecycle.
 // ===========================================================================
-HtmlStripper::HtmlStripper(HtmlStripperSink& sink, Mode mode)
-    : sink_(sink),
+HtmlStripper::HtmlStripper(HtmlStripperSink& sink, Mode mode, const CssStyleTable* styles)
+    : gate_(sink),
+      sink_((styles != nullptr && mode == Mode::Html) ? static_cast<HtmlStripperSink&>(gate_) : sink),
       state_(State::Text),
       mode_(mode),
       tagNameLen_(0),
@@ -178,9 +179,36 @@ HtmlStripper::HtmlStripper(HtmlStripperSink& sink, Mode mode)
       payloadLen_(0),
       captureKind_(AttrKind::None),
       rawBody_(RawBodyKind::None),
-      rawBodyTagBufLen_(0) {}
+      rawBodyTagBufLen_(0),
+      css_(mode == Mode::Html ? styles : nullptr),
+      elemDepth_(0),
+      untracked_(0),
+      hiddenDepth_(0),
+      italicOpen_(0),
+      boldOpen_(0),
+      centerOpen_(0),
+      cssIndentOpen_(0),
+      cssAttr_(CssAttr::None),
+      classInToken_(false),
+      tagDotHash_(kCssHashSeed),
+      classHash_(kCssHashSeed),
+      tagClassHash_(kCssHashSeed) {}
 
 void HtmlStripper::reset() {
+  gate_.closed = false;
+  elemDepth_ = 0;
+  untracked_ = 0;
+  hiddenDepth_ = 0;
+  italicOpen_ = 0;
+  boldOpen_ = 0;
+  centerOpen_ = 0;
+  cssIndentOpen_ = 0;
+  cssAttr_ = CssAttr::None;
+  classInToken_ = false;
+  classFx_ = CssEffects{};
+  tagClassFx_ = CssEffects{};
+  inlineFx_ = CssEffects{};
+  inlineDecl_.reset();
   state_ = State::Text;
   tagNameLen_ = 0;
   isEndTag_ = false;
@@ -448,12 +476,12 @@ void HtmlStripper::dispatchTag() {
   // ----- HTML dispatch table (existing Phase 3b) -----
   if (eqIc(tagName_, tagNameLen_, "b", 1) ||
       eqIc(tagName_, tagNameLen_, "strong", 6)) {
-    emitMarker(isEndTag_ ? kBoldOff : kBoldOn);
+    emitStyle(isEndTag_ ? kBoldOff : kBoldOn);
     return;
   }
   if (eqIc(tagName_, tagNameLen_, "i", 1) ||
       eqIc(tagName_, tagNameLen_, "em", 2)) {
-    emitMarker(isEndTag_ ? kItalicOff : kItalicOn);
+    emitStyle(isEndTag_ ? kItalicOff : kItalicOn);
     return;
   }
   // v3.6.0 — superscript / subscript.  Same `<sup>`/`<sub>` tag names in HTML
@@ -480,11 +508,11 @@ void HtmlStripper::dispatchTag() {
     // (only kPageBreak does), so no empty page-0.
     if (isEndTag_) {
       emitMarker(kHeadingOff);
-      emitMarker(kCenterOff);
+      emitStyle(kCenterOff);
       emitMarker(kParagraphBreak);
     } else {
       emitMarker(kParagraphBreak);
-      emitMarker(kCenterOn);
+      emitStyle(kCenterOn);
       const uint8_t bytes[3] = {kMarker, kHeadingOn, tagName_[1]};
       emitRaw(bytes, 3);
     }
@@ -531,11 +559,11 @@ void HtmlStripper::dispatchTag() {
   // centered block from surrounding paragraphs.
   if (eqIc(tagName_, tagNameLen_, "center", 6)) {
     if (isEndTag_) {
-      emitMarker(kCenterOff);
+      emitStyle(kCenterOff);
       emitMarker(kParagraphBreak);
     } else {
       emitMarker(kParagraphBreak);
-      emitMarker(kCenterOn);
+      emitStyle(kCenterOn);
     }
     return;
   }
@@ -633,7 +661,7 @@ void HtmlStripper::dispatchTag() {
   // <u>/<s>/<strike>/<del>/<code>/<tt>/<kbd>/<samp>/<span>/<mark>/<small>/<q> —
   // no underline/strike/mono support, but the words render normally.
   if (eqIc(tagName_, tagNameLen_, "cite", 4)) {
-    emitMarker(isEndTag_ ? kItalicOff : kItalicOn);
+    emitStyle(isEndTag_ ? kItalicOff : kItalicOn);
     return;
   }
   // Unknown / unhandled tag — text content still emitted by outer loop.
@@ -705,9 +733,24 @@ bool HtmlStripper::dispatchEntity(const bool terminated) {
 // `<h1 id="x">Title</h1>` emits kAnchor("x") then kHeadingOn'1' then text.
 void HtmlStripper::onAttrValueComplete() {
   if (captureCurrent_ && payloadLen_ > 0) {
-    if (captureKind_ == AttrKind::Id)        emitPayloadMarker(kAnchor);
-    else if (captureKind_ == AttrKind::Src)  emitPayloadMarker(kImageRef);
+    if (captureKind_ == AttrKind::Id) {
+      // v3.11.13 — an anchor survives display:none: page-list and footnote
+      // targets are often hidden page-number spans.  It has no glyphs.
+      const bool closed = gate_.closed;
+      flushUtf8();  // a held-back partial sequence belongs to the hidden text
+      gate_.closed = false;
+      emitPayloadMarker(kAnchor);
+      gate_.closed = closed;
+    } else if (captureKind_ == AttrKind::Src) {
+      emitPayloadMarker(kImageRef);
+    }
   }
+  if (cssAttr_ == CssAttr::Class) {
+    endClassToken();
+  } else if (cssAttr_ == CssAttr::Style) {
+    inlineFx_.apply(inlineDecl_.finish());
+  }
+  cssAttr_ = CssAttr::None;
   captureCurrent_ = false;
   captureKind_ = AttrKind::None;
   attrNameLen_ = 0;
@@ -746,6 +789,266 @@ void HtmlStripper::beginAttrValue() {
   }
   captureCurrent_ = (captureKind_ != AttrKind::None);
   payloadLen_ = 0;
+  // v3.11.13 — `class` / `style` are resolved byte by byte (never buffered).
+  cssAttr_ = CssAttr::None;
+  if (css_ != nullptr && !isEndTag_ && !captureCurrent_) {
+    if (eqIc(attrName_, attrNameLen_, "class", 5)) {
+      cssAttr_ = CssAttr::Class;
+      classInToken_ = false;
+      tagDotHash_ = cssHash(cssHashLower(kCssHashSeed, tagName_, tagNameLen_), '.');
+    } else if (eqIc(attrName_, attrNameLen_, "style", 5)) {
+      cssAttr_ = CssAttr::Style;
+      inlineDecl_.reset();
+    }
+  }
+}
+
+// ===========================================================================
+// v3.11.13 — CSS resolution (Html mode with a style table).
+// ===========================================================================
+// Italic / bold / centre can have several nested sources (tags and CSS).  With
+// CSS on, the marker goes out when the first source opens and the last one
+// closes; a close with nothing open still emits (harmless, and keeps a stray
+// `</i>` behaving as before).  Without CSS the marker is emitted as is.
+void HtmlStripper::emitStyle(const uint8_t tag) {
+  uint8_t* open = nullptr;
+  if (css_ != nullptr) {
+    if (tag == kItalicOn || tag == kItalicOff) open = &italicOpen_;
+    else if (tag == kBoldOn || tag == kBoldOff) open = &boldOpen_;
+    else if (tag == kCenterOn || tag == kCenterOff) open = &centerOpen_;
+  }
+  if (open == nullptr) {
+    emitMarker(tag);
+    return;
+  }
+  if (tag == kItalicOn || tag == kBoldOn || tag == kCenterOn) {
+    if (*open == 0) emitMarker(tag);
+    if (*open < 0xFF) ++*open;
+  } else if (*open <= 1) {
+    *open = 0;
+    emitMarker(tag);
+  } else {
+    --*open;
+  }
+}
+
+void HtmlStripper::cssAttrByte(const uint8_t b) {
+  if (cssAttr_ == CssAttr::Style) {
+    inlineDecl_.feed(b);
+    return;
+  }
+  if (isWhitespace(b)) {
+    endClassToken();
+    return;
+  }
+  if (!classInToken_) {
+    classInToken_ = true;
+    classHash_ = cssHash(kCssHashSeed, '.');
+    tagClassHash_ = tagDotHash_;
+  }
+  classHash_ = cssHash(classHash_, b);  // class names are case-sensitive
+  tagClassHash_ = cssHash(tagClassHash_, b);
+}
+
+void HtmlStripper::endClassToken() {
+  if (!classInToken_) return;
+  classInToken_ = false;
+  classFx_.apply(css_->lookup(classHash_));
+  tagClassFx_.apply(css_->lookup(tagClassHash_));
+}
+
+// HTML void elements never have a close tag (`<br>`, `<img …>`); pushing them
+// would leave stale frames.  SVG <image> is parsed as <img> by HTML5.
+bool HtmlStripper::isVoidTag() const {
+  static constexpr const char* kVoid[] = {"br",   "img",   "hr",     "meta",  "link", "input", "col",
+                                          "area", "base",  "embed",  "param", "source", "track", "wbr",
+                                          "image"};
+  for (const char* v : kVoid) {
+    if (eqIc(tagName_, tagNameLen_, v, std::strlen(v))) return true;
+  }
+  return false;
+}
+
+// Block containers that may take text-align:center / a left-margin indent
+// from CSS.  Inline elements (span, a, …) ignore both, like browsers; list
+// items and table cells are left alone so bullets and rows keep their layout.
+bool HtmlStripper::isCssBlockTag() const {
+  if (tagNameLen_ == 2 && (tagName_[0] | 0x20u) == 'h' && tagName_[1] >= '1' && tagName_[1] <= '6') return true;
+  static constexpr const char* kBlocks[] = {"p",     "div",    "blockquote", "center", "section", "article",
+                                            "header", "footer", "aside",      "figure", "figcaption", "main",
+                                            "nav",   "address", "pre"};
+  for (const char* t : kBlocks) {
+    if (eqIc(tagName_, tagNameLen_, t, std::strlen(t))) return true;
+  }
+  return false;
+}
+
+void HtmlStripper::setHidden(const bool hidden) {
+  flushUtf8();  // a held-back partial sequence belongs to the text before the switch
+  gate_.closed = hidden;
+}
+
+void HtmlStripper::pushElement(const uint32_t hash, const uint8_t fx, const uint16_t saved) {
+  elemHash_[elemDepth_] = hash;
+  elemFx_[elemDepth_] = fx;
+  elemSaved_[elemDepth_] = saved;
+  ++elemDepth_;
+}
+
+namespace {
+// elemSaved_ packing: 5 bits per suspended style.
+constexpr uint8_t kSavedItalicShift = 0;
+constexpr uint8_t kSavedBoldShift = 5;
+constexpr uint8_t kSavedCenterShift = 10;
+}  // namespace
+
+// Close the open elements above `depth`, innermost first, undoing the CSS
+// effects each one switched on and resuming the styles it suspended.  Returns
+// true when the element at `depth` (the one being closed) was hidden — itself
+// display:none or inside such an element — so its own close markers must not
+// be emitted.
+bool HtmlStripper::popElements(const uint8_t depth) {
+  bool closedHidden = false;
+  while (elemDepth_ > depth) {
+    const uint8_t level = elemDepth_;  // 1-based depth of this frame
+    --elemDepth_;
+    if (hiddenDepth_ != 0) {
+      if (elemDepth_ == depth) closedHidden = true;
+      if (hiddenDepth_ == level) {
+        hiddenDepth_ = 0;
+        setHidden(false);
+      }
+      continue;  // frames inside a hidden subtree switched nothing on
+    }
+    const uint8_t fx = elemFx_[elemDepth_];
+    const uint16_t saved = elemSaved_[elemDepth_];
+    // Resume a suspended style: its outer sources are open again (plus any
+    // source left unclosed inside this element).
+    auto resume = [this, saved](const uint8_t shift, uint8_t& open, const uint8_t onTag) {
+      const uint8_t outer = static_cast<uint8_t>((saved >> shift) & 0x1Fu);
+      if (outer == 0) return;
+      if (open == 0) emitMarker(onTag);
+      open = static_cast<uint8_t>(open + outer < 0xFF ? open + outer : 0xFF);
+    };
+    if (fx & kCssItalic) emitStyle(kItalicOff);
+    resume(kSavedItalicShift, italicOpen_, kItalicOn);
+    if (fx & kCssBold) emitStyle(kBoldOff);
+    resume(kSavedBoldShift, boldOpen_, kBoldOn);
+    if (fx & kCssCenter) emitStyle(kCenterOff);
+    resume(kSavedCenterShift, centerOpen_, kCenterOn);
+    if (fx & kCssIndent) {
+      emitMarker(kIndentOff);
+      if (cssIndentOpen_ > 0) --cssIndentOpen_;
+    }
+  }
+  return closedHidden;
+}
+
+// onTagComplete's dispatch when CSS is on.  Open tag: the tag's own markers,
+// then its CSS effects (pushed so the matching close undoes them, innermost
+// first, before the tag's close markers).  Inside a display:none subtree
+// nothing is dispatched, but elements are still pushed / popped so the
+// subtree ends at the right close tag.
+void HtmlStripper::cssTag() {
+  if (tagNameLen_ == 0) return;  // <?xml …?>, <!DOCTYPE …>
+  const uint32_t hash = cssHashLower(kCssHashSeed, tagName_, tagNameLen_);
+
+  if (isEndTag_) {
+    if (isVoidTag()) {  // `</br>` — never pushed
+      if (hiddenDepth_ == 0) dispatchTag();
+      return;
+    }
+    if (untracked_ > 0) {  // closes the innermost untracked element
+      --untracked_;
+      if (hiddenDepth_ == 0) dispatchTag();
+      return;
+    }
+    int k = static_cast<int>(elemDepth_) - 1;
+    while (k >= 0 && elemHash_[k] != hash) --k;
+    if (k < 0) {  // stray close: no element to end
+      if (hiddenDepth_ == 0) dispatchTag();
+      return;
+    }
+    if (!popElements(static_cast<uint8_t>(k))) dispatchTag();
+    return;
+  }
+
+  // Open tag.  Cascade: tag < .class < tag.class < inline style.
+  CssEffects fx = css_->lookup(hash);
+  fx.apply(classFx_);
+  fx.apply(tagClassFx_);
+  fx.apply(inlineFx_);
+
+  if (selfClosing_ || isVoidTag()) {  // never on the stack
+    const bool show = hiddenDepth_ == 0 && !fx.on(kCssHidden);
+    if (show) dispatchTag();
+    if (selfClosing_) {
+      isEndTag_ = true;  // onTagComplete then returns without a raw body
+      if (show) dispatchTag();
+    }
+    return;
+  }
+  if (isRawBodyTag()) {  // <script>/<style>/<title>…: body skipped by the raw-body scanner
+    if (hiddenDepth_ == 0) dispatchTag();
+    return;
+  }
+  // HTML: a <p> / <li> start tag closes an open one (sloppy unclosed markup).
+  if (elemDepth_ > 0 && untracked_ == 0 && elemHash_[elemDepth_ - 1] == hash &&
+      (eqIc(tagName_, tagNameLen_, "p", 1) || eqIc(tagName_, tagNameLen_, "li", 2))) {
+    if (!popElements(static_cast<uint8_t>(elemDepth_ - 1))) {
+      isEndTag_ = true;
+      dispatchTag();
+      isEndTag_ = false;
+    }
+  }
+  if (untracked_ > 0 || elemDepth_ >= kMaxElemDepth) {
+    // Too deep to track: no CSS (text always shown), tag markers as before.
+    if (untracked_ < 0xFFFF) ++untracked_;
+    if (hiddenDepth_ == 0) dispatchTag();
+    return;
+  }
+  if (hiddenDepth_ != 0) {
+    pushElement(hash, 0);
+    return;
+  }
+  if (fx.on(kCssHidden)) {
+    pushElement(hash, kCssHidden);
+    hiddenDepth_ = elemDepth_;
+    setHidden(true);
+    return;
+  }
+  dispatchTag();
+  uint8_t applied = 0;
+  uint16_t saved = 0;
+  // A counted style the element's CSS declares: on → one more source; off
+  // while on → suspended (count saved, resumed at the close).  This also lets
+  // CSS override the tag itself (`<i class="roman">`, `<h2 style=
+  // "text-align:left">`), as author CSS does in a browser.
+  auto counted = [&](const uint8_t bit, uint8_t& open, const uint8_t onTag, const uint8_t offTag,
+                     const uint8_t shift) {
+    if ((fx.mask & bit) == 0) return;
+    if (fx.on(bit)) {
+      emitStyle(onTag);
+      applied = static_cast<uint8_t>(applied | bit);
+    } else if (open > 0) {
+      saved = static_cast<uint16_t>(saved | (static_cast<uint16_t>(open < 0x1F ? open : 0x1F) << shift));
+      open = 0;
+      emitMarker(offTag);
+    }
+  };
+  if (isCssBlockTag()) {
+    // One CSS indent level at a time: nested margins do not compound, and a
+    // tag that already indents (blockquote) is not indented twice.
+    if (fx.on(kCssIndent) && cssIndentOpen_ == 0 && !eqIc(tagName_, tagNameLen_, "blockquote", 10)) {
+      emitMarker(kIndentOn);
+      ++cssIndentOpen_;
+      applied |= kCssIndent;
+    }
+    counted(kCssCenter, centerOpen_, kCenterOn, kCenterOff, kSavedCenterShift);
+  }
+  counted(kCssBold, boldOpen_, kBoldOn, kBoldOff, kSavedBoldShift);
+  counted(kCssItalic, italicOpen_, kItalicOn, kItalicOff, kSavedItalicShift);
+  pushElement(hash, applied, saved);
 }
 
 // At tag close we still need to:
@@ -753,7 +1056,11 @@ void HtmlStripper::beginAttrValue() {
 //   - enter raw-body suppression for <script>/<style>/<title>/…
 // Payload markers (img/a) were already emitted by onAttrValueComplete.
 void HtmlStripper::onTagComplete() {
-  dispatchTag();
+  if (css_ != nullptr) {
+    cssTag();  // also dispatches a self-closing tag's close (and sets isEndTag_)
+  } else {
+    dispatchTag();
+  }
   state_ = State::Text;
   if (isEndTag_) return;
   if (selfClosing_) {
@@ -828,6 +1135,10 @@ size_t HtmlStripper::feed(const uint8_t* data, const size_t len) {
             captureCurrent_ = false;
             captureKind_ = AttrKind::None;
             payloadLen_ = 0;
+            cssAttr_ = CssAttr::None;
+            classFx_ = CssEffects{};
+            tagClassFx_ = CssEffects{};
+            inlineFx_ = CssEffects{};
           } else if (b == '&') {
             state_ = State::EntityBody;
             entityLen_ = 0;
@@ -940,6 +1251,7 @@ size_t HtmlStripper::feed(const uint8_t* data, const size_t len) {
             attrQuote_ = 0;
             beginAttrValue();
             if (captureCurrent_) payload_[payloadLen_++] = b;
+            else if (cssAttr_ != CssAttr::None) cssAttrByte(b);
             state_ = State::AttrValueUnq;
           }
           break;
@@ -950,6 +1262,8 @@ size_t HtmlStripper::feed(const uint8_t* data, const size_t len) {
             state_ = State::AttrPreName;
           } else if (captureCurrent_ && payloadLen_ < kPayloadBufSize) {
             payload_[payloadLen_++] = b;
+          } else if (cssAttr_ != CssAttr::None) {
+            cssAttrByte(b);
           }
           break;
 
@@ -962,6 +1276,8 @@ size_t HtmlStripper::feed(const uint8_t* data, const size_t len) {
             state_ = State::AttrPreName;
           } else if (captureCurrent_ && payloadLen_ < kPayloadBufSize) {
             payload_[payloadLen_++] = b;
+          } else if (cssAttr_ != CssAttr::None) {
+            cssAttrByte(b);
           }
           break;
 

@@ -22,6 +22,10 @@
 // so the 32 KB inflate window is not pinned between calls) and positions it at
 // offset() before markerizeChunk(): skipSource() for a live instance,
 // replayTo() for a fresh one.
+//
+// v3.11.13 — the book's CSS table (if any) must be the SAME for every instance
+// that markerizes one document: the stripper's element stack / open styles are
+// rebuilt by replay only when the table is identical.
 // =============================================================================
 
 #include <cstddef>
@@ -70,7 +74,8 @@ inline bool skipSource(const MarkerizeReadFn& read, uint32_t n, uint8_t* buf, si
 
 class ChunkedMarkerizer {
  public:
-  explicit ChunkedMarkerizer(HtmlStripper::Mode mode) : stripper_(sink_, mode) {}
+  explicit ChunkedMarkerizer(HtmlStripper::Mode mode, const CssStyleTable* styles = nullptr)
+      : stripper_(sink_, mode, styles) {}
   ChunkedMarkerizer(const ChunkedMarkerizer&) = delete;
   ChunkedMarkerizer& operator=(const ChunkedMarkerizer&) = delete;
 

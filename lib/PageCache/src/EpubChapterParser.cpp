@@ -17,6 +17,7 @@
 #include <UnifiedCache.h>  // v2.0.167 — Phase 5 unified streaming cache
 #include <ZipFile.h>  // v2.0.159 — ZipItemReader for streaming markerize-from-ZIP
 #include <core/CrashDebug.h>
+#include <CssStyleTable.h>  // v3.11.13 — book CSS → stripper
 #include <esp_heap_caps.h>
 
 // v2.0.116 Phase R2 — markerize side-channel.  Active only when v3_alpha
@@ -157,6 +158,41 @@ EpubChapterParser::EpubChapterParser(std::shared_ptr<Epub> epub, int spineIndex,
       imageCachePath_(imageCachePath) {}
 
 EpubChapterParser::~EpubChapterParser() = default;
+
+// v3.11.13 — load the book's compiled CSS table, compiling + caching it when
+// the first chapter of the book markerizes.  True when styleTable_ holds the
+// CACHED table (possibly empty), so every chapter and every chunk of a
+// progressive chapter resolves against identical rules.  Run it before this
+// call opens the chapter's ZIP stream: compiling inflates the stylesheets,
+// and two 32 KB windows at once do not fit.
+bool EpubChapterParser::ensureStyleTable(snapix::unifiedcache::UnifiedCache& cache) {
+  if (styleTableReady_) return true;
+  if (!styleTable_) {
+    styleTable_.reset(new (std::nothrow) snapix::smolport::CssStyleTable());
+    if (!styleTable_) return false;
+  }
+  std::vector<uint8_t> blob;
+  if (cache.readSegment(snapix::unifiedcache::Kind::StyleTable, snapix::unifiedcache::kGlobalKey, blob)) {
+    if (styleTable_->load(blob.data(), blob.size())) {
+      styleTableReady_ = true;
+      return true;
+    }
+    // A current-format blob that fails to load is an allocation failure —
+    // recompiling would not help.  Anything else is stale: rebuild it.
+    if (blob.size() >= 3 && blob[0] == 'C' && blob[1] == 'S' &&
+        blob[2] == snapix::smolport::CssStyleTable::kVersion) {
+      return false;
+    }
+  }
+  if (!epub_->buildCssStyleTable(blob)) return false;  // archive unreadable right now
+  if (!styleTable_->load(blob.data(), blob.size())) return false;
+  styleTableReady_ =
+      cache.writeSegment(snapix::unifiedcache::Kind::StyleTable, snapix::unifiedcache::kGlobalKey, blob.data(),
+                         blob.size());
+  LOG_INF(TAG, "[CSS] style table spine=%d entries=%u cached=%u", spineIndex_,
+          static_cast<unsigned>(styleTable_->size()), static_cast<unsigned>(styleTableReady_));
+  return styleTableReady_;
+}
 
 void EpubChapterParser::reset() {
   initialized_ = false;
@@ -327,7 +363,7 @@ bool EpubChapterParser::tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& 
   //   * 32 KB uzlib dict (inside InflateReader, freed when zipStream dies)
   //   * 4 KB SD read buffer (inside ZipItemReader, freed in dtor)
   //   * 4 KB markerize chunk buffer (stack-resident)
-  //   * ~600 B HtmlStripper state (stack-resident inside markerizeChapter)
+  //   * ~950 B HtmlStripper state (stack-resident inside markerizeChapter)
   // Total ~41 KB transient, all freed before this method returns.  The
   // old path needed ~53 KB transient for extract (32 KB dict + 16 KB
   // I/O + state) PLUS a second pass over the just-written temp file for
@@ -342,6 +378,16 @@ bool EpubChapterParser::tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& 
   if (spineItem.href.empty()) {
     LOG_ERR(TAG, "[CONTENT][EPUB] markerize no href spine=%d", spineIndex_);
     return false;
+  }
+  // v3.11.13 — the book's CSS table, normally loaded by parsePages before the
+  // size decision opened the chapter stream.  If it is unavailable the chapter
+  // still markerizes, honouring inline styles only.
+  if (!styleTableReady_ && !pendingStream_) (void)ensureStyleTable(cache);
+  static const snapix::smolport::CssStyleTable kInlineStylesOnly;
+  const snapix::smolport::CssStyleTable* styles = styleTable_ ? styleTable_.get() : &kInlineStylesOnly;
+  if (!styleTableReady_) {
+    LOG_ERR(TAG, "[CSS] markerize spine=%d without the cached book table (%s)", spineIndex_,
+            styleTable_ ? "uncached" : "inline styles only");
   }
   // dictBuffer = nullptr → InflateReader heap-allocates its own 32 KB.
   // Won't race with framebuffer (v2.0.155 lesson) and we don't pay a
@@ -389,11 +435,13 @@ bool EpubChapterParser::tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& 
         };
         status = snapix::smolport::markerizeChapter(
             snapix::smolport::HtmlStripper::Mode::Html, readFn, writeFn, chunkBuf, sizeof(chunkBuf),
-            {}, &stats);
+            {}, &stats, styles);
         return status == snapix::smolport::MarkerizeStatus::Success;
       });
 
   zipStream.reset();  // free uzlib dict + ZIP file handle
+  styleTable_.reset();  // a one-shot chapter needs it no more
+  styleTableReady_ = false;
   const size_t heapAfterZip =
       heap_caps_get_free_size(MALLOC_CAP_8BIT);
   LOG_INF(TAG,
@@ -514,6 +562,17 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   } pendingStreamGuard{pendingStream_};
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
+  // v3.11.13 — a chapter that still has to markerize needs the book's CSS
+  // table first (compiled once per book), before the size decision below opens
+  // the chapter stream.
+  if (!styleTableReady_) {
+    size_t sz = 0;
+    const auto key = static_cast<uint16_t>(spineIndex_);
+    if (!ucache.segmentSize(snapix::unifiedcache::Kind::Markers, key, &sz) &&
+        !ucache.segmentSize(snapix::unifiedcache::Kind::MarkerChunksDone, key, &sz)) {
+      (void)ensureStyleTable(ucache);
+    }
+  }
   // v3.11.12 — big chapters: chunked markerize + incremental idx.
   if (useProgressiveMarkers(ucache)) {
     return parsePagesProgressive(ucache, onPageComplete, maxPages, shouldAbort);
@@ -1066,6 +1125,16 @@ int EpubChapterParser::markerizeProgressiveChunks(snapix::unifiedcache::UnifiedC
                                                   const AbortCallback& shouldAbort) {
   if (progSourceDone_) return 0;
   const auto key = static_cast<uint16_t>(spineIndex_);
+  // v3.11.13 — every chunk must see the same CSS table (the live / replayed
+  // stripper points at it): never markerize a chunk without the cached one.
+  // Compiling it inflates stylesheets — drop the size-decision stream first.
+  if (!styleTableReady_) {
+    pendingStream_.reset();
+    if (!ensureStyleTable(cache)) {
+      LOG_ERR(TAG, "[CONTENT][EPUB] [STREAM] progressive: CSS table unavailable spine=%d", spineIndex_);
+      return -1;
+    }
+  }
   const uint32_t heapBefore = heap_caps_get_free_size(MALLOC_CAP_8BIT);
 
   std::unique_ptr<ZipItemReader> stream;
@@ -1115,7 +1184,7 @@ int EpubChapterParser::markerizeProgressiveChunks(snapix::unifiedcache::UnifiedC
   if (progMarkerizer_ && progMarkerizer_->offset() != start) progMarkerizer_.reset();
   if (!progMarkerizer_) {
     progMarkerizer_.reset(new (std::nothrow) snapix::smolport::ChunkedMarkerizer(
-        snapix::smolport::HtmlStripper::Mode::Html));
+        snapix::smolport::HtmlStripper::Mode::Html, styleTable_.get()));
     if (!progMarkerizer_) return -1;
     replayed = start > 0;
     if (replayed && !progMarkerizer_->replayTo(readFn, start, readBuf.get(), kProgressiveReadBytes)) {
@@ -1167,6 +1236,11 @@ int EpubChapterParser::markerizeProgressiveChunks(snapix::unifiedcache::UnifiedC
     if (last) writeDone();
   }
   stream.reset();  // free the inflate window before the page walk
+  if (progSourceDone_) {  // every chunk stored: the stripper and its CSS table are done
+    progMarkerizer_.reset();
+    styleTable_.reset();
+    styleTableReady_ = false;
+  }
   LOG_INF(TAG,
           "[PERF] progressive markerize spine=%d chunks=+%d (%d/%d) %s=%u ms heap before=%u active=%u after=%u",
           spineIndex_, written, progChunks_, total, replayed ? "replay" : "skip", static_cast<unsigned>(prepMs),

@@ -119,6 +119,13 @@ class Epub {
     std::unique_ptr<Impl> impl_;
   };
   std::unique_ptr<ImageProbeSession> openImageProbeSession() const;
+  // v3.11.13 — compile every stylesheet in the archive into one
+  // snapix::smolport::CssStyleTable blob (class / tag selectors → italic, bold,
+  // center, indent, display:none) that chapter markerize resolves elements
+  // against.  Best effort: a sheet that cannot be read is skipped.  False only
+  // when the archive itself cannot be indexed.  Heap: one 32 KB inflate window
+  // (framebuffer fallback) + ≤ 4 KB of rules while it runs.
+  bool buildCssStyleTable(std::vector<uint8_t>& out) const;
   // Resolve every spine entry's uncompressed size with one ZIP central-
   // directory scan.  This is substantially faster than getItemSize() in a
   // loop because the latter reopens and rescans the archive for every href.

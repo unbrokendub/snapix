@@ -1,6 +1,7 @@
 #include "test_utils.h"
 
 #include <ChunkedMarkerizer.h>
+#include <CssStyleTable.h>
 #include <HtmlStripper.h>
 #include <MarkerizeChapter.h>
 
@@ -25,9 +26,14 @@
 // continuous markerizeChapter() pass — for any chunk size (cuts inside tags,
 // attributes, entities, comments, <script>/<style>/<title> bodies, UTF-8
 // sequences), any read granularity, and any mix of skip / replay calls.
+//
+// v3.11.13 — the same holds with the book's CSS table on (element stack,
+// display:none subtrees and counted styles live in the stripper and are
+// rebuilt by replay).
 // =============================================================================
 
 using snapix::smolport::ChunkedMarkerizer;
+using snapix::smolport::CssStyleTable;
 using snapix::smolport::HtmlStripper;
 using snapix::smolport::MarkerChunkPlan;
 using snapix::smolport::MarkerizeReadFn;
@@ -52,7 +58,7 @@ MarkerizeReadFn makeSource(const std::string& doc, std::mt19937& rng, size_t max
 }
 
 // Reference: the one-shot device path (markerizeChapter, 4 KB reads).
-std::string onePass(const std::string& doc) {
+std::string onePass(const std::string& doc, const CssStyleTable* styles) {
   std::string out;
   size_t pos = 0;
   std::vector<uint8_t> buf(4096);
@@ -69,7 +75,7 @@ std::string onePass(const std::string& doc) {
         out.append(reinterpret_cast<const char*>(d), n);
         return true;
       },
-      buf.data(), buf.size());
+      buf.data(), buf.size(), {}, nullptr, styles);
   return out;
 }
 
@@ -84,7 +90,7 @@ struct ChunkedResult {
 // positions the stripper (replay when cold, skip when warm), then markerizes
 // 1..3 chunks in a row from the same open stream.
 ChunkedResult chunked(const std::string& doc, const MarkerChunkPlan& plan, std::mt19937& rng, int coldPct,
-                      size_t maxRead, size_t stageSize) {
+                      size_t maxRead, size_t stageSize, const CssStyleTable* styles) {
   ChunkedResult r;
   const uint32_t size = static_cast<uint32_t>(doc.size());
   const int total = plan.count(size);
@@ -97,7 +103,7 @@ ChunkedResult chunked(const std::string& doc, const MarkerChunkPlan& plan, std::
     MarkerizeReadFn src = makeSource(doc, rng, maxRead);
     const uint32_t start = plan.start(k, size);
     if (!m) {
-      m.reset(new ChunkedMarkerizer(HtmlStripper::Mode::Html));
+      m.reset(new ChunkedMarkerizer(HtmlStripper::Mode::Html, styles));
       if (start > 0) {
         ++r.replays;
         if (!m->replayTo(src, start, buf.data(), buf.size())) {
@@ -203,6 +209,9 @@ struct Gen {
       case 17: return "\xF0\x9F\x93\x96";  // 4-byte UTF-8
       case 18: return "<p title=\"q>r\">" + word() + "</p>";
       case 19: return "<b/>";
+      case 20: return "<span class=\"it h\">" + word() + " <span>" + word() + "</span></span>";
+      case 21: return "<span style=\"display:none\">" + word() + "<br>" + word() + "</span>";
+      case 22: return "<em class=\"bd\" style=\"font-style: normal; font-weight:700\">" + word() + "</em>";
       default: return word();
     }
   }
@@ -214,8 +223,10 @@ struct Gen {
       if (i) s += rnd(0, 5) == 0 ? "\n  " : " ";
       s += fragment();
     }
-    switch (rnd(0, 7)) {
+    switch (rnd(0, 9)) {
       case 0: return "<h" + std::to_string(rnd(1, 3)) + ">" + s + "</h" + std::to_string(rnd(1, 3)) + ">";
+      case 8: return "<p class=\"c q\">" + s + "</p>";
+      case 9: return "<div class=\"h\"><p>" + s + "</p></div>";
       case 1: return "<blockquote><p>" + s + "</p></blockquote>";
       case 2: return "<ul><li>" + s + "</li></ul>";
       case 3: return "<div>" + s + "</div>";
@@ -269,11 +280,29 @@ int main() {
     }
   }
 
+  // v3.11.13 — the whole matrix runs twice: CSS off, then with a book table.
+  CssStyleTable css;
+  {
+    const std::string sheet =
+        ".it { font-style: italic } .h { display: none } .c { text-align: center } .q { margin-left: 3em }"
+        ".bd { font-weight: bold } .s { font-weight: bold } p { font-style: normal }";
+    snapix::smolport::CssStyleSheetCompiler compiler;
+    compiler.feed(reinterpret_cast<const uint8_t*>(sheet.data()), sheet.size());
+    compiler.endSheet();
+    std::vector<uint8_t> blob;
+    compiler.serialize(blob);
+    runner.expectTrue(css.load(blob.data(), blob.size()) && css.size() == 7, "css_table_built");
+  }
+  int cssChanged = 0;
+  for (const auto& doc : docs) cssChanged += onePass(doc, &css) != onePass(doc, nullptr) ? 1 : 0;
+  runner.expectTrue(cssChanged > 50, "css_changes_markers_of_many_docs");
+
   std::mt19937 rng(7);
   int cases = 0, failures = 0, replays = 0, skips = 0;
+  for (const CssStyleTable* styles : {static_cast<const CssStyleTable*>(nullptr), static_cast<const CssStyleTable*>(&css)}) {
   for (size_t d = 0; d < docs.size(); ++d) {
     const std::string& doc = docs[d];
-    const std::string ref = onePass(doc);
+    const std::string ref = onePass(doc, styles);
     const bool big = doc.size() > 100000;
     std::vector<MarkerChunkPlan> plans = {{32768, 240}, {4096, 240}, {1000, 3}};
     if (!big) {
@@ -284,7 +313,7 @@ int main() {
       for (int coldPct : {0, 35, 100}) {
         const size_t maxRead = (rng() % 3 == 0) ? 0 : 1 + rng() % 500;
         const size_t stageSize = 1 + rng() % 4096;
-        const ChunkedResult r = chunked(doc, plan, rng, coldPct, maxRead, stageSize);
+        const ChunkedResult r = chunked(doc, plan, rng, coldPct, maxRead, stageSize, styles);
         ++cases;
         replays += r.replays;
         skips += r.skips;
@@ -295,16 +324,18 @@ int main() {
           if (++failures <= 5) {
             size_t i = 0;
             while (i < got.size() && i < ref.size() && got[i] == ref[i]) ++i;
-            std::fprintf(stderr, "FAIL doc=%zu size=%zu chunk=%u max=%d cold=%d ok=%d segs=%zu firstDiff=%zu "
+            std::fprintf(stderr, "FAIL css=%d doc=%zu size=%zu chunk=%u max=%d cold=%d ok=%d segs=%zu firstDiff=%zu "
                                  "ref=%zu got=%zu\n",
-                         d, doc.size(), plan.chunkBytes, plan.maxChunks, coldPct, r.ok ? 1 : 0, r.segments.size(),
-                         i, ref.size(), got.size());
+                         styles != nullptr ? 1 : 0, d, doc.size(), plan.chunkBytes, plan.maxChunks, coldPct,
+                         r.ok ? 1 : 0, r.segments.size(), i, ref.size(), got.size());
           }
         }
       }
     }
   }
-  std::fprintf(stderr, "cases=%d replays=%d skips=%d failures=%d\n", cases, replays, skips, failures);
+  }
+  std::fprintf(stderr, "cases=%d replays=%d skips=%d failures=%d cssChangedDocs=%d\n", cases, replays, skips,
+               failures, cssChanged);
   runner.expectTrue(failures == 0, "chunked_markers_identical_to_one_pass");
   runner.expectTrue(replays > 0 && skips > 0, "both_replay_and_skip_exercised");
 
@@ -314,12 +345,12 @@ int main() {
     size_t pick = 0;
     while (pick + 1 < docs.size() && (docs[pick].size() < 3000 || docs[pick].size() > 100000)) ++pick;
     const std::string& doc = docs[pick];
-    const std::string ref = onePass(doc);
+    const std::string ref = onePass(doc, &css);
     const MarkerChunkPlan plan{257, 240};
     const uint32_t size = static_cast<uint32_t>(doc.size());
     std::string out;
     std::vector<uint8_t> buf(300), stage(64);
-    ChunkedMarkerizer m(HtmlStripper::Mode::Html);
+    ChunkedMarkerizer m(HtmlStripper::Mode::Html, &css);
     std::mt19937 r2(3);
     MarkerizeReadFn src = makeSource(doc, r2, 0);
     const MarkerizeWriteFn okWrite = [&out](const uint8_t* d, size_t n) {
@@ -333,7 +364,7 @@ int main() {
                                 stage.size()) == MarkerizeStatus::WriteError;
     ok = ok && !m.clean();
     // Recovery: fresh instance, replay chunk 0's range, redo chunks 1..N.
-    ChunkedMarkerizer fresh(HtmlStripper::Mode::Html);
+    ChunkedMarkerizer fresh(HtmlStripper::Mode::Html, &css);
     MarkerizeReadFn src2 = makeSource(doc, r2, 0);
     ok = ok && fresh.replayTo(src2, plan.start(1, size), buf.data(), buf.size());
     const int total = plan.count(size);

@@ -1,5 +1,6 @@
 #include "test_utils.h"
 
+#include <CssStyleTable.h>
 #include <HtmlStripper.h>
 #include <MarkerizeChapter.h>
 #include <MarkerizedPageRender.h>
@@ -116,6 +117,9 @@ ChapterReadFn makeReader(const std::vector<uint8_t>& data, size_t start, uint32_
   };
 }
 
+// v3.11.13 — the "css" scenario markerizes with a book CSS table (EPUB path).
+const snapix::smolport::CssStyleTable* g_css = nullptr;
+
 std::vector<uint8_t> markerize(const std::string& html) {
   std::vector<uint8_t> out;
   std::vector<uint8_t> in(html.begin(), html.end());
@@ -134,7 +138,7 @@ std::vector<uint8_t> markerize(const std::string& html) {
         out.insert(out.end(), d, d + n);
         return true;
       },
-      buf, sizeof(buf));
+      buf, sizeof(buf), {}, nullptr, g_css);
   return out;
 }
 
@@ -195,6 +199,7 @@ struct GenOptions {
   bool allowBr = true;             // <br/> inside running text
   bool allowBlocks = true;         // quotes, lists, tables, center, dl, …
   bool asciiNoHyphen = false;      // hyphenation oracle: ASCII words, no '-'
+  bool allowCss = false;           // class / style attributes (CSS-table scenario)
   uint16_t imgMaxW = 100;
   uint16_t imgMaxH = 80;
 };
@@ -234,6 +239,12 @@ struct Gen {
   // One "item" inside running text.
   std::string textItem() {
     if (opt.asciiNoHyphen) return word();
+    if (opt.allowCss && chance(12)) {  // CSS-styled spans (see kFuzzCss)
+      static const char* kSpans[] = {"it", "bd", "h", "rm", "it bd", "zz"};
+      const char* cls = kSpans[rnd(0, 5)];
+      if (chance(20)) return "<span style=\"font-style:italic;font-weight:bold\">" + word() + "</span>";
+      return std::string("<span class=\"") + cls + "\">" + word() + " " + word() + "</span>";
+    }
     const int r = rnd(1, 100);
     if (opt.allowStyles && r <= 4) return "<b>" + word() + " " + word() + "</b>";
     if (opt.allowStyles && r <= 7) return "<i>" + word() + "</i>";
@@ -273,6 +284,17 @@ struct Gen {
   }
 
   std::string block(int depth) {
+    if (opt.allowCss && depth < 2 && chance(30)) {  // CSS-styled blocks (see kFuzzCss)
+      static const char* kBlocks[] = {"c", "q", "it", "rm", "c q", "left", "h", "zz"};
+      const std::string cls = kBlocks[rnd(0, 7)];
+      if (chance(30)) {
+        std::string s = "<div class=\"" + cls + "\">";
+        const int n = rnd(1, 3);
+        for (int i = 0; i < n; ++i) s += block(depth + 1);
+        return s + "</div>";
+      }
+      return "<p class=\"" + cls + "\">" + run(1, 30) + "</p>";
+    }
     const int r = rnd(1, 100);
     if (opt.asciiNoHyphen || !opt.allowBlocks) {
       if (r <= 15) return "<h2>" + run(1, 4) + "</h2>";
@@ -626,6 +648,7 @@ int main(int argc, char** argv) {
     StreamingPaginatorConfig cfg;
     GenOptions opt;
     bool hyphen;
+    bool css = false;
   };
   std::vector<Scenario> scenarios;
   {
@@ -653,6 +676,28 @@ int main(int argc, char** argv) {
     o.allowImages = false;
     scenarios.push_back({"hyphenate", makeCfg(140, 110, 0, true), o, true});
   }
+  {
+    // v3.11.13 — EPUB CSS: classes / inline styles add centre, indent,
+    // suspend/resume and display:none marker patterns at page seams.
+    GenOptions o;
+    o.allowCss = true;
+    o.imgMaxW = 100;
+    o.imgMaxH = 140;
+    scenarios.push_back({"css", makeCfg(120, 160, 12, false), o, false, true});
+  }
+  snapix::smolport::CssStyleTable cssTable;
+  {
+    const std::string sheet =
+        ".it { font-style: italic } .bd { font-weight: bold } .h { display: none } .c { text-align: center }"
+        ".q { margin-left: 2em } .rm { font-style: normal; font-weight: normal } .left { text-align: left }"
+        "blockquote { font-style: italic } h2 { text-align: left }";
+    snapix::smolport::CssStyleSheetCompiler compiler;
+    compiler.feed(reinterpret_cast<const uint8_t*>(sheet.data()), sheet.size());
+    compiler.endSheet();
+    std::vector<uint8_t> blob;
+    compiler.serialize(blob);
+    runner.expectTrue(cssTable.load(blob.data(), blob.size()), "css_table_loaded");
+  }
 
   // Optional profile (argv[3]) isolates one feature class on top of plain text.
   const std::string profile = argc > 3 ? argv[3] : "all";
@@ -669,6 +714,7 @@ int main(int argc, char** argv) {
       if (profile == "img") o.allowImages = true;
       if (profile == "tall") o.allowTallImages = true;
       if (profile == "nbsp") o.allowNbsp = true;
+      if (profile == "css") o.allowCss = sc.css;
     }
   }
   std::fprintf(stderr, "profile=%s chaptersPerConfig=%d\n", profile.c_str(), perConfig);
@@ -681,6 +727,7 @@ int main(int argc, char** argv) {
   for (const auto& sc : scenarios) {
     Category cats[5] = {{"A device idx+resume"}, {"B sequential chain"}, {"C skip-to-target"},
                         {"BND boundary agreement"}, {"D progressive idx"}};
+    g_css = sc.css ? &cssTable : nullptr;
     int ran = 0;
     for (int i = 0; i < perConfig; ++i) {
       const uint32_t seed = 0x9E3779B9u * static_cast<uint32_t>(i + 1) + static_cast<uint32_t>(sc.cfg.pageWidth);
