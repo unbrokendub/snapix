@@ -58,7 +58,6 @@ include_directories(
   ${PROJECT_ROOT}/lib/InputManager/include
   ${PROJECT_ROOT}/lib/RenderTypes/src
   ${PROJECT_ROOT}/lib/Epub/src/Epub
-  ${PROJECT_ROOT}/lib/Epub/src/Epub/css
   ${PROJECT_ROOT}/lib/PageCache/src
   ${PROJECT_ROOT}/lib/UnifiedCache/src
   ${PROJECT_ROOT}/lib/FsHelpers/src
@@ -151,12 +150,6 @@ foreach(TEST_SRC ${TEST_SOURCES})
     add_executable(${TEST_NAME}
       ${TEST_SRC}
       ${PROJECT_ROOT}/lib/Markdown/src/md_parser.c
-      ${TEST_HELPERS}
-    )
-  elseif(TEST_NAME STREQUAL "CssParserClassTest")
-    add_executable(${TEST_NAME}
-      ${TEST_SRC}
-      ${PROJECT_ROOT}/lib/Epub/src/Epub/css/CssParser.cpp
       ${TEST_HELPERS}
     )
   elseif(TEST_NAME STREQUAL "XtcCoverHelperTest")

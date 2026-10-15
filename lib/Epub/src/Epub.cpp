@@ -142,10 +142,6 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata) {
     tocNavItem = opfParser.tocNavPath;
   }
 
-  // Capture CSS files from manifest
-  cssFiles_ = opfParser.getCssFiles();
-  LOG_DBG(TAG, "Found %d CSS files in manifest", static_cast<int>(cssFiles_.size()));
-
   LOG_INF(TAG, "Successfully parsed content.opf");
   return true;
 }
@@ -290,45 +286,6 @@ bool Epub::parseTocNavFile() const {
   return true;
 }
 
-bool Epub::parseCssFiles() {
-  if (cssFiles_.empty()) {
-    LOG_DBG(TAG, "No CSS files to parse");
-    return true;
-  }
-
-  cssParser_.reset(new CssParser());
-
-  for (const auto& cssHref : cssFiles_) {
-    // Extract CSS file to temp location.  v2.0.73: temp lives on LittleFS.
-    const auto tmpCssPath = getCachePath() + "/.tmp_css.css";
-
-    File tempCssFile = LittleFS.open(tmpCssPath.c_str(), "w");
-    if (!tempCssFile) {
-      LOG_ERR(TAG, "Failed to create temp CSS file");
-      continue;
-    }
-
-    if (!readItemContentsToStream(cssHref, tempCssFile, 1024, sharedZipDictBuffer())) {
-      LOG_ERR(TAG, "Failed to extract CSS: %s", cssHref.c_str());
-      tempCssFile.close();
-      LittleFS.remove(tmpCssPath.c_str());
-      continue;
-    }
-    tempCssFile.close();
-
-    // Parse the CSS file (CssParser::parseFile reopens the path; v2.0.73
-    // updated to LittleFS.open internally).
-    if (!cssParser_->parseFile(tmpCssPath.c_str())) {
-      LOG_ERR(TAG, "Failed to parse CSS: %s", cssHref.c_str());
-    }
-
-    LittleFS.remove(tmpCssPath.c_str());
-  }
-
-  LOG_INF(TAG, "Parsed CSS files, %d style rules loaded", static_cast<int>(cssParser_->getStyleCount()));
-  return true;
-}
-
 // load in the meta data for the epub file
 bool Epub::load(const bool buildIfMissing) {
   LOG_INF(TAG, "Loading ePub: %s", filepath.c_str());
@@ -375,14 +332,6 @@ bool Epub::load(const bool buildIfMissing) {
   if (!bookMetadataCache->endContentOpfPass()) {
     LOG_ERR(TAG, "Could not end writing content.opf pass");
     return false;
-  }
-
-  // Parse CSS files for styling
-  parseCssFiles();
-  // Free CSS file paths - no longer needed after rules are parsed into cssParser_
-  {
-    std::vector<std::string> tmp;
-    cssFiles_.swap(tmp);
   }
 
   // TOC Pass - try EPUB 3 nav first, fall back to NCX

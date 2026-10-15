@@ -67,7 +67,6 @@ class ContentOpfParser final : public Print {
     return nullptr;
   }
   std::string coverItemId;
-  std::vector<std::string> cssFiles_;
 
   static void startElement(void* userData, const XML_Char* name, const XML_Char** atts);
   static void characterData(void* userData, const XML_Char* s, int len);
@@ -81,7 +80,6 @@ class ContentOpfParser final : public Print {
   std::string tocNavPath;  // EPUB 3 nav document path
   std::string coverItemHref;
   std::string textReferenceHref;
-  const std::vector<std::string>& getCssFiles() const { return cssFiles_; }
 
   explicit ContentOpfParser(const std::string& cachePath, const std::string& baseContentPath, const size_t xmlSize,
                             BookMetadataCache* cache)

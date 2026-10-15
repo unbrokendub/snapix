@@ -40,7 +40,6 @@ add_executable(reader-test
   ${PROJECT_ROOT}/lib/Epub/src/Epub/parsers/TocNcxParser.cpp
   ${PROJECT_ROOT}/lib/Epub/src/Epub/parsers/TocNavParser.cpp
   ${PROJECT_ROOT}/lib/Epub/src/Epub/htmlEntities.cpp
-  ${PROJECT_ROOT}/lib/Epub/src/Epub/css/CssParser.cpp
   ${PROJECT_ROOT}/lib/PageCache/src/EpubChapterParser.cpp
   ${PROJECT_ROOT}/lib/PageCache/src/PageCache.cpp
 
@@ -81,7 +80,6 @@ target_include_directories(reader-test PRIVATE
   ${PROJECT_ROOT}/lib/RenderTypes/src
   ${PROJECT_ROOT}/lib/Epub/src
   ${PROJECT_ROOT}/lib/Epub/src/Epub
-  ${PROJECT_ROOT}/lib/Epub/src/Epub/css
   ${PROJECT_ROOT}/lib/PageCache/src
   ${PROJECT_ROOT}/lib/FsHelpers/src
   ${PROJECT_ROOT}/lib/ScriptDetector/src

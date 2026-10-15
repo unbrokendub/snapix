@@ -204,26 +204,24 @@ Header → Metrics → Unicode Intervals → Glyphs → Bitmap
 
 CJK fonts use binary search for glyph lookup: O(log n) complexity. Text can break at any character boundary (no word-based line breaking).
 
-## CSS Parser
+## CSS Styles
 
 ### Pipeline
 
 ```
-EPUB Load → ContentOpfParser → CssParser → ChapterHtmlSlimParser → Page
+EPUB ZIP (*.css) → CssStyleSheetCompiler → CssStyleTable (UnifiedCache) → HtmlStripper → markers
 ```
 
-1. **ContentOpfParser**: Discovers CSS files in EPUB manifest (media-type contains "css")
-2. **CssParser**: Parses CSS files, builds style map keyed by selector
-3. **ChapterHtmlSlimParser**: Queries CSS for each element, applies styles during page layout
+1. **Epub::buildCssStyleTable**: Indexes every `.css` entry of the archive once per book and streams it through `CssStyleSheetCompiler`
+2. **CssStyleTable**: Sorted table of 32-bit selector hashes (6 B per entry), cached as UnifiedCache `Kind::StyleTable`
+3. **HtmlStripper**: Resolves each element's effects (tag < .class < tag.class < inline style) and emits the existing italic / bold / center / indent markers
 
 ### Supported Properties
 
-- **text-align** (left, right, center, justify) — Block alignment
-- **font-style** (normal, italic) — Italic text
-- **font-weight** (normal, bold, 700+) — Bold text
-- **text-indent** (px, em) — First-line indent
-- **margin-top/bottom** (em, %) — Extra line spacing
-- **direction** (ltr, rtl) — Text direction (RTL for Arabic)
+- **font-style** (italic, oblique), **font-weight** (bold, bolder, 600+) and the **font** shorthand
+- **text-align: center** — Centered block
+- **margin-left** / **margin** (left ≥ ~1.5em) — Indented block
+- **display: none** — Content suppressed (anchors still resolve)
 
 ### Supported Selectors
 
@@ -233,11 +231,13 @@ EPUB Load → ContentOpfParser → CssParser → ChapterHtmlSlimParser → Page
 - **Comma-separated**: `h1, h2, h3`
 - **Inline styles**: `style="text-align: center"`
 
+Selectors with combinators, pseudo-classes, ids, attributes, `*` or a second class are skipped, as are all @-rules.
+
 ### Key Files
 
-- `lib/Epub/Epub/css/CssStyle.h` — Style enums and struct
-- `lib/Epub/Epub/css/CssParser.h/cpp` — CSS file parsing
-- `lib/Epub/Epub/parsers/ChapterHtmlSlimParser.cpp` — Style application during HTML parsing
+- `lib/SmolPort/src/CssStyleTable.h/cpp` — Declaration parser, style table and stylesheet compiler
+- `lib/SmolPort/src/HtmlStripper.cpp` — Style application while converting chapter HTML to markers
+- `lib/PageCache/src/EpubChapterParser.cpp` — Builds / loads the cached table (`ensureStyleTable`)
 
 ## Text Layout
 

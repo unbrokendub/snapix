@@ -257,12 +257,6 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
         LOG_INF(TAG, "Found EPUB 3 nav document: %s", href.c_str());
       }
     }
-
-    // Collect CSS files
-    if (mediaType.find("css") != std::string::npos) {
-      self->cssFiles_.push_back(href);
-      LOG_DBG(TAG, "Found CSS file: %s", href.c_str());
-    }
     return;
   }
 
