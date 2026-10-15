@@ -1,5 +1,7 @@
 #include "UnifiedCache.h"
 
+#include <atomic>
+
 #include <Logging.h>
 
 #include <algorithm>
@@ -23,6 +25,30 @@ namespace {
 constexpr uint8_t kMagic[4] = {'U', 'C', 'A', 'C'};
 constexpr size_t kCompactionMinFileBytes = 128 * 1024;
 constexpr size_t kCompactionMinGarbageBytes = 64 * 1024;
+
+// v3.11.12 — process-wide modification counter (see writeGeneration()).
+// Bumped around every write to a cache file and on every successful
+// remove/rename, so a long-lived reader can tell whether its directory
+// snapshot is still current without rescanning the file.
+std::atomic<uint32_t> gWriteGeneration{0};
+
+bool fsRemove(const char* path) {
+  const bool ok = LittleFS.remove(path);
+  if (ok) gWriteGeneration.fetch_add(1);
+  return ok;
+}
+
+bool fsRename(const char* from, const char* to) {
+  const bool ok = LittleFS.rename(from, to);
+  if (ok) gWriteGeneration.fetch_add(1);
+  return ok;
+}
+
+// Bumps on entry AND exit: a reader that loaded mid-write sees a stale value.
+struct WriteGenerationScope {
+  WriteGenerationScope() { gWriteGeneration.fetch_add(1); }
+  ~WriteGenerationScope() { gWriteGeneration.fetch_add(1); }
+};
 
 inline void writeU16LE(uint8_t* dst, uint16_t v) {
   dst[0] = static_cast<uint8_t>(v);
@@ -52,6 +78,8 @@ inline uint32_t directoryId(Kind kind, uint16_t key) {
 
 }  // namespace
 
+uint32_t UnifiedCache::writeGeneration() { return gWriteGeneration.load(); }
+
 UnifiedCache::UnifiedCache(std::string bookCachePath)
     : path_(std::move(bookCachePath) + "/streaming.cache") {}
 
@@ -64,7 +92,7 @@ bool UnifiedCache::recoverCompactionSwap() {
 
   // Recover a self-heal swap interrupted after original -> .heal.bak.
   if (!hasMain && LittleFS.exists(healBackupPath.c_str())) {
-    if (!LittleFS.rename(healBackupPath.c_str(), path_.c_str())) {
+    if (!fsRename(healBackupPath.c_str(), path_.c_str())) {
       LOG_ERR(TAG, "Self-heal recovery: restore %s -> %s failed",
               healBackupPath.c_str(), path_.c_str());
       return false;
@@ -72,15 +100,15 @@ bool UnifiedCache::recoverCompactionSwap() {
     hasMain = true;
   }
   if (hasMain) {
-    LittleFS.remove(healPath.c_str());
-    LittleFS.remove(healBackupPath.c_str());
+    fsRemove(healPath.c_str());
+    fsRemove(healBackupPath.c_str());
   }
 
   const bool hasBackup = LittleFS.exists(backupPath.c_str());
 
   if (!hasMain && hasBackup) {
     // Power loss after original -> .bak but before .compact -> original.
-    if (!LittleFS.rename(backupPath.c_str(), path_.c_str())) {
+    if (!fsRename(backupPath.c_str(), path_.c_str())) {
       LOG_ERR(TAG, "Compaction recovery: restore %s -> %s failed",
               backupPath.c_str(), path_.c_str());
       return false;
@@ -88,7 +116,7 @@ bool UnifiedCache::recoverCompactionSwap() {
   } else if (!hasMain && LittleFS.exists(compactPath.c_str())) {
     // No original and no backup: the fully-written compact candidate is the
     // only recoverable copy.
-    if (!LittleFS.rename(compactPath.c_str(), path_.c_str())) {
+    if (!fsRename(compactPath.c_str(), path_.c_str())) {
       LOG_ERR(TAG, "Compaction recovery: promote %s -> %s failed",
               compactPath.c_str(), path_.c_str());
       return false;
@@ -98,7 +126,7 @@ bool UnifiedCache::recoverCompactionSwap() {
   // A compact temp beside a valid main is pre-commit debris.  Keep `.bak`
   // until loadDirectory validates the main file below.
   if (LittleFS.exists(path_.c_str()) && LittleFS.exists(compactPath.c_str())) {
-    LittleFS.remove(compactPath.c_str());
+    fsRemove(compactPath.c_str());
   }
   return true;
 }
@@ -134,8 +162,8 @@ bool UnifiedCache::loadDirectory() {
     LOG_ERR(TAG, "Failed to open %s for read", path_.c_str());
     const std::string backupPath = path_ + ".bak";
     if (LittleFS.exists(backupPath.c_str())) {
-      LittleFS.remove(path_.c_str());
-      if (LittleFS.rename(backupPath.c_str(), path_.c_str())) {
+      fsRemove(path_.c_str());
+      if (fsRename(backupPath.c_str(), path_.c_str())) {
         loaded_ = false;
         return loadDirectory();
       }
@@ -146,8 +174,8 @@ bool UnifiedCache::loadDirectory() {
   const std::string backupPath = path_ + ".bak";
   auto restoreBackup = [&]() -> bool {
     if (!LittleFS.exists(backupPath.c_str())) return false;
-    LittleFS.remove(path_.c_str());
-    if (!LittleFS.rename(backupPath.c_str(), path_.c_str())) return false;
+    fsRemove(path_.c_str());
+    if (!fsRename(backupPath.c_str(), path_.c_str())) return false;
     loaded_ = false;
     return loadDirectory();
   };
@@ -156,7 +184,7 @@ bool UnifiedCache::loadDirectory() {
     LOG_ERR(TAG, "File %s too small (%zu bytes) — treating as empty", path_.c_str(), fileSize_);
     f.close();
     if (restoreBackup()) return true;
-    LittleFS.remove(path_.c_str());
+    fsRemove(path_.c_str());
     fileSize_ = 0;
     headerInitialized_ = false;
     loaded_ = true;
@@ -174,7 +202,7 @@ bool UnifiedCache::loadDirectory() {
     LOG_ERR(TAG, "Bad magic in %s — wiping", path_.c_str());
     f.close();
     if (restoreBackup()) return true;
-    LittleFS.remove(path_.c_str());
+    fsRemove(path_.c_str());
     fileSize_ = 0;
     headerInitialized_ = false;
     loaded_ = true;
@@ -185,8 +213,8 @@ bool UnifiedCache::loadDirectory() {
     LOG_INF(TAG, "Format version mismatch in %s (found %u, want %u) — wiping", path_.c_str(),
             static_cast<unsigned>(version), static_cast<unsigned>(kFormatVersion));
     f.close();
-    LittleFS.remove(path_.c_str());
-    LittleFS.remove(backupPath.c_str());
+    fsRemove(path_.c_str());
+    fsRemove(backupPath.c_str());
     fileSize_ = 0;
     headerInitialized_ = false;
     loaded_ = true;
@@ -315,11 +343,11 @@ bool UnifiedCache::loadDirectory() {
     if (dst) dst.close();
 
     if (rewriteOk) {
-      LittleFS.remove(healBackupPath.c_str());
+      fsRemove(healBackupPath.c_str());
       const bool backedUp =
-          LittleFS.rename(path_.c_str(), healBackupPath.c_str());
-      if (backedUp && LittleFS.rename(healPath.c_str(), path_.c_str())) {
-        LittleFS.remove(healBackupPath.c_str());
+          fsRename(path_.c_str(), healBackupPath.c_str());
+      if (backedUp && fsRename(healPath.c_str(), path_.c_str())) {
+        fsRemove(healBackupPath.c_str());
         fileSize_ = goodEnd;
         LOG_INF(TAG, "Self-healed %s: truncated %zu -> %zu bytes, preserved %zu valid entries",
                 path_.c_str(), oldFileSize, fileSize_, directory_.size());
@@ -328,16 +356,16 @@ bool UnifiedCache::loadDirectory() {
                 healPath.c_str(), path_.c_str());
         if (!LittleFS.exists(path_.c_str()) &&
             LittleFS.exists(healBackupPath.c_str())) {
-          LittleFS.rename(healBackupPath.c_str(), path_.c_str());
+          fsRename(healBackupPath.c_str(), path_.c_str());
         }
-        LittleFS.remove(healPath.c_str());
+        fsRemove(healPath.c_str());
         loaded_ = false;
         return false;
       }
     } else {
       LOG_ERR(TAG, "Self-heal: rewrite to %s failed; leaving original corrupt file",
               healPath.c_str());
-      LittleFS.remove(healPath.c_str());  // clean up partial heal
+      fsRemove(healPath.c_str());  // clean up partial heal
       loaded_ = false;
       return false;  // retry later; never append behind an unreachable tail
     }
@@ -346,7 +374,7 @@ bool UnifiedCache::loadDirectory() {
   headerInitialized_ = true;
   loaded_ = true;
   if (LittleFS.exists(backupPath.c_str())) {
-    LittleFS.remove(backupPath.c_str());
+    fsRemove(backupPath.c_str());
   }
   // Operation-local instances still scan once at first use, hence DBG.
   LOG_DBG(TAG, "Loaded %s: fileSize=%zu directoryEntries=%zu", path_.c_str(), fileSize_,
@@ -454,6 +482,7 @@ bool UnifiedCache::openSegmentReader(Kind kind, uint16_t key, File& outFile, siz
 bool UnifiedCache::appendFrame(Kind kind, uint16_t key, uint8_t flags,
                                  const std::function<bool(File&)>& writePayload,
                                  size_t payloadSize) {
+  const WriteGenerationScope generationScope;
   // v2.0.173 — mutex removed (see top-of-file rationale).
   if (!ensureLoaded()) return false;
 
@@ -559,6 +588,7 @@ bool UnifiedCache::writeSegment(Kind kind, uint16_t key, const uint8_t* data, si
 
 bool UnifiedCache::writeSegmentStreamingDeferred(Kind kind, uint16_t key,
                                                   const std::function<bool(File&)>& writeCb) {
+  const WriteGenerationScope generationScope;
   // v2.0.173 — mutex removed (see top-of-file rationale).
   if (!ensureLoaded()) return false;
 
@@ -749,20 +779,21 @@ bool UnifiedCache::compactIfNeeded() {
 }
 
 bool UnifiedCache::compact() {
+  const WriteGenerationScope generationScope;
   if (!ensureLoaded() || !headerInitialized_ || !LittleFS.exists(path_.c_str())) {
     return true;
   }
 
   const std::string compactPath = path_ + ".compact";
   const std::string backupPath = path_ + ".bak";
-  LittleFS.remove(compactPath.c_str());
+  fsRemove(compactPath.c_str());
 
   File src = LittleFS.open(path_.c_str(), "r");
   File dst = LittleFS.open(compactPath.c_str(), "w");
   if (!src || !dst || !writeFileHeader(dst)) {
     if (src) src.close();
     if (dst) dst.close();
-    LittleFS.remove(compactPath.c_str());
+    fsRemove(compactPath.c_str());
     return false;
   }
 
@@ -803,20 +834,20 @@ bool UnifiedCache::compact() {
   if (!ioOk || compactBytes != compactedFileSize()) {
     LOG_ERR(TAG, "Compaction write failed for %s (got=%zu want=%zu)",
             path_.c_str(), compactBytes, compactedFileSize());
-    LittleFS.remove(compactPath.c_str());
+    fsRemove(compactPath.c_str());
     return false;
   }
 
-  LittleFS.remove(backupPath.c_str());
-  if (!LittleFS.rename(path_.c_str(), backupPath.c_str())) {
+  fsRemove(backupPath.c_str());
+  if (!fsRename(path_.c_str(), backupPath.c_str())) {
     LOG_ERR(TAG, "Compaction could not back up %s", path_.c_str());
-    LittleFS.remove(compactPath.c_str());
+    fsRemove(compactPath.c_str());
     return false;
   }
-  if (!LittleFS.rename(compactPath.c_str(), path_.c_str())) {
+  if (!fsRename(compactPath.c_str(), path_.c_str())) {
     LOG_ERR(TAG, "Compaction could not publish %s", compactPath.c_str());
-    LittleFS.rename(backupPath.c_str(), path_.c_str());
-    LittleFS.remove(compactPath.c_str());
+    fsRename(backupPath.c_str(), path_.c_str());
+    fsRemove(compactPath.c_str());
     loaded_ = false;
     return false;
   }
@@ -824,8 +855,8 @@ bool UnifiedCache::compact() {
   const size_t oldBytes = fileSize_;
   loaded_ = false;
   if (!loadDirectory()) {
-    LittleFS.remove(path_.c_str());
-    if (LittleFS.rename(backupPath.c_str(), path_.c_str())) {
+    fsRemove(path_.c_str());
+    if (fsRename(backupPath.c_str(), path_.c_str())) {
       loaded_ = false;
       (void)loadDirectory();
     }

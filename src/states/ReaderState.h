@@ -15,6 +15,10 @@
 #include <MarkerizedPageRender.h>
 #endif
 
+namespace snapix::unifiedcache {
+class UnifiedCache;
+}
+
 #include "../content/BookmarkManager.h"
 #include "../content/ReaderNavigation.h"
 #include "../core/Types.h"
@@ -117,6 +121,14 @@ class ReaderState : public State {
   std::string streamOffsetCacheBookPath_;
   int streamOffsetCacheKey_ = -1;
   uint16_t streamOffsetCacheConfigHash_ = 0;
+  // v3.11.12 — the page render's UnifiedCache, reused across page turns while
+  // UnifiedCache::writeGeneration() is unchanged (each fresh instance rescans
+  // the whole streaming.cache: ~140 ms of a ~200 ms page render).  Dropped on
+  // book exit so its directory never outlives the book.
+  std::unique_ptr<snapix::unifiedcache::UnifiedCache> renderCache_;
+  std::string renderCachePath_;
+  uint32_t renderCacheGeneration_ = 0;
+  snapix::unifiedcache::UnifiedCache& renderCacheFor(const std::string& bookCachePath);
 #endif
 
   // Whether book has a valid cover image

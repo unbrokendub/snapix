@@ -1078,6 +1078,8 @@ void ReaderState::exit(Core& core) {
     streamOffsetCacheBookPath_.clear();
     streamOffsetCacheKey_ = -1;
   }
+  renderCache_.reset();
+  renderCachePath_.clear();
 #endif
 
   if (contentLoaded_) {
@@ -2640,7 +2642,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
     }
   }
   if (!bookCachePath.empty() && markersKey >= 0) {
-    auto ucache = snapix::unifiedcache::UnifiedCache::shared(bookCachePath);
+    auto& ucache = renderCacheFor(bookCachePath);
     // v3.9.0 — read markers through ChunkedMarkersReader so a single-section
     // doc's progressively-written chunk segments (keys 0..N) present as ONE
     // logical stream with global offsets.  A 1-chunk doc (every doc today, plus
@@ -3192,6 +3194,20 @@ void ReaderState::displayWithRefresh(Core& core) {
     pagesUntilFullRefresh_--;
   }
 }
+
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+snapix::unifiedcache::UnifiedCache& ReaderState::renderCacheFor(const std::string& bookCachePath) {
+  // Generation read BEFORE the (lazy) directory load: a write racing the load
+  // leaves a stale value and only causes one extra rescan, never a stale hit.
+  const uint32_t generation = snapix::unifiedcache::UnifiedCache::writeGeneration();
+  if (!renderCache_ || renderCachePath_ != bookCachePath || renderCacheGeneration_ != generation) {
+    renderCache_.reset(new snapix::unifiedcache::UnifiedCache(bookCachePath));
+    renderCachePath_ = bookCachePath;
+    renderCacheGeneration_ = generation;
+  }
+  return *renderCache_;
+}
+#endif
 
 bool ReaderState::renderLoadingStatusMessage(Core& core) {
   if (contentLoaded_ && core.content.metadata().type == ContentType::Fb2 && core.content.tocCount() == 0) {

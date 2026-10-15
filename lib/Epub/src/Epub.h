@@ -97,6 +97,28 @@ class Epub {
   // is being drawn.
   int probeImageLayoutSize(const std::string& itemHref, uint16_t maxW, uint16_t maxH, uint16_t& outW,
                            uint16_t& outH, bool allowFramebufferDict = true) const;
+
+  // v3.11.12 — batch form of probeImageLayoutSize for the page-index walk,
+  // which sizes EVERY inline image of a chapter.  Keeps the ZIP open and
+  // indexes the image entries of the central directory once, so each probe
+  // is a binary search + a few KB of inflate instead of reopening the archive
+  // and scanning the whole directory (first-open of an image-heavy EPUB went
+  // from seconds to minutes).  Logs a [PERF] summary when destroyed.
+  class ImageProbeSession {
+   public:
+    ~ImageProbeSession();
+    ImageProbeSession(const ImageProbeSession&) = delete;
+    ImageProbeSession& operator=(const ImageProbeSession&) = delete;
+    // Same contract as probeImageLayoutSize; a missing entry is definitive (0).
+    int probe(const std::string& itemHref, uint16_t maxW, uint16_t maxH, uint16_t& outW, uint16_t& outH);
+
+   private:
+    friend class Epub;
+    explicit ImageProbeSession(const std::string& filepath);
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+  };
+  std::unique_ptr<ImageProbeSession> openImageProbeSession() const;
   // Resolve every spine entry's uncompressed size with one ZIP central-
   // directory scan.  This is substantially faster than getItemSize() in a
   // loop because the latter reopens and rescans the archive for every href.

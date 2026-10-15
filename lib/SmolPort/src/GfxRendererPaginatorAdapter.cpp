@@ -189,22 +189,24 @@ bool readDimSidecar(const std::string& dimPath, uint16_t& w, uint16_t& h) {
 }
 
 void writeDimSidecar(const std::string& dimPath, uint16_t w, uint16_t h) {
-  // Atomic: a torn 8-byte write must not leave a sidecar that parses.
-  const std::string tmp = dimPath + ".tmp";
-  File f = LittleFS.open(tmp.c_str(), "w");
+  // littlefs commits a file's contents atomically on close (copy-on-write), so
+  // a reset mid-write leaves no file or the old one — never a torn sidecar;
+  // readDimSidecar also checks magic + length.  No temp-file + rename (one
+  // metadata commit instead of three per image).
+  File f = LittleFS.open(dimPath.c_str(), "w");
   if (!f) {
     // Image cache dir not created yet (nothing decoded for this book so far).
     const size_t slash = dimPath.rfind('/');
     if (slash == std::string::npos || slash == 0) return;
     LittleFS.mkdir(dimPath.substr(0, slash).c_str());
-    f = LittleFS.open(tmp.c_str(), "w");
+    f = LittleFS.open(dimPath.c_str(), "w");
     if (!f) return;
   }
   const uint8_t b[8] = {'D', '1', static_cast<uint8_t>(w & 0xFF), static_cast<uint8_t>(w >> 8),
                         static_cast<uint8_t>(h & 0xFF), static_cast<uint8_t>(h >> 8), 0, 0};
   const bool ok = f.write(b, sizeof(b)) == sizeof(b);
   f.close();
-  if (!ok || !LittleFS.rename(tmp.c_str(), dimPath.c_str())) LittleFS.remove(tmp.c_str());
+  if (!ok) LittleFS.remove(dimPath.c_str());
 }
 
 bool readBmpSize(const std::string& bmpPath, uint16_t& w, uint16_t& h) {

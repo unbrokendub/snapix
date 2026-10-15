@@ -95,6 +95,13 @@ class UnifiedCache {
   //   cache.segmentSize(...);
   static UnifiedCache shared(const std::string& bookCachePath);
 
+  // v3.11.12 — process-wide counter that changes whenever ANY instance writes,
+  // removes, renames, compacts or self-heals a cache file.  A caller that keeps
+  // an instance across operations (the reader's per-page render) reuses its
+  // directory snapshot only while this value is unchanged — rescanning an
+  // 800 KB streaming.cache cost ~140 ms on every page turn.
+  static uint32_t writeGeneration();
+
   // Direct constructor — kept public for unit tests and for callers that
   // explicitly want an isolated instance (e.g., one-shot diagnostics).
   // Production code should use `shared()` for consistency.

@@ -135,6 +135,22 @@ class ZipFile {
   // targets must be sorted by (hash, len). sizes[target.index] receives uncompressedSize.
   // Returns number of targets matched.
   int fillUncompressedSizes(std::vector<SizeTarget>& targets, std::vector<uint32_t>& sizes);
+  // v3.11.12 — one central-directory pass that indexes only the entries
+  // `accept` keeps (e.g. image files) as FNV-1a hash + name length + stat,
+  // sorted for binary search.  Lets a caller that opens many entries (the
+  // page-index walk sizing every inline image) skip the per-open linear scan
+  // of the whole directory.  32 bytes per kept entry.
+  struct IndexedEntry {
+    uint64_t hash;
+    uint16_t len;
+    FileStatSlim stat;
+    bool operator<(const IndexedEntry& o) const { return hash < o.hash || (hash == o.hash && len < o.len); }
+  };
+  bool indexEntries(std::vector<IndexedEntry>& out, bool (*accept)(const char* name, size_t len));
+  static const IndexedEntry* findIndexed(const std::vector<IndexedEntry>& index, const char* name);
+  // Open an entry already resolved via indexEntries() (no directory scan).
+  std::unique_ptr<ZipItemReader> openItemStream(const FileStatSlim& stat, size_t chunkSize, uint8_t* dictBuffer,
+                                                const char* nameForLog);
   // Find first existing file from a list of paths. Returns index into paths array, or -1 if none found.
   // More efficient than calling getInflatedFileSize() for each path individually.
   int findFirstExisting(const char* const* paths, int pathCount);

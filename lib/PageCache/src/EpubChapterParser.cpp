@@ -626,16 +626,19 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // after this walk.  Size images from their ZIP header instead, so the
     // index lays them out exactly as the later render will (the adapter pins
     // the size in a "<bmp>.dim" sidecar the render reads back).
+    // One probe session per walk: the ZIP stays open and its image entries
+    // are indexed once (a per-image open + full directory scan made the
+    // first open of an image-heavy EPUB take minutes).
     if (!imageCacheDir.empty()) {
-      const std::shared_ptr<Epub> epub = epub_;
+      std::shared_ptr<Epub::ImageProbeSession> session(epub_->openImageProbeSession());
       const uint16_t boxW = config_.viewportWidth;
       const uint16_t boxH = config_.viewportHeight;
-      adapter.setImageSizeProbe([epub, chapterBase, boxW, boxH](const uint8_t* p, size_t l, uint16_t& w,
-                                                                uint16_t& h) -> int {
-        if (!epub || p == nullptr || l == 0) return -1;
+      adapter.setImageSizeProbe([session, chapterBase, boxW, boxH](const uint8_t* p, size_t l, uint16_t& w,
+                                                                   uint16_t& h) -> int {
+        if (!session || p == nullptr || l == 0) return -1;
         const std::string src(reinterpret_cast<const char*>(p), l);
         const std::string href = chapterBase.empty() ? src : FsHelpers::normalisePath(chapterBase + src);
-        return epub->probeImageLayoutSize(href, boxW, boxH, w, h);
+        return session->probe(href, boxW, boxH, w, h);
       });
     }
     snapix::smolport::StreamingPaginator paginator(cfg, adapter);
@@ -680,9 +683,11 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     // stream in draw-suppressed mode and fires the callback at
     // every page boundary.  Returns PageNotFound when EOF hits.
     snapix::smolport::MarkerizedRenderStats stats{};
+    const uint32_t walkStartMs = millis();
     const auto indexStatus = snapix::smolport::renderMarkerizedPage(
         paginator, readFn, chunkBuf.get(), kChunkBufBytes, UINT16_MAX,
         shouldAbort, &stats, {}, captureFn, captureAnchorFn);
+    const uint32_t walkMs = millis() - walkStartMs;
     mf.close();
 
     if (indexStatus == snapix::smolport::MarkerizedRenderResult::Aborted) {
@@ -761,10 +766,10 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
     }
     LOG_INF(TAG,
             "[CONTENT][EPUB] [STREAM] idx built upfront spine=%d pages=%u "
-            "anchors=%u bytes=%u (skipping legacy parser)",
+            "anchors=%u bytes=%u walk=%u ms (skipping legacy parser)",
             spineIndex_, static_cast<unsigned>(captured.size() + 1),
             static_cast<unsigned>(anchorMap_.size()),
-            static_cast<unsigned>(stats.bytesConsumed));
+            static_cast<unsigned>(stats.bytesConsumed), static_cast<unsigned>(walkMs));
   } while (false);
 #endif
 

@@ -1023,6 +1023,90 @@ std::unique_ptr<ZipItemReader> Epub::openItemStream(const std::string& itemHref,
   return ZipFile(filepath).openItemStream(path.c_str(), chunkSize, dictBuffer);
 }
 
+namespace {
+// Feed a ZIP entry reader into the header sniffer; 1 found / 0 unusable / -1 transient.
+int sniffImageLayoutSize(ZipItemReader& reader, const uint16_t maxW, const uint16_t maxH, uint16_t& outW,
+                         uint16_t& outH) {
+  // Headers sit in the first few hundred bytes (PNG/BMP) or after the APPn
+  // segments (JPEG: EXIF/ICC can push SOF out to ~64 KB).  Bound the inflate.
+  constexpr uint32_t kMaxProbeBytes = 128 * 1024;
+  snapix::image::ImageHeaderSniffer sniffer;
+  uint8_t buf[512];
+  uint32_t total = 0;
+  while (sniffer.result() == snapix::image::ImageHeaderSniffer::Result::NeedMore) {
+    if (total >= kMaxProbeBytes) return -1;
+    const int n = reader.read(buf, sizeof(buf));
+    if (n < 0) return -1;
+    if (n == 0) return 0;  // EOF before any size — corrupt / truncated
+    total += static_cast<uint32_t>(n);
+    sniffer.feed(buf, static_cast<size_t>(n));
+  }
+  if (sniffer.result() != snapix::image::ImageHeaderSniffer::Result::Found) return 0;
+  snapix::image::fitImageBox(sniffer.width(), sniffer.height(), maxW, maxH, outW, outH);
+  return (outW > 0 && outH > 0) ? 1 : 0;
+}
+
+bool isImageEntryName(const char* name, size_t /*len*/) { return FsHelpers::isImageFile(name); }
+}  // namespace
+
+struct Epub::ImageProbeSession::Impl {
+  explicit Impl(const std::string& path) : zip(path) {}
+  ZipFile zip;
+  std::vector<ZipFile::IndexedEntry> index;
+  bool indexed = false;
+  bool indexOk = false;
+  uint32_t probes = 0;
+  uint32_t found = 0;
+  uint32_t indexMs = 0;
+  uint32_t probeMs = 0;
+};
+
+Epub::ImageProbeSession::ImageProbeSession(const std::string& filepath) : impl_(new Impl(filepath)) {}
+
+Epub::ImageProbeSession::~ImageProbeSession() {
+  if (impl_->probes > 0 || impl_->indexed) {
+    LOG_INF(TAG, "[PERF] image probes n=%u found=%u probe=%u ms index=%u ms entries=%u",
+            static_cast<unsigned>(impl_->probes), static_cast<unsigned>(impl_->found),
+            static_cast<unsigned>(impl_->probeMs), static_cast<unsigned>(impl_->indexMs),
+            static_cast<unsigned>(impl_->index.size()));
+  }
+  impl_->zip.close();
+}
+
+int Epub::ImageProbeSession::probe(const std::string& itemHref, const uint16_t maxW, const uint16_t maxH,
+                                   uint16_t& outW, uint16_t& outH) {
+  outW = 0;
+  outH = 0;
+  if (!ImageConverterFactory::isSupported(itemHref)) return 0;
+  const uint32_t t0 = millis();
+  if (!impl_->indexed) {
+    impl_->indexed = true;
+    impl_->indexOk = impl_->zip.open() && impl_->zip.indexEntries(impl_->index, isImageEntryName);
+    impl_->indexMs = millis() - t0;
+  }
+  if (!impl_->indexOk) return -1;
+  ++impl_->probes;
+  const std::string path = FsHelpers::normalisePath(
+      FsHelpers::percentDecode(FsHelpers::stripQueryAndFragment(itemHref)));
+  const ZipFile::IndexedEntry* e = ZipFile::findIndexed(impl_->index, path.c_str());
+  if (e == nullptr) {
+    impl_->probeMs += millis() - t0;
+    return 0;  // not in the archive — the image can never be shown
+  }
+  // Background walk: heap window first, arbitrated framebuffer fallback.
+  auto reader = impl_->zip.openItemStream(e->stat, 1024, sharedZipDictBuffer(), path.c_str());
+  int rc = -1;
+  if (reader) rc = sniffImageLayoutSize(*reader, maxW, maxH, outW, outH);
+  reader.reset();
+  if (rc == 1) ++impl_->found;
+  impl_->probeMs += millis() - t0;
+  return rc;
+}
+
+std::unique_ptr<Epub::ImageProbeSession> Epub::openImageProbeSession() const {
+  return std::unique_ptr<ImageProbeSession>(new ImageProbeSession(filepath));
+}
+
 int Epub::probeImageLayoutSize(const std::string& itemHref, const uint16_t maxW, const uint16_t maxH,
                                uint16_t& outW, uint16_t& outH, const bool allowFramebufferDict) const {
   outW = 0;
@@ -1037,23 +1121,7 @@ int Epub::probeImageLayoutSize(const std::string& itemHref, const uint16_t maxW,
     reader = ZipFile(filepath).openItemStream(path.c_str(), 1024, /*dictBuffer=*/nullptr);  // heap only
   }
   if (!reader) return -1;
-  // Headers sit in the first few hundred bytes (PNG/BMP) or after the APPn
-  // segments (JPEG: EXIF/ICC can push SOF out to ~64 KB).  Bound the inflate.
-  constexpr uint32_t kMaxProbeBytes = 128 * 1024;
-  snapix::image::ImageHeaderSniffer sniffer;
-  uint8_t buf[512];
-  uint32_t total = 0;
-  while (sniffer.result() == snapix::image::ImageHeaderSniffer::Result::NeedMore) {
-    if (total >= kMaxProbeBytes) return -1;
-    const int n = reader->read(buf, sizeof(buf));
-    if (n < 0) return -1;
-    if (n == 0) return 0;  // EOF before any size — corrupt / truncated
-    total += static_cast<uint32_t>(n);
-    sniffer.feed(buf, static_cast<size_t>(n));
-  }
-  if (sniffer.result() != snapix::image::ImageHeaderSniffer::Result::Found) return 0;
-  snapix::image::fitImageBox(sniffer.width(), sniffer.height(), maxW, maxH, outW, outH);
-  return (outW > 0 && outH > 0) ? 1 : 0;
+  return sniffImageLayoutSize(*reader, maxW, maxH, outW, outH);
 }
 
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {

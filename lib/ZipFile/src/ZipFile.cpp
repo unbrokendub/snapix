@@ -983,6 +983,75 @@ std::unique_ptr<ZipItemReader> ZipFile::openItemStream(const char* filename, con
     LOG_ERR(TAG, "openItemStream: %s not in ZIP", filename);
     return nullptr;
   }
+  auto reader = openItemStream(fileStat, chunkSize, dictBuffer, filename);
+  if (!wasOpen) close();
+  return reader;
+}
+
+bool ZipFile::indexEntries(std::vector<IndexedEntry>& out, bool (*accept)(const char* name, size_t len)) {
+  out.clear();
+  snapix::spi::SharedBusLock busLock;
+  if (!busLock) return false;
+  const bool wasOpen = isOpen();
+  if (!wasOpen && !open()) return false;
+  if (!loadZipDetails()) {
+    if (!wasOpen) close();
+    return false;
+  }
+  file.seek(zipDetails.centralDirOffset);
+  uint32_t sig;
+  char itemName[256];
+  while (file.available()) {
+    file.read(&sig, 4);
+    if (sig != 0x02014b50) break;  // End of list
+    FileStatSlim st = {};
+    file.seekCur(6);
+    file.read(&st.method, 2);
+    file.seekCur(8);
+    file.read(&st.compressedSize, 4);
+    file.read(&st.uncompressedSize, 4);
+    uint16_t nameLen, m, k;
+    file.read(&nameLen, 2);
+    file.read(&m, 2);
+    file.read(&k, 2);
+    file.seekCur(8);
+    file.read(&st.localHeaderOffset, 4);
+    if (nameLen >= 255) {
+      file.seekCur(nameLen + m + k);
+      continue;
+    }
+    file.read(itemName, nameLen);
+    itemName[nameLen] = '\0';
+    if (accept == nullptr || accept(itemName, nameLen)) {
+      out.push_back({fnvHash64(itemName, nameLen), nameLen, st});
+    }
+    file.seekCur(m + k);
+  }
+  std::sort(out.begin(), out.end());
+  if (!wasOpen) close();
+  return true;
+}
+
+const ZipFile::IndexedEntry* ZipFile::findIndexed(const std::vector<IndexedEntry>& index, const char* name) {
+  const size_t len = strlen(name);
+  const IndexedEntry key{fnvHash64(name, len), static_cast<uint16_t>(len), {}};
+  const auto it = std::lower_bound(index.begin(), index.end(), key);
+  if (it == index.end() || it->hash != key.hash || it->len != key.len) return nullptr;
+  return &*it;
+}
+
+std::unique_ptr<ZipItemReader> ZipFile::openItemStream(const FileStatSlim& fileStat, const size_t chunkSize,
+                                                       uint8_t* dictBuffer, const char* filename) {
+  snapix::spi::SharedBusLock busLock;
+  if (!busLock) {
+    LOG_ERR(TAG, "openItemStream: SPI bus unavailable for %s", filename);
+    return nullptr;
+  }
+  const bool wasOpen = isOpen();
+  if (!wasOpen && !open()) {
+    LOG_ERR(TAG, "openItemStream: failed to open ZIP for %s", filename);
+    return nullptr;
+  }
 
   const long dataOffset = getDataOffset(fileStat);
   if (dataOffset < 0) {
