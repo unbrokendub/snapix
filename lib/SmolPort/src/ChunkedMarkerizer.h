@@ -2,7 +2,7 @@
 
 // =============================================================================
 // ChunkedMarkerizer — markerize ONE document in source-byte chunks with a single
-// HtmlStripper kept alive across them (v3.11.13, big EPUB chapters).
+// HtmlStripper kept alive across them (v3.11.12, big EPUB chapters).
 //
 // A 418 KB single-spine EPUB chapter used to be markerized in one pass (22 s on
 // device) and paginated in one walk before ANY page could show.  Writing the

@@ -447,7 +447,7 @@ foreach(TEST_SRC ${TEST_SOURCES})
       ${PROJECT_ROOT}/lib/SmolPort/src
     )
   elseif(TEST_NAME STREQUAL "EpubChunkEquivTest")
-    # v3.11.13 — big EPUB chapters are markerized in source chunks with one
+    # v3.11.12 — big EPUB chapters are markerized in source chunks with one
     # stripper kept alive (skip / replay per call); the chunks must concatenate
     # byte-identically to one continuous pass.
     add_executable(${TEST_NAME}

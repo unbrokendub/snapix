@@ -59,7 +59,10 @@ namespace snapix::unifiedcache {
 // often the rest of the paragraph), <title> is suppressed, self-closing tags
 // close what they open, invisible format chars are dropped, full HTML 4 entity
 // set, SVG/FB2 <image *:href>.  Markers change for many EPUB/FB2 chapters.
-constexpr uint16_t kFormatVersion = 5;
+// v6: v3.11.12 — big EPUB chapters (>64 KB source) markerize progressively
+// into chunk frames; wipe so already-cached big chapters move to that path
+// (a whole Markers frame would keep the slow one-shot path forever).
+constexpr uint16_t kFormatVersion = 6;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kFrameHeaderSize = 8;
 constexpr uint16_t kGlobalKey = 0xFFFF;
@@ -76,12 +79,12 @@ enum class Kind : uint8_t {
   Markers = 1,   // marker stream sidecar (per-spine)
   Idx = 2,       // page boundary index (per-spine, per render config)
   Metrics = 3,   // global page-count cache (key = kGlobalKey)
-  // v3.11.13 — written once a chunked section's last marker chunk is stored
+  // v3.11.12 — written once a chunked section's last marker chunk is stored
   // (see markerChunkKind); its presence means the chunk set is complete.
   MarkerChunksDone = 4,
 };
 
-// v3.11.13 — a big EPUB chapter is markerized progressively: chunk k of section
+// v3.11.12 — a big EPUB chapter is markerized progressively: chunk k of section
 // `key` is stored under kind kMarkerChunkKindBase + k (one frame per chunk, so
 // each is written atomically and readable while later chunks are still being
 // produced).  A section has EITHER a whole Markers frame OR chunk frames.

@@ -40,7 +40,7 @@
 //      path A drew for page N.
 //   BND resume-captured next-page boundary must equal the idx walk's boundary
 //      for that page (the divergence that causes seams to drop/duplicate).
-//   D  v3.11.13 progressive idx: the marker stream grows in random byte
+//   D  v3.11.12 progressive idx: the marker stream grows in random byte
 //      prefixes (cut mid-word / mid-marker / mid-UTF-8, as chunk segments end);
 //      each step resumes from the last boundary and walks the prefix without the
 //      end-of-stream flush (streamComplete=false) until the stream is complete.

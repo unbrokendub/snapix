@@ -1056,7 +1056,10 @@ void ReaderState::exit(Core& core) {
       !streamOffsetCacheBookPath_.empty() && streamOffsetCacheKey_ >= 0) {
     const size_t needed = snapix::smolport::kPageIndexHeaderBytes +
                           streamOffsetCache_.size() * snapix::smolport::kPageIndexEntryBytes;
-    if (needed <= 4096) {
+    // v3.11.12 — same guard as the spine-change save: never shrink a longer
+    // stored idx (the parser may have extended it after the render loaded it).
+    auto exitCache = snapix::unifiedcache::UnifiedCache::shared(streamOffsetCacheBookPath_);
+    if (needed <= 4096 && !storedIdxCoversStreamOffsetCache(exitCache)) {
       uint8_t serdebuf[4096];
       const size_t wrote = snapix::smolport::serializePageIndex(
           streamOffsetCache_.data(), streamOffsetCache_.size(), streamOffsetCacheConfigHash_,
@@ -1064,9 +1067,8 @@ void ReaderState::exit(Core& core) {
       if (wrote > 0) {
         // v2.0.167 — UnifiedCache::Idx segment write replaces the legacy
         // .work + rename atomic-publish.
-        auto ucache = snapix::unifiedcache::UnifiedCache::shared(streamOffsetCacheBookPath_);
-        if (ucache.writeSegment(snapix::unifiedcache::Kind::Idx,
-                                  static_cast<uint16_t>(streamOffsetCacheKey_), serdebuf, wrote)) {
+        if (exitCache.writeSegment(snapix::unifiedcache::Kind::Idx,
+                                   static_cast<uint16_t>(streamOffsetCacheKey_), serdebuf, wrote)) {
           LOG_INF(TAG, "[STREAM] idx saved (exit) spine=%d entries=%u (UnifiedCache::Idx)",
                   streamOffsetCacheSpine_,
                   static_cast<unsigned>(streamOffsetCache_.size()));
@@ -2924,7 +2926,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
           // MEASURE-only walk from scratch.
           if (streamOffsetCacheSpine_ != currentSpineIndex_) {
             // Persist outgoing spine's cache (R4.a save side).
-            // v3.11.13 — never replace a LONGER stored idx with this render's
+            // v3.11.12 — never replace a LONGER stored idx with this render's
             // copy.  The copy was loaded on entering the spine; a progressive
             // chapter's parser keeps extending the stored idx in the background,
             // and overwriting it with the shorter copy truncated the chapter's
@@ -2939,24 +2941,7 @@ void ReaderState::renderPageContents(Core& core, Page& page, int marginTop, int 
                 otherBook.reset(new snapix::unifiedcache::UnifiedCache(streamOffsetCacheBookPath_));
                 idxCache = otherBook.get();
               }
-              File idxF;
-              size_t idxSize = 0;
-              if (idxCache->openSegmentReader(snapix::unifiedcache::Kind::Idx,
-                                              static_cast<uint16_t>(streamOffsetCacheKey_), idxF, &idxSize)) {
-                uint8_t h[snapix::smolport::kPageIndexHeaderBytes] = {};
-                if (idxSize >= sizeof(h) && idxF.read(h, sizeof(h)) == static_cast<int>(sizeof(h))) {
-                  const uint32_t magic = static_cast<uint32_t>(h[0]) | (static_cast<uint32_t>(h[1]) << 8) |
-                                         (static_cast<uint32_t>(h[2]) << 16) | (static_cast<uint32_t>(h[3]) << 24);
-                  const uint16_t ver = static_cast<uint16_t>(h[4] | (h[5] << 8));
-                  const uint16_t hash = static_cast<uint16_t>(h[6] | (h[7] << 8));
-                  const uint16_t count = static_cast<uint16_t>(h[8] | (h[9] << 8));
-                  storedIdxCoversCache = magic == snapix::smolport::kPageIndexMagic &&
-                                         ver == snapix::smolport::kPageIndexVersion &&
-                                         hash == streamOffsetCacheConfigHash_ &&
-                                         count >= streamOffsetCache_.size();
-                }
-                idxF.close();
-              }
+              storedIdxCoversCache = storedIdxCoversStreamOffsetCache(*idxCache);
             }
             if (!storedIdxCoversCache && streamOffsetCacheSpine_ >= 0 && !streamOffsetCache_.empty() &&
                 !streamOffsetCacheBookPath_.empty() && streamOffsetCacheKey_ >= 0) {
@@ -3240,6 +3225,31 @@ snapix::unifiedcache::UnifiedCache& ReaderState::renderCacheFor(const std::strin
     renderCacheGeneration_ = generation;
   }
   return *renderCache_;
+}
+#endif
+
+#if defined(SNAPIX_MARKERIZED_RENDER) && SNAPIX_MARKERIZED_RENDER
+bool ReaderState::storedIdxCoversStreamOffsetCache(snapix::unifiedcache::UnifiedCache& cache) {
+  if (streamOffsetCacheKey_ < 0 || streamOffsetCache_.empty()) return false;
+  File idxF;
+  size_t idxSize = 0;
+  if (!cache.openSegmentReader(snapix::unifiedcache::Kind::Idx, static_cast<uint16_t>(streamOffsetCacheKey_),
+                               idxF, &idxSize)) {
+    return false;
+  }
+  bool covers = false;
+  uint8_t h[snapix::smolport::kPageIndexHeaderBytes] = {};
+  if (idxSize >= sizeof(h) && idxF.read(h, sizeof(h)) == static_cast<int>(sizeof(h))) {
+    const uint32_t magic = static_cast<uint32_t>(h[0]) | (static_cast<uint32_t>(h[1]) << 8) |
+                           (static_cast<uint32_t>(h[2]) << 16) | (static_cast<uint32_t>(h[3]) << 24);
+    const uint16_t ver = static_cast<uint16_t>(h[4] | (h[5] << 8));
+    const uint16_t hash = static_cast<uint16_t>(h[6] | (h[7] << 8));
+    const uint16_t count = static_cast<uint16_t>(h[8] | (h[9] << 8));
+    covers = magic == snapix::smolport::kPageIndexMagic && ver == snapix::smolport::kPageIndexVersion &&
+             hash == streamOffsetCacheConfigHash_ && count >= streamOffsetCache_.size();
+  }
+  idxF.close();
+  return covers;
 }
 #endif
 

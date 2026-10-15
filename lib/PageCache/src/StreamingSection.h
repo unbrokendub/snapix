@@ -98,7 +98,7 @@ uint16_t extendChunkedSectionIdx(
     std::function<std::string(const uint8_t*, size_t)> resolveImage = {},
     std::function<int(const uint8_t*, size_t, uint16_t&, uint16_t&)> probeImage = {});
 
-// v3.11.13 — the incremental-idx core behind extendChunkedSectionIdx, for any
+// v3.11.12 — the incremental-idx core behind extendChunkedSectionIdx, for any
 // section whose markers arrive in chunks (EPUB chapters use their own idx key,
 // paginator config, image hooks and anchor capture).
 struct ChunkedIdxWalk {
@@ -145,7 +145,7 @@ uint16_t loadChunkedSectionIdx(ChunkedIdxState& st,
                                GfxRenderer& renderer, const RenderConfig& config, int marginTop,
                                int marginBottom, int marginLeft, int marginRight,
                                const char* hyphenLang);
-// v3.11.13 — same for an explicit idx key + config hash (EPUB chapters).
+// v3.11.12 — same for an explicit idx key + config hash (EPUB chapters).
 uint16_t loadChunkedIdx(ChunkedIdxState& st, snapix::unifiedcache::UnifiedCache& cache, uint16_t idxKey,
                         uint16_t configHash);
 

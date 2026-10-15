@@ -129,6 +129,11 @@ class ReaderState : public State {
   std::string renderCachePath_;
   uint32_t renderCacheGeneration_ = 0;
   snapix::unifiedcache::UnifiedCache& renderCacheFor(const std::string& bookCachePath);
+  // v3.11.12 — true when `cache` already stores a current idx for the
+  // outgoing spine with at least as many entries as streamOffsetCache_, so the
+  // render-side copy must NOT overwrite it (a progressive chapter's parser
+  // keeps extending the stored idx after the render loaded its copy).
+  bool storedIdxCoversStreamOffsetCache(snapix::unifiedcache::UnifiedCache& cache);
 #endif
 
   // Whether book has a valid cover image

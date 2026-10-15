@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "ContentParser.h"
-#include "StreamingSection.h"  // ChunkedIdxState / ChunkedIdxExtend (v3.11.13 progressive chapters)
+#include "StreamingSection.h"  // ChunkedIdxState / ChunkedIdxExtend (v3.11.12 progressive chapters)
 
 class GfxRenderer;
 class ZipItemReader;
@@ -134,7 +134,7 @@ class EpubChapterParser : public ContentParser {
   // retry; cross-instance retry happens via the file-existence check.
   bool tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& cache);
 
-  // ---- v3.11.13 — progressive (chunked) markerize for BIG chapters ---------
+  // ---- v3.11.12 — progressive (chunked) markerize for BIG chapters ---------
   // A chapter whose source exceeds kProgressiveMinSourceBytes is markerized in
   // 32 KB source chunks (UnifiedCache markerChunkKind(k), key = spine) instead
   // of one Markers frame, and its idx grows chunk by chunk, so pages are

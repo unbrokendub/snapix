@@ -28,7 +28,7 @@
 // can build the `.idx` upfront via a MEASURE-only walk, eliminating
 // the legacy parser dependency even on a chapter's first visit.
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
-#include <ChunkedMarkerizer.h>      // v3.11.13 — progressive chapter markerize
+#include <ChunkedMarkerizer.h>      // v3.11.12 — progressive chapter markerize
 #include <ChunkedMarkersReader.h>
 #include <GfxRendererPaginatorAdapter.h>
 #include <HtmlStripper.h>
@@ -50,7 +50,7 @@
 namespace {
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
-// v3.11.13 — progressive markerize tuning.  Chapters up to 64 KB of source keep
+// v3.11.12 — progressive markerize tuning.  Chapters up to 64 KB of source keep
 // the one-shot path (≤2 chunks would gain little); bigger ones go in 32 KB
 // source chunks, the size TXT/FB2 lazy markerize proved on device.
 constexpr uint32_t kProgressiveMinSourceBytes = 64 * 1024;
@@ -173,7 +173,7 @@ void EpubChapterParser::reset() {
   // instance re-evaluates the markers cache (file-existence check
   // inside tryMarkerizeChapter still short-circuits on disk hit).
   markerizeAttempted_ = false;
-  // v3.11.13 — progressive chapter: restart emission at page 0 from the stored
+  // v3.11.12 — progressive chapter: restart emission at page 0 from the stored
   // chunks + idx (re-loaded next call).  The chunked-vs-one-shot decision and a
   // clean live stripper are kept — the stripper is re-validated against the
   // stored chunk count on init, and rebuilding it would replay the prefix.
@@ -352,7 +352,7 @@ bool EpubChapterParser::tryMarkerizeChapter(snapix::unifiedcache::UnifiedCache& 
   // cold EPUB chapter.  Match the compressed-input buffer to the 4 KB
   // markerizer chunk and recover 4 KB of peak headroom; the modest increase
   // in ZIP refill calls is preferable to operating within 5 KB of OOM.
-  // v3.11.13 — reuse the stream the size decision (useProgressiveMarkers)
+  // v3.11.12 — reuse the stream the size decision (useProgressiveMarkers)
   // already opened, if it is still at byte 0.
   auto zipStream = (pendingStream_ && pendingStream_->bytesProduced() == 0)
                        ? std::move(pendingStream_)
@@ -506,7 +506,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   // snapshot in place, and the object is released before parsePages returns.
   auto ucache = snapix::unifiedcache::UnifiedCache::shared(epub_->getCachePath());
 
-  // v3.11.13 — the size decision may open the chapter's ZIP stream (32 KB
+  // v3.11.12 — the size decision may open the chapter's ZIP stream (32 KB
   // inflate window); it must never outlive this call.
   struct PendingStreamGuard {
     std::unique_ptr<ZipItemReader>& stream;
@@ -514,7 +514,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
   } pendingStreamGuard{pendingStream_};
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
-  // v3.11.13 — big chapters: chunked markerize + incremental idx.
+  // v3.11.12 — big chapters: chunked markerize + incremental idx.
   if (useProgressiveMarkers(ucache)) {
     return parsePagesProgressive(ucache, onPageComplete, maxPages, shouldAbort);
   }
@@ -962,7 +962,7 @@ bool EpubChapterParser::parsePages(const std::function<void(std::unique_ptr<Page
 
 #if defined(SNAPIX_MARKERIZER) && SNAPIX_MARKERIZER
 // =============================================================================
-// v3.11.13 — progressive (chunked) markerize for big chapters.  See the header.
+// v3.11.12 — progressive (chunked) markerize for big chapters.  See the header.
 // =============================================================================
 
 bool EpubChapterParser::useProgressiveMarkers(snapix::unifiedcache::UnifiedCache& cache) {
@@ -972,7 +972,7 @@ bool EpubChapterParser::useProgressiveMarkers(snapix::unifiedcache::UnifiedCache
   const auto key = static_cast<uint16_t>(spineIndex_);
   size_t sz = 0;
   // Whole-chapter markers already stored (small chapter, or a cache written
-  // before v3.11.13) → keep using them.
+  // before v3.11.12) → keep using them.
   if (cache.segmentSize(snapix::unifiedcache::Kind::Markers, key, &sz)) return false;
   if (cache.segmentSize(snapix::unifiedcache::markerChunkKind(0), key, &sz)) {
     progressive_ = true;

@@ -97,7 +97,7 @@ int main() {
   }
 
   {
-    // v3.11.13 — progressive EPUB chapters store marker chunks under kinds
+    // v3.11.12 — progressive EPUB chapters store marker chunks under kinds
     // markerChunkKind(k) (0x10 + k) plus a MarkerChunksDone record; a fresh
     // instance (directory rebuilt from disk) and compaction must keep them.
     using snapix::unifiedcache::kMaxMarkerChunks;

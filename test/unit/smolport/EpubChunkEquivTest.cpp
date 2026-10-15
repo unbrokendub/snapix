@@ -13,7 +13,7 @@
 #include <vector>
 
 // =============================================================================
-// EpubChunkEquivTest — v3.11.13 progressive markerize of big EPUB chapters.
+// EpubChunkEquivTest — v3.11.12 progressive markerize of big EPUB chapters.
 //
 // The firmware (EpubChapterParser::markerizeProgressiveChunks) stores a chapter
 // as chunk segments cut at plain SOURCE offsets (MarkerChunkPlan), with ONE

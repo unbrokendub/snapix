@@ -426,7 +426,7 @@ bool deserializePageIndex(const uint8_t* buf, size_t bufSize,
 // page index + style state.  See `PageBoundarySnapshot` and
 // `MarkerizedRenderResume` doc above.
 //
-// v3.11.13 — `streamComplete = false` marks `readChunk`'s EOF as the end of
+// v3.11.12 — `streamComplete = false` marks `readChunk`'s EOF as the end of
 // the markers written SO FAR (progressive markerize), not the chapter's end.
 // The end-of-stream handling is then skipped: the trailing word may continue
 // in the next chunk ("foo" of "foobar", or a word whose hyphenation needs the
@@ -446,7 +446,7 @@ MarkerizedRenderResult renderMarkerizedPage(
     const OnAnchorPageFn& onAnchorPage = {},
     bool streamComplete = true);
 
-// v3.11.13 — resume parameters that continue a page walk from `snap` (the
+// v3.11.12 — resume parameters that continue a page walk from `snap` (the
 // boundary where page snap.pageIndex starts).
 MarkerizedRenderResume resumeFromBoundary(const PageBoundarySnapshot& snap);
 

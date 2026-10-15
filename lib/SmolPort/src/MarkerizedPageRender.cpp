@@ -398,7 +398,7 @@ MarkerizedRenderResult renderMarkerizedPage(StreamingPaginator& paginator, Chapt
   // Finish so the paginator's last partial line gets flushed.
   // If the observer asked Stop on the target page boundary, this is
   // a no-op for the inner paginator (its current page is empty).
-  // v3.11.13 — not at the end of a still-growing stream (see header).
+  // v3.11.12 — not at the end of a still-growing stream (see header).
   if (streamComplete || status != RenderStatus::EofClean) {
     chapterRenderer.finish();
   }

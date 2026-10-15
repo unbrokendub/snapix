@@ -11,7 +11,7 @@
 //     (grows as the background markerize writes more chunks).
 //   * Section (EPUB / FB2-with-TOC): the section's markers are a single segment
 //     keyed by sectionIndex → exactly one chunk.  Behaves like the old single-
-//     segment reader.  v3.11.13 — a big EPUB chapter is instead stored as chunk
+//     segment reader.  v3.11.12 — a big EPUB chapter is instead stored as chunk
 //     frames (kinds markerChunkKind(0..N), key = spine); those are probed in
 //     order when the section has no whole Markers frame.
 // =============================================================================
@@ -39,7 +39,7 @@ class UnifiedCacheChunkProvider : public snapix::smolport::MarkerChunkProvider {
     return p;
   }
 
-  // Section: a single chunk = Markers[sectionKey], or (v3.11.13) the chunk
+  // Section: a single chunk = Markers[sectionKey], or (v3.11.12) the chunk
   // frames written so far for a progressively markerized chapter.
   static UnifiedCacheChunkProvider section(snapix::unifiedcache::UnifiedCache& cache, uint16_t sectionKey) {
     UnifiedCacheChunkProvider p(cache);
