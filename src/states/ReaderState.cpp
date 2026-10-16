@@ -1,6 +1,7 @@
 #include "ReaderState.h"
 
 #include <Arduino.h>
+#include <CacheEviction.h>  // v3.11.12 — least-recently-opened cache eviction
 #include <ContentParser.h>
 #include <CoverHelpers.h>
 #include <Epub.h>  // v2.0.153 — Epub::getCachePath for metrics sidecar path
@@ -902,6 +903,9 @@ void ReaderState::enter(Core& core) {
     renderCenteredStatusMessage(core, "Loading...", THEME_MANAGER.current().uiFontId);
   }
 
+  // Room on the cache partition before this book's cache is opened or built.
+  cache_fs::eviction::beforeBookOpen(SNAPIX_CACHE_DIR, contentPath_);
+
   // Open content using ContentHandle
   auto result = core.content.open(contentPath_, SNAPIX_CACHE_DIR);
   if (!result.ok()) {
@@ -913,6 +917,9 @@ void ReaderState::enter(Core& core) {
   }
 
   contentLoaded_ = true;
+  if (const char* bookCacheDir = core.content.cacheDir()) {
+    cache_fs::eviction::afterBookOpened(contentPath_, bookCacheDir);
+  }
 
   // FB2 files without titled sections are parsed as one full stream.  Their
   // first marker/index build can legitimately take minutes, so replace the

@@ -1,5 +1,6 @@
 #include "test_utils.h"
 
+#include <CacheSpaceHook.h>
 #include <LittleFS.h>
 #include <UnifiedCache.h>
 
@@ -63,6 +64,66 @@ bool scansClean(const std::string& book) {
 // task's instance from inside a writer's payload callback, i.e. while the
 // writer's frame is still flagged incomplete.  `out.flush()` commits that
 // state the way littlefs does mid-write (the publish flush rewrites the frame).
+int gReclaimCalls = 0;
+bool gReclaimFrees = false;
+std::string gReclaimPath;
+
+bool countingReclaim(const char* path) {
+  ++gReclaimCalls;
+  gReclaimPath = path ? path : "";
+  return gReclaimFrees;
+}
+
+// v3.11.12 — a write that fails on a full partition asks cache eviction for
+// room (CacheSpaceHook.h); a replayable write retries once when it got some.
+void testSpaceReclaim(TestUtils::TestRunner& runner) {
+  cache_fs::setWriteFailureHandler(&countingReclaim);
+  const std::string book = "/cache/space";
+  {
+    auto cache = UnifiedCache::shared(book);
+    runner.expectTrue(write(cache, Kind::Idx, 1, "seed"), "space_seed");
+    gReclaimCalls = 0;
+    gReclaimFrees = true;
+    LittleFS.failNextWrites(1);
+    runner.expectTrue(write(cache, Kind::Idx, 2, "after-reclaim"), "space_write_retried_after_reclaim");
+    runner.expectEq(1, gReclaimCalls, "space_reclaim_called_once");
+    runner.expectEqual(book + "/streaming.cache", gReclaimPath, "space_reclaim_names_cache_file");
+  }
+  runner.expectEqual("after-reclaim", readFresh(book, Kind::Idx, 2), "space_retried_frame_persisted");
+  runner.expectEqual("seed", readFresh(book, Kind::Idx, 1), "space_older_frame_intact");
+  runner.expectTrue(scansClean(book), "space_retry_leaves_no_garbage_tail");
+  {
+    auto cache = UnifiedCache::shared(book);
+    gReclaimCalls = 0;
+    gReclaimFrees = false;
+    LittleFS.failNextWrites(1);
+    runner.expectFalse(write(cache, Kind::Idx, 3, "lost"), "space_write_fails_when_nothing_freed");
+    runner.expectEq(1, gReclaimCalls, "space_no_retry_without_room");
+  }
+  runner.expectEqual("", readFresh(book, Kind::Idx, 3), "space_failed_frame_invisible");
+  {
+    // A streamed payload was consumed by the failed attempt: reclaim for the
+    // caller's replay, but do not run the callback again.
+    auto cache = UnifiedCache::shared(book);
+    gReclaimCalls = 0;
+    gReclaimFrees = true;
+    int callbackRuns = 0;
+    LittleFS.failNextWrites(1);
+    const bool ok = cache.writeSegmentStreamingDeferred(Kind::Markers, 4, [&callbackRuns](File& out) {
+      ++callbackRuns;
+      return writeRaw(out, "markers");
+    });
+    runner.expectFalse(ok, "space_deferred_write_reports_failure");
+    runner.expectEq(1, gReclaimCalls, "space_deferred_write_reclaims");
+    runner.expectEq(0, callbackRuns, "space_deferred_callback_not_replayed");
+    runner.expectTrue(cache.writeSegmentStreamingDeferred(Kind::Markers, 4,
+                                                          [](File& out) { return writeRaw(out, "markers"); }),
+                      "space_deferred_caller_retry_succeeds");
+  }
+  runner.expectEqual("markers", readFresh(book, Kind::Markers, 4), "space_deferred_retry_persisted");
+  cache_fs::setWriteFailureHandler(nullptr);
+}
+
 void testCrossInstanceRaces(TestUtils::TestRunner& runner) {
   {
     const std::string book = "/cache/race-deferred";
@@ -367,6 +428,7 @@ int main() {
                        "rename_failure_keeps_original");
   }
 
+  testSpaceReclaim(runner);
   testCrossInstanceRaces(runner);
 
   runner.printSummary();

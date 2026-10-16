@@ -6,6 +6,10 @@
 #include <memory>
 #include <string>
 
+// Writes to fail before any succeeds again (a full partition); see
+// MockLittleFS::failNextWrites.
+inline int gMockFailingWrites = 0;
+
 // Mock File class for LittleFS
 class File {
  public:
@@ -63,6 +67,10 @@ class File {
 
   size_t write(const uint8_t* buf, size_t len) {
     if (!isOpen_) return 0;
+    if (gMockFailingWrites > 0) {
+      --gMockFailingWrites;
+      return 0;
+    }
     if (pos_ + len > buffer_.size()) {
       buffer_.resize(pos_ + len);
     }
@@ -91,6 +99,7 @@ class MockLittleFS {
   void clearFiles() {
     files_.clear();
     writtenFiles_.clear();
+    gMockFailingWrites = 0;
   }
 
   void clearWrittenFiles() { writtenFiles_.clear(); }
@@ -166,6 +175,7 @@ class MockLittleFS {
   }
 
   void failNextRename() { failNextRename_ = true; }
+  void failNextWrites(int count) { gMockFailingWrites = count; }
 
   std::string getWrittenData(const std::string& path) const {
     const auto it = writtenFiles_.find(path);

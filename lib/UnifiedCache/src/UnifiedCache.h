@@ -232,6 +232,9 @@ class UnifiedCache {
   // The last scan stopped at something only the writer-token holder may
   // repair; the next write rescans under the token.
   bool repairDeferred_ = false;
+  // The last write failed only because another writer held the token: no
+  // reason to reclaim space.
+  bool writerContended_ = false;
   uint8_t writerDepth_ = 0;
   // writeGeneration() / layout epoch the directory reflects.
   uint32_t scanGeneration_ = 0;
@@ -251,6 +254,9 @@ class UnifiedCache {
   size_t compactedFileSize() const;
   bool appendFrame(Kind kind, uint16_t key, uint8_t flags,
                     const std::function<bool(File&)>& writePayload, size_t payloadSize);
+  bool appendDeferredFrame(Kind kind, uint16_t key, const std::function<bool(File&)>& writeCb);
+  // After a failed write: true when cache eviction freed space (CacheSpaceHook.h).
+  bool reclaimSpaceAfterFailedWrite();
   // directory_ is sorted by (key, kind) and stores only the latest frame for
   // each pair, so lookup is logarithmic and history does not consume RAM.
   std::vector<DirectoryEntry>::const_iterator findEntry(Kind kind, uint16_t key) const;

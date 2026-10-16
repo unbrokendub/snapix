@@ -264,6 +264,7 @@ class ReaderState : public State {
     bool persisted = false;                  // out
   };
   reader::DeferredJobSlot metricsJob_;
+  reader::DeferredJobSlot cacheReclaimJob_;  // v3.11.12 — cache_fs::eviction background pass
   GlobalMetricsJobIo metricsJobIo_;
   bool metricsDiskProbed_ = false;    // the persisted frame was looked up this session
   bool metricsComputeFailed_ = false;

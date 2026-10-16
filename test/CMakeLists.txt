@@ -60,6 +60,7 @@ include_directories(
   ${PROJECT_ROOT}/lib/Epub/src/Epub
   ${PROJECT_ROOT}/lib/PageCache/src
   ${PROJECT_ROOT}/lib/UnifiedCache/src
+  ${PROJECT_ROOT}/lib/CacheFs/src
   ${PROJECT_ROOT}/lib/FsHelpers/src
   ${PROJECT_ROOT}/lib/ScriptDetector/src
   ${PROJECT_ROOT}/lib/Markdown/src
@@ -295,6 +296,12 @@ foreach(TEST_SRC ${TEST_SOURCES})
     target_include_directories(${TEST_NAME} PRIVATE
       ${PROJECT_ROOT}/src
       ${PROJECT_ROOT}/src/drivers
+    )
+  elseif(TEST_NAME STREQUAL "CacheEvictionPolicyTest")
+    add_executable(${TEST_NAME}
+      ${TEST_SRC}
+      ${PROJECT_ROOT}/lib/CacheFs/src/CacheEvictionPolicy.cpp
+      ${TEST_HELPERS}
     )
   elseif(TEST_NAME STREQUAL "UnifiedCacheTest")
     add_executable(${TEST_NAME}

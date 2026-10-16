@@ -1,5 +1,6 @@
 #include "PendingImageDecode.h"
 
+#include <CacheSpaceHook.h>
 #include <ImageConverter.h>
 #include <LittleFS.h>
 #include <Logging.h>
@@ -79,75 +80,86 @@ bool decodeItem(PendingImageDecode item,
     return true;
   }
 
-  // The foreground renderer can enqueue a path-only job so neither EPUB ZIP
-  // inflation nor JPEG conversion blocks the visible text page.
-  if (!LittleFS.exists(item.tempJpegPath.c_str())) {
-    if (!item.prepareInput) {
-      LOG_INF(TAG, "drain: temp image missing src=%s — skip",
+  // v3.11.12 — a failure on a full partition evicts other books' caches
+  // (CacheSpaceHook.h) and retries the job once.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const bool lastAttempt = attempt == 1;
+    auto retryAfterReclaim = [&]() {
+      return !lastAttempt && !(shouldAbort && shouldAbort()) &&
+             cache_fs::reclaimAfterWriteFailure(item.targetBmpPath.c_str());
+    };
+
+    // The foreground renderer can enqueue a path-only job so neither EPUB ZIP
+    // inflation nor JPEG conversion blocks the visible text page.
+    if (!LittleFS.exists(item.tempJpegPath.c_str())) {
+      if (!item.prepareInput) {
+        LOG_INF(TAG, "drain: temp image missing src=%s — skip",
+                item.tempJpegPath.c_str());
+        break;
+      }
+      if (shouldAbort && shouldAbort()) break;
+      LOG_INF(TAG, "drain: extract start temp=%s",
               item.tempJpegPath.c_str());
-      finish();
-      return true;
-    }
-    if (shouldAbort && shouldAbort()) {
-      finish();
-      return true;
-    }
-    LOG_INF(TAG, "drain: extract start temp=%s",
-            item.tempJpegPath.c_str());
-    const uint32_t extractStartedMs = millis();
-    if (!item.prepareInput(item.tempJpegPath, shouldAbort)) {
-      LittleFS.remove(item.tempJpegPath.c_str());
-      LOG_INF(TAG, "drain: extract stopped temp=%s (%u ms)",
+      const uint32_t extractStartedMs = millis();
+      if (!item.prepareInput(item.tempJpegPath, shouldAbort)) {
+        LittleFS.remove(item.tempJpegPath.c_str());
+        LOG_INF(TAG, "drain: extract stopped temp=%s (%u ms)",
+                item.tempJpegPath.c_str(),
+                static_cast<unsigned>(millis() - extractStartedMs));
+        if (retryAfterReclaim()) continue;
+        break;
+      }
+      LOG_INF(TAG, "drain: extract ok temp=%s (%u ms)",
               item.tempJpegPath.c_str(),
               static_cast<unsigned>(millis() - extractStartedMs));
-      finish();
-      return true;
     }
-    LOG_INF(TAG, "drain: extract ok temp=%s (%u ms)",
-            item.tempJpegPath.c_str(),
-            static_cast<unsigned>(millis() - extractStartedMs));
-  }
 
-  if (shouldAbort && shouldAbort()) {
-    LittleFS.remove(item.tempJpegPath.c_str());
-    finish();
-    return true;
-  }
-
-  ImageConvertConfig config;
-  config.maxWidth = item.maxWidth;
-  config.maxHeight = item.maxHeight;
-  config.quickMode = item.quickMode;
-  config.oneBit = item.oneBit;
-  config.logTag = item.logTag ? item.logTag : TAG;
-  config.outputOnLittleFs = true;
-  config.shouldAbort = shouldAbort;
-
-  const std::string partPath = item.targetBmpPath + ".part";
-  LittleFS.remove(partPath.c_str());
-  LOG_INF(TAG, "drain: convert start temp=%s → %s (%ux%u quick=%u)", item.tempJpegPath.c_str(),
-          item.targetBmpPath.c_str(), static_cast<unsigned>(item.maxWidth), static_cast<unsigned>(item.maxHeight),
-          static_cast<unsigned>(item.quickMode));
-  const uint32_t startMs = millis();
-  const bool ok = ImageConverterFactory::convertToBmp(item.tempJpegPath, partPath, config);
-  const uint32_t elapsed = millis() - startMs;
-
-  if (ok) {
-    LittleFS.remove(item.tempJpegPath.c_str());
-    LittleFS.remove(item.targetBmpPath.c_str());
-    if (!LittleFS.rename(partPath.c_str(), item.targetBmpPath.c_str())) {
-      LOG_ERR(TAG, "drain: rename %s -> %s failed", partPath.c_str(), item.targetBmpPath.c_str());
-      LittleFS.remove(partPath.c_str());
-      finish();
-      return true;
+    if (shouldAbort && shouldAbort()) {
+      LittleFS.remove(item.tempJpegPath.c_str());
+      break;
     }
-    LOG_INF(TAG, "drain: decode ok %s (%u ms; remaining=%u)", item.targetBmpPath.c_str(),
-            static_cast<unsigned>(elapsed), static_cast<unsigned>(pendingCount()));
-    gRefreshPending.store(true, std::memory_order_release);
-  } else {
-    LOG_ERR(TAG, "drain: decode failed %s (%u ms)", item.targetBmpPath.c_str(), static_cast<unsigned>(elapsed));
-    LittleFS.remove(item.tempJpegPath.c_str());
+
+    ImageConvertConfig config;
+    config.maxWidth = item.maxWidth;
+    config.maxHeight = item.maxHeight;
+    config.quickMode = item.quickMode;
+    config.oneBit = item.oneBit;
+    config.logTag = item.logTag ? item.logTag : TAG;
+    config.outputOnLittleFs = true;
+    config.shouldAbort = shouldAbort;
+
+    const std::string partPath = item.targetBmpPath + ".part";
     LittleFS.remove(partPath.c_str());
+    LOG_INF(TAG, "drain: convert start temp=%s → %s (%ux%u quick=%u)", item.tempJpegPath.c_str(),
+            item.targetBmpPath.c_str(), static_cast<unsigned>(item.maxWidth), static_cast<unsigned>(item.maxHeight),
+            static_cast<unsigned>(item.quickMode));
+    const uint32_t startMs = millis();
+    const bool ok = ImageConverterFactory::convertToBmp(item.tempJpegPath, partPath, config);
+    const uint32_t elapsed = millis() - startMs;
+
+    if (ok) {
+      LittleFS.remove(item.tempJpegPath.c_str());
+      LittleFS.remove(item.targetBmpPath.c_str());
+      if (!LittleFS.rename(partPath.c_str(), item.targetBmpPath.c_str())) {
+        LOG_ERR(TAG, "drain: rename %s -> %s failed", partPath.c_str(), item.targetBmpPath.c_str());
+        LittleFS.remove(partPath.c_str());
+        break;
+      }
+      LOG_INF(TAG, "drain: decode ok %s (%u ms; remaining=%u)", item.targetBmpPath.c_str(),
+              static_cast<unsigned>(elapsed), static_cast<unsigned>(pendingCount()));
+      gRefreshPending.store(true, std::memory_order_release);
+      break;
+    }
+    LOG_ERR(TAG, "drain: decode failed %s (%u ms)", item.targetBmpPath.c_str(), static_cast<unsigned>(elapsed));
+    LittleFS.remove(partPath.c_str());
+    // The retry re-extracts when the job can (the temp file may be short
+    // too); otherwise it converts the same temp file again.
+    if (retryAfterReclaim()) {
+      if (item.prepareInput) LittleFS.remove(item.tempJpegPath.c_str());
+      continue;
+    }
+    LittleFS.remove(item.tempJpegPath.c_str());
+    break;
   }
 
   finish();

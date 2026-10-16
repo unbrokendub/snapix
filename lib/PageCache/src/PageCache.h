@@ -53,6 +53,7 @@ class PageCache {
   bool isPartial_ = false;
   RenderConfig config_;
   uint32_t lutOffset_ = 0;  // Cached LUT offset for extend operations
+  uint32_t lutEnd_ = 0;     // End of the LUT the last writeLut() wrote
   uint32_t readFileSize_ = 0;
   std::vector<uint32_t> pageLut_;
   std::vector<ResidentPage> residentPages_;
@@ -60,6 +61,7 @@ class PageCache {
 
   bool writeHeader(bool isPartial);
   bool writeLut(const std::vector<uint32_t>& lut);
+  bool closeAfterLut(const char* what);
   bool loadLut(std::vector<uint32_t>& lut);  // Load existing LUT for extend
   bool ensureReadHandle();
   void closeReadHandle();

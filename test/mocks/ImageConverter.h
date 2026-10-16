@@ -21,6 +21,10 @@ class ImageConverterFactory {
   static bool convertToBmp(const std::string&, const std::string& target,
                            const ImageConvertConfig& config) {
     ++conversionCalls;
+    if (failNextConversions > 0) {
+      --failNextConversions;
+      return false;
+    }
     if (config.shouldAbort && config.shouldAbort()) return false;
     File out = LittleFS.open(target.c_str(), "w");
     if (!out) return false;
@@ -31,4 +35,5 @@ class ImageConverterFactory {
   }
 
   static inline int conversionCalls = 0;
+  static inline int failNextConversions = 0;
 };

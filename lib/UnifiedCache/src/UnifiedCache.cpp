@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include <Arduino.h>
+#include <CacheSpaceHook.h>
 #include <Logging.h>
 
 #include <algorithm>
@@ -655,12 +656,14 @@ bool UnifiedCache::openSegmentReader(Kind kind, uint16_t key, File& outFile, siz
 bool UnifiedCache::appendFrame(Kind kind, uint16_t key, uint8_t flags,
                                  const std::function<bool(File&)>& writePayload,
                                  size_t payloadSize) {
+  writerContended_ = false;
   // Declared before the generation scope: its release records the
   // generation after the scope's exit bump.
   const WriterLock lock(*this, kWriterWaitPolls);
   if (!lock) {
     LOG_ERR(TAG, "Another writer kept %s busy; frame kind=%u key=%u not written", path_.c_str(),
             static_cast<unsigned>(kind), static_cast<unsigned>(key));
+    writerContended_ = true;
     return false;
   }
   const WriteGenerationScope generationScope;
@@ -754,26 +757,42 @@ bool UnifiedCache::appendFrame(Kind kind, uint16_t key, uint8_t flags,
   return true;
 }
 
+bool UnifiedCache::reclaimSpaceAfterFailedWrite() {
+  // Not for a busy writer token, and not while this instance still holds it
+  // (a nested write): eviction takes long, and other writers wait on the token.
+  return !writerContended_ && writerDepth_ == 0 && cache_fs::reclaimAfterWriteFailure(path_.c_str());
+}
+
 bool UnifiedCache::writeSegment(Kind kind, uint16_t key, const uint8_t* data, size_t size) {
-  const bool ok = appendFrame(
-      kind, key, 0,
-      [data, size](File& f) {
-        if (size == 0) return true;
-        return f.write(data, size) == size;
-      },
-      size);
+  const auto payload = [data, size](File& f) {
+    if (size == 0) return true;
+    return f.write(data, size) == size;
+  };
+  bool ok = appendFrame(kind, key, 0, payload, size);
+  // v3.11.12 — a full partition: evict other books' caches, then retry once.
+  if (!ok && reclaimSpaceAfterFailedWrite()) ok = appendFrame(kind, key, 0, payload, size);
   if (ok) (void)compactIfNeeded();
   return ok;
 }
 
 bool UnifiedCache::writeSegmentStreamingDeferred(Kind kind, uint16_t key,
                                                   const std::function<bool(File&)>& writeCb) {
+  if (appendDeferredFrame(kind, key, writeCb)) return true;
+  // The callback consumed its input stream, so no retry here; the callers
+  // replay the work later, and eviction makes room for that attempt.
+  (void)reclaimSpaceAfterFailedWrite();
+  return false;
+}
+
+bool UnifiedCache::appendDeferredFrame(Kind kind, uint16_t key, const std::function<bool(File&)>& writeCb) {
+  writerContended_ = false;
   // Held for the whole callback: until the frame is published, other
   // instances must neither heal it away nor append behind it.
   const WriterLock lock(*this, kWriterWaitPolls);
   if (!lock) {
     LOG_ERR(TAG, "Another writer kept %s busy; deferred frame kind=%u key=%u not written",
             path_.c_str(), static_cast<unsigned>(kind), static_cast<unsigned>(key));
+    writerContended_ = true;
     return false;
   }
   const WriteGenerationScope generationScope;
@@ -925,6 +944,7 @@ bool UnifiedCache::writeSegmentStreaming(Kind kind, uint16_t key, size_t expecte
     // the incomplete tail without allowing it to shadow the older value.
     LOG_ERR(TAG, "Streaming frame was not published; recovery will discard it (file=%zu before=%zu)",
             fileSize_, fileBefore);
+    (void)reclaimSpaceAfterFailedWrite();  // no retry: the callback is not replayable
     return false;
   }
   (void)compactIfNeeded();

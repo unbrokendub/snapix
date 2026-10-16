@@ -1,3 +1,4 @@
+#include <CacheSpaceHook.h>
 #include <ImageConverter.h>
 #include <LittleFS.h>
 #include <PendingImageDecode.h>
@@ -8,6 +9,14 @@
 #include <string>
 
 namespace {
+
+int gReclaimCalls = 0;
+bool gReclaimFrees = false;
+
+bool countingReclaim(const char*) {
+  ++gReclaimCalls;
+  return gReclaimFrees;
+}
 
 snapix::PendingImageDecode makeJob(const std::string& stem,
                                    bool& preparationCalled) {
@@ -71,6 +80,40 @@ int main() {
   assert(ImageConverterFactory::conversionCalls == 1);
   assert(!LittleFS.exists(cancelled.tempJpegPath.c_str()));
   assert(!LittleFS.exists(cancelled.targetBmpPath.c_str()));
+  assert(gReclaimCalls == 0);  // an abort is no space problem
+
+  // v3.11.12 — a decode that fails on a full partition retries once after
+  // cache eviction freed space (re-extracting its input) and gives up when
+  // nothing was freed.
+  cache_fs::setWriteFailureHandler(&countingReclaim);
+  gReclaimFrees = true;
+  bool retriedPrepared = false;
+  const auto retried = makeJob("retried", retriedPrepared);
+  assert(snapix::pendingImage::enqueue(
+      retried, snapix::pendingImage::Priority::CurrentPage));
+  ImageConverterFactory::failNextConversions = 1;
+  int callsBefore = ImageConverterFactory::conversionCalls;
+  assert(snapix::pendingImage::drainOne());
+  assert(gReclaimCalls == 1);
+  assert(ImageConverterFactory::conversionCalls == callsBefore + 2);
+  assert(LittleFS.exists(retried.targetBmpPath.c_str()));
+  assert(!LittleFS.exists(retried.tempJpegPath.c_str()));
+  assert(!LittleFS.exists((retried.targetBmpPath + ".part").c_str()));
+
+  gReclaimCalls = 0;
+  gReclaimFrees = false;
+  bool failedPrepared = false;
+  const auto failed = makeJob("failed", failedPrepared);
+  assert(snapix::pendingImage::enqueue(
+      failed, snapix::pendingImage::Priority::CurrentPage));
+  ImageConverterFactory::failNextConversions = 1;
+  callsBefore = ImageConverterFactory::conversionCalls;
+  assert(snapix::pendingImage::drainOne());
+  assert(gReclaimCalls == 1);
+  assert(ImageConverterFactory::conversionCalls == callsBefore + 1);
+  assert(!LittleFS.exists(failed.targetBmpPath.c_str()));
+  assert(!LittleFS.exists(failed.tempJpegPath.c_str()));
+  cache_fs::setWriteFailureHandler(nullptr);
 
   return 0;
 }

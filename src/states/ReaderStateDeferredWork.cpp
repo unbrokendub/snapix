@@ -12,6 +12,7 @@
 //     loop (the XTC parser's SD handle belongs to the UI task).
 // See reader::DeferredJobSlot for the hand-off protocol.
 
+#include <CacheEviction.h>
 #include <FS.h>
 #include <JpegToBmpConverter.h>
 #include <LittleFS.h>
@@ -64,6 +65,7 @@ void ReaderState::resetDeferredJobs() {
   coverPlaceholderShown_ = false;
   coverGenerationFailed_ = false;
   metricsJob_.reset();
+  cacheReclaimJob_.reset();
   metricsJobIo_ = GlobalMetricsJobIo{};
   metricsDiskProbed_ = false;
   metricsComputeFailed_ = false;
@@ -117,6 +119,11 @@ void ReaderState::queueDeferredJobs(Core& core) {
   if (metricsJob_.state() == SlotState::Pending) {
     send(metricsJob_, AuxKind::GlobalMetrics);
   }
+
+  // Ahead of the cache job that may need the room.
+  if (cacheReclaimJob_.state() == SlotState::Pending) {
+    send(cacheReclaimJob_, AuxKind::CacheReclaim);
+  }
 }
 
 void ReaderState::pollDeferredJobs(Core& core) {
@@ -124,6 +131,12 @@ void ReaderState::pollDeferredJobs(Core& core) {
   // A worker cancel (page turn, overlay) drops queued commands that never ran.
   coverJob_.recoverDropped(workerBusy);
   metricsJob_.recoverDropped(workerBusy);
+  cacheReclaimJob_.recoverDropped(workerBusy);
+  // An aborted pass stays pending in cache_fs::eviction; the slot only carries it.
+  (void)cacheReclaimJob_.consume();
+  if (cacheReclaimJob_.state() == SlotState::Idle && cache_fs::eviction::backgroundPassPending()) {
+    (void)cacheReclaimJob_.request();
+  }
 
   switch (coverJob_.consume()) {
     case SlotState::Done:
@@ -171,6 +184,7 @@ void ReaderState::pollDeferredJobs(Core& core) {
   // Throttled: a job aborted at once (low heap) must not be re-sent every loop.
   const bool deferredWorkPending = (coverJob_.state() == SlotState::Pending && onCoverPage()) ||
                                    metricsJob_.state() == SlotState::Pending ||
+                                   cacheReclaimJob_.state() == SlotState::Pending ||
                                    (metricsSaveDirty_ && globalSectionPageMetricsInitialized_);
   const uint32_t nowMs = millis();
   if (deferredWorkPending && !workerBusy && !needsRender_ && !menuMode_ && !tocMode_ && !bookmarkMode_ &&
@@ -211,6 +225,12 @@ void ReaderState::runAuxJob(const reader::ReaderAsyncJobsController::AuxRequest&
       break;
     case AuxKind::GlobalMetrics:
       runGlobalMetricsJob(shouldAbort);
+      break;
+    case AuxKind::CacheReclaim:
+      // Other books' cache dirs only: no document resources needed.
+      if (!cacheReclaimJob_.begin()) break;
+      cache_fs::eviction::runBackgroundPass(shouldAbort);
+      cacheReclaimJob_.finish(SlotState::Done);
       break;
     case AuxKind::None:
       break;

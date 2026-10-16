@@ -45,6 +45,7 @@ class ReaderAsyncJobsController {
     None,
     CoverImage,     // content cover BMP (JPEG/PNG decode)
     GlobalMetrics,  // whole-book page estimates: compute and/or persist
+    CacheReclaim,   // evict other books' caches / sweep orphans (CacheEviction.h)
   };
   struct AuxRequest {
     AuxJobKind kind = AuxJobKind::None;

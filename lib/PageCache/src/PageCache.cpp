@@ -1,5 +1,6 @@
 #include "PageCache.h"
 
+#include <CacheSpaceHook.h>
 #include <Logging.h>
 #include <MemCheckpoint.h>
 
@@ -298,6 +299,8 @@ bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
     serialization::writePod(file_, pos);
   }
 
+  lutEnd_ = lutOffset + static_cast<uint32_t>(lut.size() * sizeof(uint32_t));
+
   // Update header with final values
   file_.seek(HEADER_SIZE - 4 - 1 - 2);  // Seek to pageCount
   serialization::writePod(file_, pageCount_);
@@ -332,6 +335,32 @@ bool PageCache::writeLut(const std::vector<uint32_t>& lut) {
   closeReadHandle();
 
   return true;
+}
+
+// v3.11.12 — Page::serialize ignores short writes, so a full LittleFS
+// partition shows only as a file shorter than the LUT just written.  Such a
+// file would serve garbage pages: drop it, let cache eviction make room, and
+// report failure so the caller's next pass rebuilds the section.
+bool PageCache::closeAfterLut(const char* what) {
+  file_.flush();
+  closeFile(file_);
+  size_t onDisk = 0;
+  File check = LittleFS.open(cachePath_.c_str(), "r");
+  if (check) {
+    onDisk = check.size();
+    check.close();
+  }
+  if (onDisk >= lutEnd_) return true;
+
+  LOG_ERR(TAG, "[CACHE] short write (%s) path=%s size=%u expected=%u", what, cachePath_.c_str(),
+          static_cast<unsigned>(onDisk), static_cast<unsigned>(lutEnd_));
+  evictCacheFile(cachePath_, "short-write");
+  pageCount_ = 0;
+  isPartial_ = false;
+  pageLut_.clear();
+  clearResidentPages();
+  (void)cache_fs::reclaimAfterWriteFailure(cachePath_.c_str());
+  return false;
 }
 
 bool PageCache::loadLut(std::vector<uint32_t>& lut) {
@@ -654,19 +683,18 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     }
 
     file_ = LittleFS.open(cachePath_.c_str(), "w");
+    if (!file_ && LittleFS.exists(cachePath_.c_str())) {
+      LOG_ERR(TAG, "Retrying cache create after removing stale file: %s", cachePath_.c_str());
+      evictCacheFile(cachePath_, "fresh-create-open-failed");
+      file_ = LittleFS.open(cachePath_.c_str(), "w");
+    }
+    // v3.11.12 — a full partition: evict other books' caches, then retry once.
+    if (!file_ && cache_fs::reclaimAfterWriteFailure(cachePath_.c_str())) {
+      file_ = LittleFS.open(cachePath_.c_str(), "w");
+    }
     if (!file_) {
-      if (LittleFS.exists(cachePath_.c_str())) {
-        LOG_ERR(TAG, "Retrying cache create after removing stale file: %s", cachePath_.c_str());
-        evictCacheFile(cachePath_, "fresh-create-open-failed");
-        file_ = LittleFS.open(cachePath_.c_str(), "w");
-        if (!file_) {
-          LOG_ERR(TAG, "Failed to open cache file for writing");
-          return false;
-        }
-      } else {
-        LOG_ERR(TAG, "Failed to open cache file for writing");
-        return false;
-      }
+      LOG_ERR(TAG, "Failed to open cache file for writing");
+      return false;
     }
 
     config_ = config;
@@ -801,8 +829,10 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
       return false;
     }
 
-    file_.flush();
-    closeFile(file_);
+    if (!closeAfterLut("create-partial")) {
+      parser.reset();  // its position is past pages that were not stored
+      return false;
+    }
     LOG_INF(TAG, "[CACHE] create partial path=%s pages=%u success=%u aborted=%u", cachePath_.c_str(),
             static_cast<unsigned>(pageCount_), static_cast<unsigned>(success), static_cast<unsigned>(aborted));
     perfLog("cache-create", startMs, "(pages=%u partial=%u)", pageCount_, static_cast<unsigned>(isPartial_));
@@ -834,8 +864,10 @@ bool PageCache::create(ContentParser& parser, const RenderConfig& config, uint16
     return false;
   }
 
-  file_.flush();
-  closeFile(file_);
+  if (!closeAfterLut("create")) {
+    parser.reset();  // its position is past pages that were not stored
+    return false;
+  }
   LOG_INF(TAG, "[CACHE] create done path=%s pages=%u partial=%u", cachePath_.c_str(),
           static_cast<unsigned>(pageCount_), static_cast<unsigned>(isPartial_));
   perfLog("cache-create", startMs, "(pages=%u partial=%u)", pageCount_, static_cast<unsigned>(isPartial_));
@@ -930,8 +962,10 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
           LittleFS.remove(cachePath_.c_str());
           return false;
         }
-        file_.flush();
-        closeFile(file_);
+        if (!closeAfterLut("hot-extend-end")) {
+          parser.reset();  // its position is past pages that were not stored
+          return false;
+        }
         LOG_INF(TAG, "[CACHE] hot extend reached end without new pages path=%s pages=%u", cachePath_.c_str(),
                 static_cast<unsigned>(pageCount_));
         return true;
@@ -950,8 +984,10 @@ bool PageCache::extend(ContentParser& parser, uint16_t additionalPages, const Ab
       return false;
     }
 
-    file_.flush();
-    closeFile(file_);
+    if (!closeAfterLut("hot-extend")) {
+      parser.reset();  // its position is past pages that were not stored
+      return false;
+    }
     LOG_INF(TAG, "[CACHE] hot extend done path=%s pages=%u partial=%u", cachePath_.c_str(),
             static_cast<unsigned>(pageCount_), static_cast<unsigned>(isPartial_));
     LOG_INF(TAG, "Hot extend done: %d pages, partial=%d", pageCount_, isPartial_);
