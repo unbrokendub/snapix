@@ -180,6 +180,8 @@ pio run -e release
 pio run -t upload
 ```
 
+From a clean machine (pinned Python/PlatformIO venv, what gets downloaded and
+how much disk it needs, host tests): see [docs/building.md](docs/building.md).
 See [docs/architecture.md](docs/architecture.md) for internals.
 
 ### Converting fonts
